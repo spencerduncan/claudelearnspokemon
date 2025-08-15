@@ -8,12 +8,13 @@ Displays git status, worktree info, test results, and code statistics
 
 import argparse
 import asyncio
+import shlex
 import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from rich.console import Console
 from rich.layout import Layout
@@ -32,12 +33,32 @@ class CIDashboard:
         self.project_root = Path("/home/sd/claudelearnspokemon")
         self.worktrees_root = Path("/home/sd/worktrees")
 
-    def run_command(self, cmd: str, cwd: Optional[Path] = None) -> tuple[int, str, str]:
-        """Run a shell command and return exit code, stdout, stderr."""
+    def run_command(
+        self, cmd: Union[str, list[str]], cwd: Optional[Path] = None
+    ) -> tuple[int, str, str]:
+        """Run a command safely without shell injection vulnerabilities.
+
+        Args:
+            cmd: Command as string (will be parsed) or list of arguments
+            cwd: Working directory for command
+
+        Returns:
+            Tuple of (exit_code, stdout, stderr)
+        """
         try:
+            # Parse command string into safe argument list
+            if isinstance(cmd, str):
+                args = shlex.split(cmd)
+            else:
+                args = cmd
+
+            # Validate that we have at least one argument
+            if not args:
+                return 1, "", "Empty command"
+
             result = subprocess.run(
-                cmd,
-                shell=True,
+                args,
+                shell=False,  # SECURITY: Never use shell=True
                 capture_output=True,
                 text=True,
                 cwd=cwd or self.project_root,
@@ -46,8 +67,10 @@ class CIDashboard:
             return result.returncode, result.stdout, result.stderr
         except subprocess.TimeoutExpired:
             return 1, "", "Command timed out"
+        except (OSError, ValueError) as e:
+            return 1, "", f"Command execution error: {str(e)}"
         except Exception as e:
-            return 1, "", str(e)
+            return 1, "", f"Unexpected error: {str(e)}"
 
     def get_cached_result(
         self, key: str, cache_duration: int, func: Any, *args: Any, **kwargs: Any
@@ -63,6 +86,36 @@ class CIDashboard:
         self.cache_times[key] = now
         return result
 
+    def _safe_git_command(
+        self, args: list[str], cwd: Optional[Path] = None
+    ) -> tuple[int, str, str]:
+        """Execute a git command safely with argument validation.
+
+        Args:
+            args: Git command arguments (without 'git' prefix)
+            cwd: Working directory
+
+        Returns:
+            Tuple of (exit_code, stdout, stderr)
+        """
+        # Validate git arguments to prevent injection
+        safe_args = ["git"] + [str(arg) for arg in args if arg is not None]
+        return self.run_command(safe_args, cwd)
+
+    def _safe_gh_command(self, args: list[str], cwd: Optional[Path] = None) -> tuple[int, str, str]:
+        """Execute a gh CLI command safely with argument validation.
+
+        Args:
+            args: GitHub CLI command arguments (without 'gh' prefix)
+            cwd: Working directory
+
+        Returns:
+            Tuple of (exit_code, stdout, stderr)
+        """
+        # Validate gh arguments to prevent injection
+        safe_args = ["gh"] + [str(arg) for arg in args if arg is not None]
+        return self.run_command(safe_args, cwd)
+
     def get_git_status(self) -> dict[str, Any]:
         """Get current git status information."""
 
@@ -76,13 +129,13 @@ class CIDashboard:
             }
 
             # Get current branch
-            code, stdout, _ = self.run_command("git branch --show-current")
+            code, stdout, _ = self._safe_git_command(["branch", "--show-current"])
             if code == 0:
                 status["branch"] = stdout.strip() or "main"
 
             # Get ahead/behind status
-            code, stdout, _ = self.run_command(
-                "git rev-list --left-right --count origin/main...HEAD"
+            code, stdout, _ = self._safe_git_command(
+                ["rev-list", "--left-right", "--count", "origin/main...HEAD"]
             )
             if code == 0 and stdout:
                 parts = stdout.strip().split()
@@ -91,12 +144,12 @@ class CIDashboard:
                     status["ahead"] = int(parts[1])
 
             # Get uncommitted changes
-            code, stdout, _ = self.run_command("git status --porcelain")
+            code, stdout, _ = self._safe_git_command(["status", "--porcelain"])
             if code == 0:
                 status["uncommitted"] = len([line for line in stdout.splitlines() if line.strip()])
 
             # Get last 3 commits
-            code, stdout, _ = self.run_command("git log --oneline -3")
+            code, stdout, _ = self._safe_git_command(["log", "--oneline", "-3"])
             if code == 0:
                 status["last_commits"] = stdout.strip().splitlines()[:3]
 
@@ -131,26 +184,32 @@ class CIDashboard:
                 }
 
                 # Get branch name
-                code, stdout, _ = self.run_command("git branch --show-current", cwd=worktree_dir)
+                code, stdout, _ = self._safe_git_command(
+                    ["branch", "--show-current"], cwd=worktree_dir
+                )
                 if code == 0:
                     branch_name = stdout.strip()
                     worktree["branch"] = branch_name or "unknown"
 
                     # Check if branch is merged into main
                     if branch_name:
-                        code, stdout, _ = self.run_command(
-                            f"git branch -r --merged main 2>/dev/null | grep '{branch_name}' || echo ''",
+                        # Use git merge-base to safely check if branch is merged
+                        code, stdout, _ = self._safe_git_command(
+                            ["merge-base", "--is-ancestor", branch_name, "origin/main"],
                             cwd=worktree_dir,
                         )
-                        if code == 0 and stdout.strip():
+                        if code == 0:  # Branch is ancestor of main (merged)
                             worktree["pr_status"] = "merged"
                             worktree["status"] = "merged"
                         else:
                             # Check for active PR using gh CLI (fallback gracefully if not available)
-                            code, stdout, _ = self.run_command(
-                                f"gh pr list --head {branch_name} --json number,state 2>/dev/null || echo '[]'",
+                            code, stdout, _ = self._safe_gh_command(
+                                ["pr", "list", "--head", branch_name, "--json", "number,state"],
                                 cwd=worktree_dir,
                             )
+                            # If gh command fails, try to get empty JSON array
+                            if code != 0:
+                                stdout = "[]"
                             if code == 0 and stdout.strip():
                                 try:
                                     import json
@@ -172,7 +231,9 @@ class CIDashboard:
                                     pass
 
                 # Get last commit time
-                code, stdout, _ = self.run_command("git log -1 --format=%ct", cwd=worktree_dir)
+                code, stdout, _ = self._safe_git_command(
+                    ["log", "-1", "--format=%ct"], cwd=worktree_dir
+                )
                 if code == 0 and stdout.strip():
                     timestamp = int(stdout.strip())
                     worktree["last_modified"] = datetime.fromtimestamp(timestamp)
@@ -204,7 +265,9 @@ class CIDashboard:
                             worktree["last_modified_relative"] = f"{delta.days}d ago"
 
                 # Get uncommitted changes
-                code, stdout, _ = self.run_command("git status --porcelain", cwd=worktree_dir)
+                code, stdout, _ = self._safe_git_command(
+                    ["status", "--porcelain"], cwd=worktree_dir
+                )
                 if code == 0:
                     worktree["uncommitted"] = len(
                         [line for line in stdout.splitlines() if line.strip()]
@@ -230,7 +293,9 @@ class CIDashboard:
             }
 
             # Count total tests using pytest --collect-only
-            code, stdout, stderr = self.run_command("python -m pytest tests/ --collect-only -q")
+            code, stdout, stderr = self.run_command(
+                ["python", "-m", "pytest", "tests/", "--collect-only", "-q"]
+            )
             # Check if collection succeeded (code 0) or had errors but still collected tests (code 2)
             if code == 0 or (code == 2 and "collected" in stdout):
                 # Count lines that look like test functions: <Function test_*> or <Method test_*>
@@ -256,9 +321,22 @@ class CIDashboard:
                 should_run_tests = False
 
             if should_run_tests:
+                # Use timeout command safely
                 code, stdout, stderr = self.run_command(
-                    "timeout 30 python -m pytest tests/ -v --tb=no --no-header || echo 'TIMEOUT_OR_ERROR'"
+                    [
+                        "timeout",
+                        "30",
+                        "python",
+                        "-m",
+                        "pytest",
+                        "tests/",
+                        "-v",
+                        "--tb=no",
+                        "--no-header",
+                    ]
                 )
+                if code != 0:
+                    stdout += "\nTIMEOUT_OR_ERROR"
             else:
                 # Skip test execution due to collection errors
                 stdout = "TIMEOUT_OR_ERROR - Collection errors prevent execution"
@@ -297,8 +375,32 @@ class CIDashboard:
 
             # Try to get real coverage using pytest-cov
             code, stdout, _ = self.run_command(
-                "timeout 30 python -m pytest tests/ --cov=src --cov=claudelearnspokemon --cov-report=term-missing --tb=no -q | grep '^TOTAL' || echo 'NO_COVERAGE'"
+                [
+                    "timeout",
+                    "30",
+                    "python",
+                    "-m",
+                    "pytest",
+                    "tests/",
+                    "--cov=src",
+                    "--cov=claudelearnspokemon",
+                    "--cov-report=term-missing",
+                    "--tb=no",
+                    "-q",
+                ]
             )
+
+            # Extract TOTAL line from coverage output
+            if code == 0 and stdout:
+                import re
+
+                total_match = re.search(r"^TOTAL.*", stdout, re.MULTILINE)
+                if total_match:
+                    stdout = total_match.group(0)
+                else:
+                    stdout = "NO_COVERAGE"
+            else:
+                stdout = "NO_COVERAGE"
 
             if code == 0 and "NO_COVERAGE" not in stdout and "%" in stdout:
                 # Parse coverage line like "TOTAL    1234    567    54%"
@@ -333,19 +435,29 @@ class CIDashboard:
             }
 
             # Check ruff
-            code, stdout, _ = self.run_command("ruff check src/ tests/ 2>/dev/null | wc -l")
-            if code == 0:
-                lines = int(stdout.strip() or 0)
-                quality["ruff_violations"] = max(0, lines - 1)  # Subtract header line
-
+            code, stdout, _ = self.run_command(["ruff", "check", "src/", "tests/"])
+            if code != 0:
+                # Count lines in stderr for violations
+                violations = len([line for line in stdout.splitlines() if line.strip()])
+                quality["ruff_violations"] = violations
+            else:
+                quality["ruff_violations"] = 0
             # Check black
-            code, _, _ = self.run_command("black --check src/ tests/ 2>/dev/null")
+            code, _, _ = self.run_command(["black", "--check", "src/", "tests/"])
             quality["black_status"] = "formatted" if code == 0 else "needs formatting"
 
             # Check mypy
-            code, stdout, _ = self.run_command("mypy src/ 2>/dev/null | grep -E '^src/' | wc -l")
-            if code == 0:
-                quality["mypy_errors"] = int(stdout.strip() or 0)
+            code, stdout, _ = self.run_command(["mypy", "src/"])
+            if code != 0:
+                # Count error lines that start with 'src/'
+                import re
+
+                error_lines = [
+                    line for line in stdout.splitlines() if re.match(r"^src/", line.strip())
+                ]
+                quality["mypy_errors"] = len(error_lines)
+            else:
+                quality["mypy_errors"] = 0
 
             # Check pre-commit
             if (self.project_root / ".git" / "hooks" / "pre-commit").exists():
@@ -365,7 +477,23 @@ class CIDashboard:
 
             # Find all Python files in project (excluding venv, .git, __pycache__ etc.)
             code, stdout, _ = self.run_command(
-                "find . -name '*.py' -type f -not -path './venv/*' -not -path './.git/*' -not -path '*/__pycache__/*'"
+                [
+                    "find",
+                    ".",
+                    "-name",
+                    "*.py",
+                    "-type",
+                    "f",
+                    "-not",
+                    "-path",
+                    "./venv/*",
+                    "-not",
+                    "-path",
+                    "./.git/*",
+                    "-not",
+                    "-path",
+                    "*/__pycache__/*",
+                ]
             )
 
             if code == 0:
@@ -374,7 +502,8 @@ class CIDashboard:
                 # Get line counts for each file
                 file_sizes = []
                 for file_path in py_files:
-                    code, stdout, _ = self.run_command(f"wc -l {file_path}")
+                    # Use wc safely with file path as separate argument
+                    code, stdout, _ = self.run_command(["wc", "-l", file_path])
                     if code == 0:
                         parts = stdout.strip().split()
                         if parts:
@@ -390,11 +519,28 @@ class CIDashboard:
 
             # Count files by extension (using same exclusion pattern for consistency)
             for ext in [".py", ".md", ".sh", ".toml", ".yml", ".yaml"]:
-                code, stdout, _ = self.run_command(
-                    f"find . -name '*{ext}' -type f -not -path './venv/*' -not -path './.git/*' -not -path '*/__pycache__/*' | wc -l"
-                )
+                # Build find command with safe arguments
+                find_args = [
+                    "find",
+                    ".",
+                    "-name",
+                    f"*{ext}",
+                    "-type",
+                    "f",
+                    "-not",
+                    "-path",
+                    "./venv/*",
+                    "-not",
+                    "-path",
+                    "./.git/*",
+                    "-not",
+                    "-path",
+                    "*/__pycache__/*",
+                ]
+                code, stdout, _ = self.run_command(find_args)
                 if code == 0:
-                    count = int(stdout.strip() or 0)
+                    # Count lines in output instead of using shell pipe
+                    count = len([line for line in stdout.splitlines() if line.strip()])
                     if count > 0:
                         stats["file_counts"][ext] = count
 
@@ -418,14 +564,14 @@ class CIDashboard:
 
             try:
                 # Check if gh CLI is available
-                code, _, stderr = self.run_command("gh --version")
+                code, _, stderr = self.run_command(["gh", "--version"])
                 if code != 0:
                     pr_data["error"] = "gh CLI not available"
                     return pr_data
 
                 # Get list of open PRs
-                code, stdout, stderr = self.run_command(
-                    "gh pr list --state=open --json number,title,author,url"
+                code, stdout, stderr = self._safe_gh_command(
+                    ["pr", "list", "--state=open", "--json", "number,title,author,url"]
                 )
 
                 if code != 0:
@@ -462,8 +608,14 @@ class CIDashboard:
                     }
 
                     # Get detailed PR info including comments and diff stats
-                    code, stdout, _ = self.run_command(
-                        f"gh pr view {pr_number} --json comments,additions,deletions,commits"
+                    code, stdout, _ = self._safe_gh_command(
+                        [
+                            "pr",
+                            "view",
+                            str(pr_number),
+                            "--json",
+                            "comments,additions,deletions,commits",
+                        ]
                     )
                     if code == 0:
                         try:
@@ -476,8 +628,8 @@ class CIDashboard:
                             pass  # Use defaults
 
                     # Get CI status
-                    code, stdout, _ = self.run_command(
-                        f"gh pr checks {pr_number} --json name,state,conclusion"
+                    code, stdout, _ = self._safe_gh_command(
+                        ["pr", "checks", str(pr_number), "--json", "name,state,conclusion"]
                     )
                     if code == 0 and stdout.strip():
                         try:
@@ -505,7 +657,9 @@ class CIDashboard:
                         pr_info["ci_status"] = "none"
 
                     # Get review status
-                    code, stdout, _ = self.run_command(f"gh pr view {pr_number} --json reviews")
+                    code, stdout, _ = self._safe_gh_command(
+                        ["pr", "view", str(pr_number), "--json", "reviews"]
+                    )
                     if code == 0:
                         try:
                             pr_detail = json.loads(stdout)
