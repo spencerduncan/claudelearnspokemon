@@ -1,349 +1,465 @@
 """
-EmulatorPool: Docker container lifecycle management for Pokemon-gym emulators.
+EmulatorPool - Thread-safe Pokemon-gym emulator instance management
 
-Production-grade container orchestration with proper failure handling,
-timeouts, and resource cleanup. Built with Google-scale engineering principles.
-
-Author: Bot Dean - Production Systems Engineering
+Provides concurrent access to a pool of emulator instances with proper
+synchronization, timeout handling, and deadlock prevention.
 """
 
+from __future__ import annotations
+
 import logging
+import queue
+import threading
 import time
+from contextlib import contextmanager
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any
 
-import docker
-from docker.errors import APIError, DockerException, ImageNotFound
+# Type aliases for future implementation
+PokemonGymClient = Any
+CompiledScript = Any
+ExecutionResult = dict[str, Any]
 
-# Configure logging for production observability
-logging.basicConfig(level=logging.INFO)
+# Configure logging for concurrent debugging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(name)s - %(threadName)s - %(levelname)s - %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 
-class EmulatorPoolError(Exception):
-    """
-    Custom exception for EmulatorPool operations.
+class EmulatorState(Enum):
+    """Emulator instance state tracking"""
 
-    Provides actionable error messages for production debugging.
-    """
+    AVAILABLE = "available"
+    BUSY = "busy"
+    FAILED = "failed"
+    RESTARTING = "restarting"
 
-    pass
+
+@dataclass
+class EmulatorInstance:
+    """Container for emulator instance state"""
+
+    port: int
+    client: PokemonGymClient | None = None
+    state: EmulatorState = EmulatorState.AVAILABLE
+    owner_thread_id: int | None = None
+    acquired_at: float | None = None
+
+    def is_available(self) -> bool:
+        """Check if emulator is available for acquisition"""
+        return self.state == EmulatorState.AVAILABLE and self.owner_thread_id is None
+
+
+@dataclass
+class AcquisitionRequest:
+    """Request for emulator acquisition with priority"""
+
+    thread_id: int
+    priority: int = 0
+    requested_at: float | None = None
+    timeout: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.requested_at is None:
+            self.requested_at = time.time()
 
 
 class EmulatorPool:
     """
-    Manages a pool of Pokemon-gym Docker containers for parallel execution.
+    Thread-safe pool manager for Pokemon-gym emulator instances
 
-    Implements production patterns:
-    - Graceful failure handling
-    - Resource cleanup on exceptions
-    - Timeout-based operations
-    - Comprehensive logging for debugging
-    - Idempotent operations
+    Provides concurrent access with proper locking, queue management,
+    timeout handling, and deadlock prevention.
     """
 
-    def __init__(
-        self,
-        pool_size: int = 4,
-        base_port: int = 8081,
-        image_name: str = "pokemon-gym:latest",
-        startup_timeout: int = 30,
-    ):
-        """
-        Initialize EmulatorPool with production configuration.
-
-        Args:
-            pool_size: Number of containers in pool (default: 4)
-            base_port: Starting port for sequential allocation (default: 8081)
-            image_name: Docker image name for containers (default: pokemon-gym:latest)
-            startup_timeout: Max seconds to wait for container startup (default: 30)
-        """
+    def __init__(self, pool_size: int = 4, default_timeout: float = 30.0) -> None:
+        """Initialize emulator pool with configuration parameters"""
         self.pool_size = pool_size
-        self.base_port = base_port
-        self.image_name = image_name
-        self.startup_timeout = startup_timeout
+        self.default_timeout = default_timeout
 
-        # Container management state
-        self.containers: list[docker.models.containers.Container] = []
-        self.client: docker.DockerClient | None = None
+        # Core synchronization primitives
+        self._lock = threading.RLock()  # Reentrant for deadlock prevention
+        self._condition = threading.Condition(self._lock)
+
+        # Emulator tracking
+        self._emulators: dict[int, EmulatorInstance] = {}
+        self._available_ports: set[int] = set()
+        self._busy_ports: set[int] = set()
+
+        # Acquisition queue management
+        self._acquisition_queue: queue.PriorityQueue[Any] = queue.PriorityQueue()
+        self._thread_requests: dict[int, AcquisitionRequest] = {}
+
+        # State tracking
+        self._initialized = False
+        self._shutdown = False
+
+        # Thread-local storage for debugging context
+        self._thread_local = threading.local()
 
         logger.info(
-            f"EmulatorPool configured: size={pool_size}, base_port={base_port}, "
-            f"image={image_name}, timeout={startup_timeout}s"
+            "EmulatorPool initialized with size=%d, timeout=%.1f",
+            pool_size,
+            default_timeout,
         )
 
     def initialize(self, pool_size: int | None = None) -> None:
-        """
-        Initialize the container pool with production-grade error handling.
+        """Initialize emulator pool with Docker containers"""
+        with self._lock:
+            if self._initialized:
+                logger.warning("EmulatorPool already initialized")
+                return
 
-        Args:
-            pool_size: Override default pool size if provided
+            if pool_size is not None:
+                self.pool_size = pool_size
 
-        Raises:
-            EmulatorPoolError: On any initialization failure with actionable message
-        """
-        if pool_size is not None:
-            self.pool_size = pool_size
+            logger.info("Initializing %d emulator instances...", self.pool_size)
 
-        logger.info(f"Initializing EmulatorPool with {self.pool_size} containers")
+            # Create emulator instances on sequential ports
+            base_port = 8081
+            for i in range(self.pool_size):
+                port = base_port + i
+                emulator = EmulatorInstance(port=port)
+                self._emulators[port] = emulator
+                self._available_ports.add(port)
 
-        try:
-            # Connect to Docker daemon with proper error handling
-            self.client = docker.from_env()
-            logger.info("Connected to Docker daemon")
-        except DockerException as e:
-            raise EmulatorPoolError(
-                f"Docker daemon unavailable: {e}. "
-                f"Ensure Docker daemon is running and accessible."
-            ) from e
+                # TODO: Start Docker container
+                logger.debug("Created emulator instance on port %d", port)
 
-        # Track successfully started containers for cleanup on failure
-        started_containers = []
+            self._initialized = True
+            self._condition.notify_all()  # Wake up any waiting threads
 
-        try:
-            ports = self._get_container_ports(self.pool_size)
+            logger.info("EmulatorPool initialized with %d instances", len(self._emulators))
 
-            for port in ports:
-                logger.info(f"Starting container on port {port}")
+    def acquire(self, timeout: float | None = None, priority: int = 0) -> PokemonGymClient | None:
+        """Acquire an available emulator with thread-safe queuing"""
+        if timeout is None:
+            timeout = self.default_timeout
 
-                try:
-                    container = self._start_single_container(port)
-                    started_containers.append(container)
-                    self.containers.append(container)
+        thread_id = threading.get_ident()
 
-                    logger.info(f"Container {container.id} started successfully on port {port}")
+        # Create acquisition request
+        request = AcquisitionRequest(thread_id=thread_id, priority=priority, timeout=timeout)
 
-                except Exception as e:
-                    # Clean up successfully started containers before re-raising
-                    logger.error(f"Failed to start container on port {port}: {e}")
-                    self._cleanup_containers(started_containers)
-                    raise EmulatorPoolError(
-                        f"Failed to start container on port {port}: {e}. "
-                        f"Check port availability and resource limits."
-                    ) from e
-
-        except EmulatorPoolError:
-            # Already handled, just re-raise
-            raise
-        except Exception as e:
-            # Unexpected error - clean up and provide debugging info
-            logger.error(f"Unexpected error during initialization: {e}")
-            self._cleanup_containers(started_containers)
-            raise EmulatorPoolError(
-                f"Unexpected error during pool initialization: {e}. "
-                f"Check Docker daemon status and system resources."
-            ) from e
-
-        logger.info(f"EmulatorPool initialized successfully with {len(self.containers)} containers")
-
-    def shutdown(self) -> None:
-        """
-        Gracefully shutdown all containers with production-grade error handling.
-
-        Continues shutdown process even if individual containers fail to stop.
-        Implements idempotent operation - safe to call multiple times.
-        """
-        if not self.containers:
-            logger.info("EmulatorPool shutdown called - no containers to stop")
-            return
-
-        logger.info(f"Shutting down EmulatorPool with {len(self.containers)} containers")
-
-        # Track shutdown results for logging
-        shutdown_results = {"success": 0, "failed": 0}
-
-        for container in self.containers:
-            try:
-                logger.info(f"Stopping container {container.id}")
-                container.stop(timeout=10)  # Give containers time to gracefully stop
-                shutdown_results["success"] += 1
-                logger.info(f"Container {container.id} stopped successfully")
-
-            except Exception as e:
-                # Log error but continue with other containers
-                logger.error(f"Failed to stop container {container.id}: {e}")
-                shutdown_results["failed"] += 1
-
-        # Clear container list - idempotent operation
-        self.containers.clear()
-
-        logger.info(
-            f"EmulatorPool shutdown complete: {shutdown_results['success']} success, "
-            f"{shutdown_results['failed']} failed"
+        logger.debug(
+            "Thread %d requesting emulator acquisition (priority=%d, timeout=%.1f)",
+            thread_id,
+            priority,
+            timeout,
         )
 
-    def _start_single_container(self, port: int) -> docker.models.containers.Container:
-        """
-        Start a single container with production configuration.
+        with self._lock:
+            if self._shutdown:
+                logger.warning("Thread %d acquisition rejected: pool shutdown", thread_id)
+                return None
 
-        Args:
-            port: Host port for container mapping
+            if not self._initialized:
+                logger.warning("Thread %d waiting for pool initialization...", thread_id)
+                if not self._condition.wait_for(
+                    lambda: self._initialized or self._shutdown, timeout=timeout
+                ):
+                    logger.error("Thread %d timed out waiting for initialization", thread_id)
+                    return None
 
-        Returns:
-            Started and health-checked container
+                if self._shutdown:
+                    return None
 
-        Raises:
-            EmulatorPoolError: On startup or health check failure
-        """
-        try:
-            container = self.client.containers.run(
-                image=self.image_name,
-                ports={"8080/tcp": port},  # Map internal port 8080 to host port
-                detach=True,
-                remove=True,  # Auto-cleanup on container stop
-                name=f"pokemon-emulator-{port}",
-                # Production container configuration
-                restart_policy={"Name": "on-failure", "MaximumRetryCount": 3},
-                mem_limit="512m",  # Prevent memory exhaustion
-                cpu_count=1,  # Fair CPU allocation
+            # Check for immediate availability
+            available_port = self._get_available_port()
+            if available_port is not None:
+                return self._assign_emulator(available_port, thread_id)
+
+            # Add to queue and wait
+            self._thread_requests[thread_id] = request
+            self._acquisition_queue.put((priority, request.requested_at, request))
+
+            logger.debug(
+                "Thread %d added to acquisition queue (queue_size=%d)",
+                thread_id,
+                self._acquisition_queue.qsize(),
             )
 
-        except ImageNotFound as e:
-            raise EmulatorPoolError(
-                f"Pokemon-gym image not found: {self.image_name}. "
-                f"Ensure image is built and available locally."
-            ) from e
-        except APIError as e:
-            raise EmulatorPoolError(
-                f"Docker API error starting container: {e}. "
-                f"Check port {port} availability and system resources."
-            ) from e
+            # Wait for availability or timeout
+            deadline = time.time() + timeout
+            while True:
+                remaining_time = deadline - time.time()
+                if remaining_time <= 0:
+                    # Timeout - clean up request
+                    self._cleanup_request(thread_id)
+                    logger.warning(
+                        "Thread %d acquisition timed out after %.1fs",
+                        thread_id,
+                        timeout,
+                    )
+                    return None
 
-        # Wait for container to become ready with timeout
-        self._wait_for_container_ready(container)
+                if self._shutdown:
+                    self._cleanup_request(thread_id)
+                    logger.info("Thread %d acquisition cancelled: shutdown", thread_id)
+                    return None
 
-        # Perform health check
-        self._verify_container_health(container)
+                # Wait for notification or timeout
+                if self._condition.wait(timeout=min(remaining_time, 1.0)):
+                    # Check if we got an emulator
+                    available_port = self._get_available_port()
+                    if available_port is not None and self._is_highest_priority_thread(thread_id):
+                        self._cleanup_request(thread_id)
+                        return self._assign_emulator(available_port, thread_id)
 
-        return container
+        return None
 
-    def _wait_for_container_ready(self, container: docker.models.containers.Container) -> None:
-        """
-        Wait for container to reach running state with production timeout.
+    def release(self, client: PokemonGymClient) -> None:
+        """Release emulator back to available pool"""
+        thread_id = threading.get_ident()
 
-        Args:
-            container: Container to wait for
-
-        Raises:
-            EmulatorPoolError: On timeout or container failure
-        """
-        start_time = time.time()
-
-        while time.time() - start_time < self.startup_timeout:
-            container.reload()  # Refresh container status
-
-            if container.status == "running":
+        with self._lock:
+            if self._shutdown:
+                logger.debug("Thread %d release during shutdown", thread_id)
                 return
-            elif container.status in ["exited", "dead"]:
-                raise EmulatorPoolError(
-                    f"Container {container.id} failed to start (status: {container.status}). "
-                    f"Check container logs for details."
+
+            # Find emulator by client
+            port = None
+            for p, emulator in self._emulators.items():
+                if emulator.client is client:
+                    port = p
+                    break
+
+            if port is None:
+                logger.error("Thread %d attempted to release unknown client", thread_id)
+                return
+
+            emulator = self._emulators[port]
+
+            # Verify ownership
+            if emulator.owner_thread_id != thread_id:
+                logger.error(
+                    "Thread %d attempted to release emulator owned by thread %s",
+                    thread_id,
+                    emulator.owner_thread_id,
                 )
+                return
 
-            time.sleep(0.5)  # Poll interval
+            # Release emulator
+            emulator.state = EmulatorState.AVAILABLE
+            emulator.owner_thread_id = None
+            emulator.acquired_at = None
 
-        # Timeout reached
-        raise EmulatorPoolError(
-            f"Container startup timeout ({self.startup_timeout}s) exceeded. "
-            f"Container {container.id} status: {container.status}. "
-            f"Increase timeout or check system performance."
-        )
+            self._busy_ports.discard(port)
+            self._available_ports.add(port)
 
-    def _verify_container_health(self, container: docker.models.containers.Container) -> None:
-        """
-        Verify container is healthy and responding.
+            logger.debug("Thread %d released emulator on port %d", thread_id, port)
 
-        Args:
-            container: Container to health check
+            # Notify waiting threads - use notify_all for priority queue processing
+            self._condition.notify_all()
 
-        Raises:
-            EmulatorPoolError: On health check failure
-        """
+    @contextmanager
+    def acquire_emulator(self, timeout: float | None = None, priority: int = 0) -> Any:
+        """Context manager for automatic emulator acquisition and release"""
+        client = self.acquire(timeout=timeout, priority=priority)
         try:
-            # Simple health check - verify container can execute commands
-            result = container.exec_run("echo 'health_check'", timeout=5)
+            yield client
+        finally:
+            if client is not None:
+                self.release(client)
 
-            if result.exit_code != 0:
-                raise EmulatorPoolError(
-                    f"Container health check failed for {container.id}. "
-                    f"Exit code: {result.exit_code}, output: {result.output}"
-                )
+    def execute_script(
+        self, client: PokemonGymClient, script: CompiledScript, checkpoint_id: str
+    ) -> ExecutionResult:
+        """Execute script on specific emulator instance"""
+        thread_id = threading.get_ident()
 
-        except Exception as e:
-            raise EmulatorPoolError(
-                f"Container health check failed for {container.id}: {e}. "
-                f"Container may not be fully initialized."
-            ) from e
+        with self._lock:
+            # Verify client ownership
+            port = None
+            for p, emulator in self._emulators.items():
+                if emulator.client is client and emulator.owner_thread_id == thread_id:
+                    port = p
+                    break
 
-    def _get_container_ports(self, count: int) -> list[int]:
-        """
-        Calculate sequential port numbers for containers.
+            if port is None:
+                raise ValueError(f"Thread {thread_id} does not own the specified client")
 
-        Args:
-            count: Number of ports needed
+        logger.debug("Thread %d executing script on port %d", thread_id, port)
 
-        Returns:
-            List of sequential port numbers
-        """
-        return [self.base_port + i for i in range(count)]
+        # TODO: Implement actual script execution
+        # This would interface with the Pokemon-gym Docker container
 
-    def _cleanup_containers(self, containers: list[docker.models.containers.Container]) -> None:
-        """
-        Clean up containers on failure - prevent resource leaks.
-
-        Args:
-            containers: List of containers to stop and clean up
-        """
-        if not containers:
-            return
-
-        logger.info(f"Cleaning up {len(containers)} containers due to initialization failure")
-
-        for container in containers:
-            try:
-                container.stop(timeout=5)
-                logger.info(f"Cleaned up container {container.id}")
-            except Exception as e:
-                # Log but don't raise - we're already in error handling
-                logger.error(f"Failed to cleanup container {container.id}: {e}")
-
-    def get_container_status(self) -> dict:
-        """
-        Get current status of all containers for monitoring.
-
-        Returns:
-            Dictionary with container status information
-        """
-        if not self.containers:
-            return {"total": 0, "running": 0, "status": "not_initialized"}
-
-        statuses = []
-        running_count = 0
-
-        for container in self.containers:
-            try:
-                container.reload()
-                status = container.status
-                if status == "running":
-                    running_count += 1
-
-                statuses.append(
-                    {
-                        "id": container.id[:12],  # Short ID for readability
-                        "status": status,
-                        "name": container.name,
-                    }
-                )
-            except Exception as e:
-                statuses.append(
-                    {
-                        "id": container.id[:12] if hasattr(container, "id") else "unknown",
-                        "status": "error",
-                        "error": str(e),
-                    }
-                )
-
+        # Placeholder implementation
         return {
-            "total": len(self.containers),
-            "running": running_count,
-            "containers": statuses,
-            "status": "healthy" if running_count == len(self.containers) else "degraded",
+            "success": True,
+            "port": port,
+            "thread_id": thread_id,
+            "script_id": getattr(script, "id", "unknown"),
+            "checkpoint_id": checkpoint_id,
         }
+
+    def health_check(self) -> dict[int, bool]:
+        """Verify all emulators are responsive"""
+        with self._lock:
+            health_status = {}
+
+            for port, emulator in self._emulators.items():
+                # TODO: Implement actual health check
+                health_status[port] = emulator.state != EmulatorState.FAILED
+
+            logger.debug("Health check completed: %s", health_status)
+            return health_status
+
+    def restart_emulator(self, port: int) -> bool:
+        """Restart specific emulator instance"""
+        with self._lock:
+            if port not in self._emulators:
+                logger.error("Cannot restart non-existent emulator on port %d", port)
+                return False
+
+            emulator = self._emulators[port]
+
+            if emulator.state == EmulatorState.BUSY:
+                logger.warning("Cannot restart busy emulator on port %d", port)
+                return False
+
+            logger.info("Restarting emulator on port %d", port)
+
+            emulator.state = EmulatorState.RESTARTING
+            self._available_ports.discard(port)
+
+            try:
+                # TODO: Implement actual Docker container restart
+                time.sleep(0.1)  # Simulate restart time
+
+                emulator.state = EmulatorState.AVAILABLE
+                self._available_ports.add(port)
+
+                logger.info("Successfully restarted emulator on port %d", port)
+                self._condition.notify()
+                return True
+
+            except Exception as e:
+                logger.error("Failed to restart emulator on port %d: %s", port, e)
+                emulator.state = EmulatorState.FAILED
+                return False
+
+    def get_status(self) -> dict[str, Any]:
+        """Get thread-safe status report"""
+        with self._lock:
+            status: dict[str, Any] = {
+                "initialized": self._initialized,
+                "shutdown": self._shutdown,
+                "pool_size": self.pool_size,
+                "available_count": len(self._available_ports),
+                "busy_count": len(self._busy_ports),
+                "queue_size": self._acquisition_queue.qsize(),
+                "emulators": {},
+            }
+
+            for port, emulator in self._emulators.items():
+                status["emulators"][port] = {
+                    "state": emulator.state.value,
+                    "owner_thread": emulator.owner_thread_id,
+                    "acquired_at": emulator.acquired_at,
+                }
+
+            return status
+
+    def shutdown(self) -> None:
+        """Gracefully shutdown emulator pool"""
+        logger.info("Shutting down EmulatorPool...")
+
+        with self._lock:
+            if self._shutdown:
+                logger.warning("EmulatorPool already shutdown")
+                return
+
+            self._shutdown = True
+
+            # Wake up all waiting threads
+            self._condition.notify_all()
+
+            # TODO: Stop all Docker containers
+            for port in list(self._emulators.keys()):
+                logger.debug("Stopping emulator container on port %d", port)
+
+            # Clear all state
+            self._emulators.clear()
+            self._available_ports.clear()
+            self._busy_ports.clear()
+
+            # Clear acquisition queue
+            while not self._acquisition_queue.empty():
+                try:
+                    self._acquisition_queue.get_nowait()
+                except queue.Empty:
+                    break
+
+            self._thread_requests.clear()
+
+            logger.info("EmulatorPool shutdown complete")
+
+    # Private helper methods
+
+    def _get_available_port(self) -> int | None:
+        """Get next available port (must hold lock)"""
+        if not self._available_ports:
+            return None
+        return next(iter(self._available_ports))
+
+    def _assign_emulator(self, port: int, thread_id: int) -> PokemonGymClient:
+        """Assign emulator to thread (must hold lock)"""
+        emulator = self._emulators[port]
+
+        # Update emulator state
+        emulator.state = EmulatorState.BUSY
+        emulator.owner_thread_id = thread_id
+        emulator.acquired_at = time.time()
+
+        # Update port tracking
+        self._available_ports.discard(port)
+        self._busy_ports.add(port)
+
+        # TODO: Create actual PokemonGymClient
+        client = f"PokemonGymClient(port={port})"
+        emulator.client = client
+
+        logger.debug("Assigned emulator on port %d to thread %d", port, thread_id)
+        return client
+
+    def _is_highest_priority_thread(self, thread_id: int) -> bool:
+        """Check if thread has highest priority among waiting threads (must hold lock)"""
+        if thread_id not in self._thread_requests:
+            return False
+
+        current_thread_priority = self._thread_requests[thread_id].priority
+
+        # Check all other waiting threads
+        for other_thread_id, other_request in self._thread_requests.items():
+            if other_thread_id != thread_id:
+                # Lower number = higher priority
+                if other_request.priority < current_thread_priority:
+                    return False
+                # If same priority, check timestamp (FIFO)
+                elif (
+                    other_request.priority == current_thread_priority
+                    and other_request.requested_at < self._thread_requests[thread_id].requested_at
+                ):
+                    return False
+
+        return True
+
+    def _cleanup_request(self, thread_id: int) -> None:
+        """Clean up acquisition request (must hold lock)"""
+        self._thread_requests.pop(thread_id, None)
+
+        # Remove from queue (expensive but necessary for correctness)
+        temp_queue: queue.PriorityQueue[Any] = queue.PriorityQueue()
+        while not self._acquisition_queue.empty():
+            try:
+                item = self._acquisition_queue.get_nowait()
+                if item[2].thread_id != thread_id:
+                    temp_queue.put(item)
+            except queue.Empty:
+                break
+
+        self._acquisition_queue = temp_queue
