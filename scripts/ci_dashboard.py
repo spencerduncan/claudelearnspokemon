@@ -105,7 +105,7 @@ class CIDashboard:
         return self.get_cached_result("git_status", 10, _fetch_git_status)
 
     def get_worktree_status(self) -> list[dict[str, Any]]:
-        """Get status of all worktrees."""
+        """Get status of all worktrees with PR status information."""
 
         def _fetch_worktree_status() -> list[dict[str, Any]]:
             worktrees: list[dict[str, Any]] = []
@@ -125,12 +125,51 @@ class CIDashboard:
                     "uncommitted": 0,
                     "branch": "unknown",
                     "status": "inactive",
+                    "pr_status": "no-pr",
+                    "pr_state": None,
+                    "pr_number": None,
                 }
 
                 # Get branch name
                 code, stdout, _ = self.run_command("git branch --show-current", cwd=worktree_dir)
                 if code == 0:
-                    worktree["branch"] = stdout.strip() or "unknown"
+                    branch_name = stdout.strip()
+                    worktree["branch"] = branch_name or "unknown"
+
+                    # Check if branch is merged into main
+                    if branch_name:
+                        code, stdout, _ = self.run_command(
+                            f"git branch -r --merged main 2>/dev/null | grep '{branch_name}' || echo ''",
+                            cwd=worktree_dir,
+                        )
+                        if code == 0 and stdout.strip():
+                            worktree["pr_status"] = "merged"
+                            worktree["status"] = "merged"
+                        else:
+                            # Check for active PR using gh CLI (fallback gracefully if not available)
+                            code, stdout, _ = self.run_command(
+                                f"gh pr list --head {branch_name} --json number,state 2>/dev/null || echo '[]'",
+                                cwd=worktree_dir,
+                            )
+                            if code == 0 and stdout.strip():
+                                try:
+                                    import json
+
+                                    prs = json.loads(stdout)
+                                    if prs:
+                                        pr = prs[0]  # Get first matching PR
+                                        worktree["pr_number"] = pr["number"]
+                                        worktree["pr_state"] = pr["state"]
+                                        if pr["state"] == "OPEN":
+                                            worktree["pr_status"] = "active-pr"
+                                        elif pr["state"] == "CLOSED":
+                                            worktree["pr_status"] = "closed-pr"
+                                        elif pr["state"] == "MERGED":
+                                            worktree["pr_status"] = "merged"
+                                            worktree["status"] = "merged"
+                                except (json.JSONDecodeError, KeyError, IndexError):
+                                    # Fallback to no-pr if parsing fails
+                                    pass
 
                 # Get last commit time
                 code, stdout, _ = self.run_command("git log -1 --format=%ct", cwd=worktree_dir)
@@ -138,22 +177,31 @@ class CIDashboard:
                     timestamp = int(stdout.strip())
                     worktree["last_modified"] = datetime.fromtimestamp(timestamp)
 
-                    # Calculate relative time
-                    now = datetime.now()
-                    delta = now - worktree["last_modified"]
+                    # Calculate relative time and status (only if not already marked as merged)
+                    if worktree["status"] != "merged":
+                        now = datetime.now()
+                        delta = now - worktree["last_modified"]
 
-                    if delta < timedelta(hours=1):
-                        worktree["last_modified_relative"] = f"{int(delta.seconds / 60)}m ago"
-                        worktree["status"] = "active"
-                    elif delta < timedelta(days=1):
-                        worktree["last_modified_relative"] = f"{int(delta.seconds / 3600)}h ago"
-                        worktree["status"] = "recent"
-                    elif delta < timedelta(days=3):
-                        worktree["last_modified_relative"] = f"{delta.days}d ago"
-                        worktree["status"] = "stale"
+                        if delta < timedelta(hours=1):
+                            worktree["last_modified_relative"] = f"{int(delta.seconds / 60)}m ago"
+                            worktree["status"] = "active"
+                        elif delta < timedelta(days=1):
+                            worktree["last_modified_relative"] = f"{int(delta.seconds / 3600)}h ago"
+                            worktree["status"] = "recent"
+                        elif delta < timedelta(days=3):
+                            worktree["last_modified_relative"] = f"{delta.days}d ago"
+                            worktree["status"] = "stale"
+                        else:
+                            worktree["last_modified_relative"] = f"{delta.days}d ago"
+                            worktree["status"] = "inactive"
                     else:
-                        worktree["last_modified_relative"] = f"{delta.days}d ago"
-                        worktree["status"] = "inactive"
+                        # For merged branches, still show the time
+                        now = datetime.now()
+                        delta = now - worktree["last_modified"]
+                        if delta < timedelta(days=1):
+                            worktree["last_modified_relative"] = f"{int(delta.seconds / 3600)}h ago"
+                        else:
+                            worktree["last_modified_relative"] = f"{delta.days}d ago"
 
                 # Get uncommitted changes
                 code, stdout, _ = self.run_command("git status --porcelain", cwd=worktree_dir)
@@ -181,35 +229,93 @@ class CIDashboard:
                 "last_run": "never",
             }
 
-            # Run pytest with coverage
-            code, stdout, stderr = self.run_command(
-                "python -m pytest tests/ --co -q 2>/dev/null | grep -E '^tests/' | wc -l"
-            )
-            if code == 0:
-                status["total"] = int(stdout.strip() or 0)
-
-            # Get last test results from cache or quick test
-            code, stdout, _ = self.run_command(
-                "python -m pytest tests/ --tb=no -q --no-header 2>/dev/null | tail -1"
-            )
-            if code == 0 and "passed" in stdout:
-                # Parse pytest summary line
+            # Count total tests using pytest --collect-only
+            code, stdout, stderr = self.run_command("python -m pytest tests/ --collect-only -q")
+            # Check if collection succeeded (code 0) or had errors but still collected tests (code 2)
+            if code == 0 or (code == 2 and "collected" in stdout):
+                # Count lines that look like test functions: <Function test_*> or <Method test_*>
                 import re
 
-                matches = re.findall(r"(\d+)\s+(\w+)", stdout)
-                for count, result_type in matches:
-                    if "passed" in result_type:
-                        status["passed"] = int(count)
-                    elif "failed" in result_type:
-                        status["failed"] = int(count)
-                    elif "skipped" in result_type:
-                        status["skipped"] = int(count)
+                test_lines = [
+                    line
+                    for line in stdout.splitlines()
+                    if re.search(r"<(Function|Method)\s+test_", line.strip())
+                ]
+                status["total"] = len(test_lines)
 
-            status["last_run"] = datetime.now().strftime("%H:%M:%S")
+            # Try to get real test results (quick run for small test suites)
+            # Only run tests if collection was successful (no errors)
+            should_run_tests = False
+            if code == 0:
+                should_run_tests = True
+            elif code == 2 and "errors" in stdout:
+                # Collection had errors - try running only tests that can be collected
+                # For safety, we'll skip test execution if there are collection errors
+                should_run_tests = False
+            else:
+                should_run_tests = False
 
-            # Estimate coverage (would need pytest-cov for real coverage)
-            if status["total"] > 0:
-                status["coverage"] = int((status["passed"] / status["total"]) * 100)
+            if should_run_tests:
+                code, stdout, stderr = self.run_command(
+                    "timeout 30 python -m pytest tests/ -v --tb=no --no-header || echo 'TIMEOUT_OR_ERROR'"
+                )
+            else:
+                # Skip test execution due to collection errors
+                stdout = "TIMEOUT_OR_ERROR - Collection errors prevent execution"
+                code = 1
+
+            if code == 0 and "TIMEOUT_OR_ERROR" not in stdout:
+                # Parse pytest output for real results
+                import re
+
+                # Look for the summary line like "=== 5 passed, 1 failed, 2 skipped in 1.23s ==="
+                summary_match = re.search(r"=+ (.+) in [\d\.]+s =+", stdout, re.MULTILINE)
+
+                if summary_match:
+                    summary = summary_match.group(1)
+
+                    # Extract counts for each result type
+                    passed_match = re.search(r"(\d+) passed", summary)
+                    if passed_match:
+                        status["passed"] = int(passed_match.group(1))
+
+                    failed_match = re.search(r"(\d+) failed", summary)
+                    if failed_match:
+                        status["failed"] = int(failed_match.group(1))
+
+                    skipped_match = re.search(r"(\d+) skipped", summary)
+                    if skipped_match:
+                        status["skipped"] = int(skipped_match.group(1))
+
+                    status["last_run"] = datetime.now().strftime("%H:%M:%S")
+            else:
+                # Fallback: Tests haven't been run or took too long
+                if "Collection errors prevent execution" in stdout:
+                    status["last_run"] = "collection errors"
+                else:
+                    status["last_run"] = "not run"
+
+            # Try to get real coverage using pytest-cov
+            code, stdout, _ = self.run_command(
+                "timeout 30 python -m pytest tests/ --cov=src --cov=claudelearnspokemon --cov-report=term-missing --tb=no -q | grep '^TOTAL' || echo 'NO_COVERAGE'"
+            )
+
+            if code == 0 and "NO_COVERAGE" not in stdout and "%" in stdout:
+                # Parse coverage line like "TOTAL    1234    567    54%"
+                import re
+
+                coverage_match = re.search(r"TOTAL.*?(\d+)%", stdout)
+                if coverage_match:
+                    status["coverage"] = int(coverage_match.group(1))
+            else:
+                # Fallback coverage estimation
+                if status["total"] > 0:
+                    actual_run_total = status["passed"] + status["failed"] + status["skipped"]
+                    if actual_run_total > 0:
+                        # Base coverage on test success rate as rough estimate
+                        status["coverage"] = int((status["passed"] / actual_run_total) * 100)
+                    else:
+                        status["coverage"] = 0
 
             return status
 
@@ -257,8 +363,10 @@ class CIDashboard:
         def _fetch_code_stats() -> dict[str, Any]:
             stats = {"largest_files": [], "total_lines": 0, "file_counts": {}, "total_py_files": 0}
 
-            # Find all Python files
-            code, stdout, _ = self.run_command("find src/ tests/ -name '*.py' -type f | head -20")
+            # Find all Python files in project (excluding venv, .git, __pycache__ etc.)
+            code, stdout, _ = self.run_command(
+                "find . -name '*.py' -type f -not -path './venv/*' -not -path './.git/*' -not -path '*/__pycache__/*'"
+            )
 
             if code == 0:
                 py_files = [f.strip() for f in stdout.splitlines() if f.strip()]
@@ -280,9 +388,11 @@ class CIDashboard:
                 stats["largest_files"] = file_sizes[:5]
                 stats["total_py_files"] = len(py_files)
 
-            # Count files by extension
+            # Count files by extension (using same exclusion pattern for consistency)
             for ext in [".py", ".md", ".sh", ".toml", ".yml", ".yaml"]:
-                code, stdout, _ = self.run_command(f"find . -name '*{ext}' -type f | wc -l")
+                code, stdout, _ = self.run_command(
+                    f"find . -name '*{ext}' -type f -not -path './venv/*' -not -path './.git/*' -not -path '*/__pycache__/*' | wc -l"
+                )
                 if code == 0:
                     count = int(stdout.strip() or 0)
                     if count > 0:
@@ -291,6 +401,144 @@ class CIDashboard:
             return stats
 
         return self.get_cached_result("code_stats", 120, _fetch_code_stats)
+
+    def get_pr_status(self) -> dict[str, Any]:
+        """Get pull request status and information.
+
+        Uses gh CLI if available, otherwise returns appropriate error message.
+        For environments that block gh CLI, consider using GitHub MCP tools integration.
+        """
+
+        def _fetch_pr_status() -> dict[str, Any]:
+            pr_data = {
+                "prs": [],
+                "total_open": 0,
+                "error": None,
+            }
+
+            try:
+                # Check if gh CLI is available
+                code, _, stderr = self.run_command("gh --version")
+                if code != 0:
+                    pr_data["error"] = "gh CLI not available"
+                    return pr_data
+
+                # Get list of open PRs
+                code, stdout, stderr = self.run_command(
+                    "gh pr list --state=open --json number,title,author,url"
+                )
+
+                if code != 0:
+                    pr_data["error"] = f"Failed to fetch PR list: {stderr}"
+                    return pr_data
+
+                if not stdout.strip():
+                    return pr_data  # No PRs
+
+                import json
+
+                try:
+                    prs = json.loads(stdout)
+                except json.JSONDecodeError:
+                    pr_data["error"] = "Failed to parse PR list JSON"
+                    return pr_data
+
+                pr_data["total_open"] = len(prs)
+
+                # Get detailed info for each PR (limit to 10 most recent)
+                for pr in prs[:10]:
+                    pr_number = pr["number"]
+                    pr_info = {
+                        "number": pr_number,
+                        "title": pr["title"][:50],  # Truncate long titles
+                        "author": pr["author"]["login"],
+                        "comments": 0,
+                        "additions": 0,
+                        "deletions": 0,
+                        "commits_ahead": 0,
+                        "url": pr["url"],
+                        "ci_status": "unknown",
+                        "review_status": "pending",
+                    }
+
+                    # Get detailed PR info including comments and diff stats
+                    code, stdout, _ = self.run_command(
+                        f"gh pr view {pr_number} --json comments,additions,deletions,commits"
+                    )
+                    if code == 0:
+                        try:
+                            pr_detail = json.loads(stdout)
+                            pr_info["comments"] = len(pr_detail.get("comments", []))
+                            pr_info["additions"] = pr_detail.get("additions", 0)
+                            pr_info["deletions"] = pr_detail.get("deletions", 0)
+                            pr_info["commits_ahead"] = len(pr_detail.get("commits", []))
+                        except (json.JSONDecodeError, KeyError):
+                            pass  # Use defaults
+
+                    # Get CI status
+                    code, stdout, _ = self.run_command(
+                        f"gh pr checks {pr_number} --json name,state,conclusion"
+                    )
+                    if code == 0 and stdout.strip():
+                        try:
+                            checks = json.loads(stdout)
+                            if checks:
+                                # Determine overall CI status
+                                states = [check.get("state", "unknown") for check in checks]
+                                conclusions = [
+                                    check.get("conclusion", "unknown") for check in checks
+                                ]
+
+                                if any(state == "in_progress" for state in states):
+                                    pr_info["ci_status"] = "pending"
+                                elif any(conclusion == "failure" for conclusion in conclusions):
+                                    pr_info["ci_status"] = "failing"
+                                elif all(conclusion == "success" for conclusion in conclusions):
+                                    pr_info["ci_status"] = "passing"
+                                else:
+                                    pr_info["ci_status"] = "mixed"
+                            else:
+                                pr_info["ci_status"] = "none"
+                        except (json.JSONDecodeError, KeyError):
+                            pr_info["ci_status"] = "unknown"
+                    else:
+                        pr_info["ci_status"] = "none"
+
+                    # Get review status
+                    code, stdout, _ = self.run_command(f"gh pr view {pr_number} --json reviews")
+                    if code == 0:
+                        try:
+                            pr_detail = json.loads(stdout)
+                            reviews = pr_detail.get("reviews", [])
+                            if reviews:
+                                # Get latest review state for each reviewer
+                                reviewer_states = {}
+                                for review in reviews:
+                                    reviewer = review.get("author", {}).get("login", "unknown")
+                                    state = review.get("state", "COMMENTED")
+                                    reviewer_states[reviewer] = state
+
+                                # Determine overall review status
+                                states = list(reviewer_states.values())
+                                if any(state == "CHANGES_REQUESTED" for state in states):
+                                    pr_info["review_status"] = "changes_requested"
+                                elif any(state == "APPROVED" for state in states):
+                                    pr_info["review_status"] = "approved"
+                                else:
+                                    pr_info["review_status"] = "commented"
+                            else:
+                                pr_info["review_status"] = "pending"
+                        except (json.JSONDecodeError, KeyError):
+                            pr_info["review_status"] = "pending"
+
+                    pr_data["prs"].append(pr_info)
+
+            except Exception as e:
+                pr_data["error"] = f"Exception fetching PR data: {str(e)}"
+
+            return pr_data
+
+        return self.get_cached_result("pr_status", 60, _fetch_pr_status)
 
     def create_git_panel(self) -> Panel:
         """Create the git status panel."""
@@ -334,37 +582,78 @@ class CIDashboard:
         return Panel(table, title="Git Status", border_style="blue")
 
     def create_worktree_panel(self) -> Panel:
-        """Create the worktree status panel."""
+        """Create the worktree status panel showing ALL worktrees with PR status."""
         worktrees = self.get_worktree_status()
 
         table = Table(show_header=True, box=None)
-        table.add_column("Worktree", style="cyan")
-        table.add_column("Last Activity", justify="right")
-        table.add_column("Changes", justify="center")
-        table.add_column("Status", justify="center")
+        table.add_column("Worktree", style="cyan", width=15)
+        table.add_column("Last Activity", justify="right", width=10)
+        table.add_column("Changes", justify="center", width=7)
+        table.add_column("PR Status", justify="center", width=10)
+        table.add_column("Status", justify="center", width=6)
 
-        for worktree in sorted(
-            worktrees, key=lambda x: x.get("last_modified") or datetime.min, reverse=True
-        )[:10]:
-            # Determine status style
+        # Sort worktrees: active first, then recent, then stale, then merged, then inactive
+        def sort_priority(w):
+            status_order = {"active": 1, "recent": 2, "stale": 3, "merged": 4, "inactive": 5}
+            # Primary sort by status priority, secondary by last modified time
+            return (
+                status_order.get(w["status"], 6),
+                -(w.get("last_modified") or datetime.min).timestamp(),
+            )
+
+        sorted_worktrees = sorted(worktrees, key=sort_priority)
+
+        for worktree in sorted_worktrees:  # Show ALL worktrees, no limit
+            # Determine status style and icon
             if worktree["status"] == "active":
                 status_icon = "✅"
                 time_style = "green"
             elif worktree["status"] == "recent":
                 status_icon = "⚠️"
                 time_style = "yellow"
-            else:
-                status_icon = "🔴"
+            elif worktree["status"] == "merged":
+                status_icon = "🟢"  # Green circle for merged
+                time_style = "green"
+            elif worktree["status"] == "stale":
+                status_icon = "🟠"  # Orange circle for stale
+                time_style = "orange"
+            else:  # inactive
+                status_icon = "🔴"  # Red circle for inactive
                 time_style = "red"
+
+            # PR Status indicator
+            pr_status = worktree["pr_status"]
+            if pr_status == "active-pr":
+                pr_icon = "🔄"  # Active PR
+                pr_text = f"PR #{worktree['pr_number']}"
+                pr_style = "blue"
+            elif pr_status == "merged":
+                pr_icon = "🟢"  # Merged PR
+                pr_text = "merged"
+                pr_style = "green"
+            elif pr_status == "closed-pr":
+                pr_icon = "🔴"  # Closed PR
+                pr_text = "closed"
+                pr_style = "red"
+            else:  # no-pr
+                pr_icon = "⚫"  # No PR
+                pr_text = "no PR"
+                pr_style = "dim"
 
             # Changes indicator
             changes_text = f"{worktree['uncommitted']}" if worktree["uncommitted"] > 0 else "-"
             changes_style = "yellow" if worktree["uncommitted"] > 0 else "dim"
 
+            # Truncate worktree name if too long
+            name = worktree["name"]
+            if len(name) > 13:
+                name = name[:10] + "..."
+
             table.add_row(
-                worktree["name"],
+                name,
                 f"[{time_style}]{worktree['last_modified_relative']}[/{time_style}]",
                 f"[{changes_style}]{changes_text}[/{changes_style}]",
+                f"[{pr_style}]{pr_icon} {pr_text}[/{pr_style}]",
                 status_icon,
             )
 
@@ -447,19 +736,124 @@ class CIDashboard:
         # Add separator
         content.add_row("", "")
 
-        # Summary stats
-        content.add_row("[bold]Summary:[/bold]", "")
-        content.add_row("  Total lines:", f"[green]{stats['total_lines']:,}[/green]")
-        content.add_row("  Python files:", f"[green]{stats['total_py_files']}[/green]")
+        # Summary stats - clearer labeling
+        content.add_row("[bold]Code Summary:[/bold]", "")
+        content.add_row("  Total lines of code:", f"[green]{stats['total_lines']:,}[/green]")
+        content.add_row("  Python files (project):", f"[green]{stats['total_py_files']}[/green]")
 
         # File type counts
         if stats["file_counts"]:
             content.add_row("", "")
-            content.add_row("[bold]File Types:[/bold]", "")
+            content.add_row("[bold]Project Files by Type:[/bold]", "")
             for ext, count in sorted(stats["file_counts"].items()):
-                content.add_row(f"  {ext}:", f"[dim]{count} files[/dim]")
+                content.add_row(f"  {ext} files:", f"[dim]{count}[/dim]")
 
         return Panel(content, title="Code Statistics", border_style="magenta")
+
+    def create_pr_panel(self) -> Panel:
+        """Create the pull request status panel."""
+        pr_status = self.get_pr_status()
+
+        # Handle errors
+        if pr_status.get("error"):
+            error_text = Text(f"Error: {pr_status['error']}", style="red")
+            return Panel(error_text, title="Pull Requests (Error)", border_style="red")
+
+        # Handle no PRs
+        if not pr_status["prs"]:
+            no_prs_text = Text("No open pull requests", style="dim", justify="center")
+            return Panel(no_prs_text, title="Pull Requests (0)", border_style="dim")
+
+        # Create table with PR data
+        table = Table(show_header=True, box=None)
+        table.add_column("PR#", justify="right", style="cyan", width=4)
+        table.add_column("Title", style="white", min_width=15)
+        table.add_column("💬", justify="center", width=3)  # Comments
+        table.add_column("+/-", justify="right", width=8)  # Lines changed
+        table.add_column("📝", justify="right", width=3)  # Commits
+        table.add_column("CI", justify="center", width=4)  # CI status
+        table.add_column("Review", justify="center", width=6)  # Review status
+
+        for pr in pr_status["prs"]:
+            # Format title with truncation
+            title = pr["title"]
+            if len(title) > 25:
+                title = title[:22] + "..."
+
+            # Format comments
+            comment_count = pr["comments"]
+            comments_text = str(comment_count) if comment_count > 0 else "-"
+            comments_style = "yellow" if comment_count > 0 else "dim"
+
+            # Format line changes
+            additions = pr["additions"]
+            deletions = pr["deletions"]
+            if additions > 0 or deletions > 0:
+                lines_text = f"+{additions}/-{deletions}" if deletions > 0 else f"+{additions}"
+                lines_style = (
+                    "green"
+                    if additions > deletions
+                    else "red"
+                    if deletions > additions
+                    else "yellow"
+                )
+            else:
+                lines_text = "-"
+                lines_style = "dim"
+
+            # Format commits
+            commits = pr["commits_ahead"]
+            commits_text = str(commits) if commits > 0 else "-"
+            commits_style = "green" if commits > 0 else "dim"
+
+            # Format CI status
+            ci_status = pr.get("ci_status", "unknown")
+            if ci_status == "passing":
+                ci_text = "✅"
+                ci_style = "green"
+            elif ci_status == "failing":
+                ci_text = "❌"
+                ci_style = "red"
+            elif ci_status == "pending":
+                ci_text = "⏳"
+                ci_style = "yellow"
+            elif ci_status == "mixed":
+                ci_text = "⚠️"
+                ci_style = "yellow"
+            elif ci_status == "none":
+                ci_text = "-"
+                ci_style = "dim"
+            else:
+                ci_text = "?"
+                ci_style = "dim"
+
+            # Format review status
+            review_status = pr.get("review_status", "pending")
+            if review_status == "approved":
+                review_text = "✅"
+                review_style = "green"
+            elif review_status == "changes_requested":
+                review_text = "❌"
+                review_style = "red"
+            elif review_status == "commented":
+                review_text = "💬"
+                review_style = "yellow"
+            else:  # pending
+                review_text = "⏳"
+                review_style = "dim"
+
+            table.add_row(
+                f"#{pr['number']}",
+                title,
+                f"[{comments_style}]{comments_text}[/{comments_style}]",
+                f"[{lines_style}]{lines_text}[/{lines_style}]",
+                f"[{commits_style}]{commits_text}[/{commits_style}]",
+                f"[{ci_style}]{ci_text}[/{ci_style}]",
+                f"[{review_style}]{review_text}[/{review_style}]",
+            )
+
+        title_text = f"Pull Requests ({pr_status['total_open']})"
+        return Panel(table, title=title_text, border_style="purple")
 
     def create_header(self) -> Panel:
         """Create the header panel."""
@@ -479,7 +873,7 @@ class CIDashboard:
             Layout(name="body"),
         )
 
-        # Body split into two rows
+        # Body split into two columns
         layout["body"].split_row(
             Layout(name="left"),
             Layout(name="right"),
@@ -491,9 +885,10 @@ class CIDashboard:
             Layout(name="tests"),
         )
 
-        # Right column splits
+        # Right column splits into 3 sections
         layout["right"].split_column(
             Layout(name="worktrees"),
+            Layout(name="prs"),
             Layout(name="stats"),
         )
 
@@ -507,6 +902,7 @@ class CIDashboard:
         layout["header"].update(self.create_header())
         layout["git"].update(self.create_git_panel())
         layout["worktrees"].update(self.create_worktree_panel())
+        layout["prs"].update(self.create_pr_panel())
         layout["tests"].update(self.create_test_panel())
         layout["stats"].update(self.create_stats_panel())
 
