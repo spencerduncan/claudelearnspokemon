@@ -920,19 +920,19 @@ class CIDashboard:
 
         # Create table with PR data
         table = Table(show_header=True, box=None)
-        table.add_column("PR#", justify="right", style="cyan", width=4)
-        table.add_column("Title", style="white", min_width=15)
+        table.add_column("PR#", justify="right", style="cyan", width=5)
+        table.add_column("Title", style="white", min_width=30)  # More space for title
         table.add_column("💬", justify="center", width=3)  # Comments
-        table.add_column("+/-", justify="right", width=8)  # Lines changed
+        table.add_column("+/-", justify="right", width=14)  # Wider to show full +1454/-234 etc
         table.add_column("📝", justify="right", width=3)  # Commits
         table.add_column("CI", justify="center", width=4)  # CI status
         table.add_column("Review", justify="center", width=6)  # Review status
 
         for pr in pr_status["prs"]:
-            # Format title with truncation
+            # Format title with truncation - allow longer titles now
             title = pr["title"]
-            if len(title) > 25:
-                title = title[:22] + "..."
+            if len(title) > 35:
+                title = title[:32] + "..."
 
             # Format comments
             comment_count = pr["comments"]
@@ -1027,23 +1027,23 @@ class CIDashboard:
             Layout(name="body"),
         )
 
-        # Body split into two columns
+        # Body split into two columns - make right side wider for PRs
         layout["body"].split_row(
-            Layout(name="left"),
-            Layout(name="right"),
+            Layout(name="left", ratio=2),  # 40% width
+            Layout(name="right", ratio=3),  # 60% width
         )
 
-        # Left column splits
+        # Left column splits - now includes stats at bottom
         layout["left"].split_column(
             Layout(name="git", size=12),
-            Layout(name="tests"),
+            Layout(name="tests", size=10),
+            Layout(name="stats"),  # Moved from right to left
         )
 
-        # Right column splits into 3 sections
+        # Right column splits into 2 sections (removed stats)
         layout["right"].split_column(
             Layout(name="worktrees"),
-            Layout(name="prs"),
-            Layout(name="stats"),
+            Layout(name="prs"),  # Gets more space now
         )
 
         return layout
