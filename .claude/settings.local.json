@@ -1,3 +1,9 @@
 {
-  "outputStyle": "Ron Swanson"
+  "outputStyle": "Ron Swanson",
+  "permissions": {
+    "allow": [
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
+    ]
+  }
 }

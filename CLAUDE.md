@@ -34,18 +34,41 @@ The system consists of these core components that need to be implemented:
 
 ## Development Setup
 
-Since this is a greenfield project, here's how to get started:
+**IMPORTANT: Always run `./setup.sh` first when starting work on this project!**
+
+The project includes automatic environment configuration:
 
 ```bash
-# Initialize Python project (recommended Python 3.11+)
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+# Quick setup (run this first in every new Claude instance):
+./setup.sh
 
-# Core dependencies to install
-pip install pytest pytest-asyncio pytest-mock
-pip install docker  # For managing Pokemon-gym containers
-pip install numpy  # For tile grid processing
-pip install memgraph  # For pattern storage
+# This automatically:
+# - Creates and activates the virtual environment
+# - Installs all dependencies
+# - Sets up pre-commit hooks
+# - Verifies the environment is correct
+```
+
+### Automatic Environment Activation
+
+The project supports multiple ways to ensure the correct environment:
+
+1. **Manual activation**: `source venv/bin/activate`
+2. **Direnv (recommended)**: Automatically activates when you cd into the project
+3. **Python scripts**: Import `activate_env` at the top of scripts
+4. **Verification**: Run `python verify_setup.py` to check everything is correct
+
+### Environment Setup Commands
+
+```bash
+# First-time setup or environment repair
+./setup.sh
+
+# Verify environment is correct
+python verify_setup.py
+
+# For direnv users (auto-activation on cd)
+direnv allow  # After installing direnv
 ```
 
 ## Testing Strategy
@@ -94,7 +117,7 @@ All Claude interactions use the CLI, not API:
 ## Performance Requirements
 
 - Script compilation: < 100ms
-- Checkpoint loading: < 500ms  
+- Checkpoint loading: < 500ms
 - Tile observation: < 50ms
 - Pattern queries: < 100ms
 - Full execution cycle: < 5 seconds
