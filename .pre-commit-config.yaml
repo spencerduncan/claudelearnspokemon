@@ -32,9 +32,8 @@ repos:
     hooks:
       - id: pytest
         name: pytest
-        entry: ./venv/bin/pytest
+        entry: bash -c 'PYTHONPATH=/home/sd/claudelearnspokemon/src:$PYTHONPATH ./venv/bin/pytest tests/ -x --tb=short'
         language: system
         types: [python]
         pass_filenames: false
         always_run: true
-        args: [tests/, -x, --tb=short]
