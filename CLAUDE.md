@@ -71,6 +71,91 @@ python verify_setup.py
 direnv allow  # After installing direnv
 ```
 
+## Worktree Development Workflow
+
+The project uses git worktrees for parallel development on different issues. Each worktree is an independent checkout with its own virtual environment. This allows agents to work on multiple issues simultaneously without conflicts.
+
+### Working with Worktrees
+
+```bash
+# Navigate to an existing worktree (auto-approved, no confirmation needed)
+cd /home/sd/worktrees/issue-91
+
+# Set up environment in any worktree (auto-approved)
+./setup.sh
+# Or use the helper script from main repo:
+/home/sd/claudelearnspokemon/scripts/setup_worktree.sh issue-91
+
+# Create and setup a new worktree for a fresh issue
+/home/sd/claudelearnspokemon/scripts/setup_worktree.sh issue-123 --fresh
+
+# Run tests in any worktree (auto-approved)
+python -m pytest tests/test_emulator_pool.py
+python -m pytest tests/test_checkpoint_manager.py::TestCheckpointManagerBasics
+# Or use the smart test runner:
+/home/sd/claudelearnspokemon/scripts/run_tests.sh tests/test_emulator_pool.py -v
+```
+
+### Available Worktrees
+
+Multiple worktrees exist for different features and issues:
+- `/home/sd/worktrees/issue-*` - Issue-specific development branches
+- `/home/sd/worktrees/checkpoint-manager` - CheckpointManager feature development
+- Each worktree has its own virtual environment and can be worked on independently
+- Use `ls /home/sd/worktrees/` to see all available worktrees
+
+### Helper Scripts
+
+Two helper scripts are available to streamline workflow:
+
+1. **setup_worktree.sh** - Manages worktree setup
+   - Creates new worktrees with `--fresh` flag
+   - Sets up existing worktrees with proper environment
+   - Automatically configures venv, installs dependencies, sets PYTHONPATH
+
+2. **run_tests.sh** - Smart test runner
+   - Automatically activates the correct venv
+   - Sets proper PYTHONPATH for the worktree
+   - Provides clear, colored output
+   - Works from any directory within a worktree
+
+### Testing Best Practices
+
+**DO:** Write proper test files
+```python
+# tests/test_my_feature.py
+def test_my_feature():
+    """Test description."""
+    result = my_function()
+    assert result == expected_value
+```
+
+**DON'T:** Run multiline Python directly
+```bash
+# This will be BLOCKED by security hooks:
+python -c "
+import something
+result = do_something()
+print(result)
+"
+```
+
+The environment enforces proper testing practices. Always create unit test files rather than running ad-hoc Python code. This ensures:
+- Tests are repeatable and version-controlled
+- Code quality standards are maintained
+- Other developers can understand and run your tests
+
+### Auto-Approved Operations
+
+The following operations run without requiring user confirmation:
+- Navigating to any worktree directory
+- Running setup.sh in any location
+- Running pytest with any test path
+- Activating virtual environments
+- Using the helper scripts
+
+This allows agents to work efficiently across multiple worktrees without constant approval prompts.
+
 ## Testing Strategy
 
 Each component has detailed unit tests specified in the design document. When implementing:
@@ -80,12 +165,55 @@ Each component has detailed unit tests specified in the design document. When im
 3. Implement the component to pass tests
 4. Integration tests should verify parallel execution coordination
 
-Example test structure:
+### Running Tests
+
+Tests can be run in multiple ways, all auto-approved without confirmation prompts:
+
+```bash
+# Run all tests
+python -m pytest
+pytest
+
+# Run specific test file
+python -m pytest tests/test_emulator_pool.py
+pytest tests/test_checkpoint_manager.py -v
+
+# Run specific test class
+python -m pytest tests/test_emulator_pool.py::TestEmulatorPool
+
+# Run specific test method
+python -m pytest tests/test_checkpoint_manager.py::TestCheckpointManagerBasics::test_initialization
+
+# Run with coverage
+python -m pytest --cov=claudelearnspokemon tests/
+
+# Using the smart test runner (recommended)
+/home/sd/claudelearnspokemon/scripts/run_tests.sh tests/test_emulator_pool.py -v
+
+# Run tests matching a pattern
+python -m pytest -k "test_checkpoint" -v
+```
+
+### Test File Structure
+
 ```python
-# tests/test_claude_code_manager.py
-def test_claude_code_manager_initializes_one_opus_four_sonnet_processes():
-    # Verify 5 total Claude processes start correctly
-    pass
+# tests/test_component_name.py
+import pytest
+from claudelearnspokemon.component_name import ComponentName
+
+class TestComponentName:
+    def setup_method(self):
+        """Setup for each test method."""
+        self.component = ComponentName()
+
+    def test_initialization(self):
+        """Test component initializes correctly."""
+        assert self.component is not None
+
+    def test_specific_feature(self):
+        """Test a specific feature works as expected."""
+        result = self.component.do_something()
+        assert result == expected_value
 ```
 
 ## Key Implementation Patterns
