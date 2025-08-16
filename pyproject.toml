@@ -87,6 +87,11 @@ strict_equality = true
 module = "lz4.*"
 ignore_missing_imports = true
 
+# httpx response.json() returns Any in older mypy versions
+[[tool.mypy.overrides]]
+module = "claudelearnspokemon.pokemon_gym_adapter"
+disable_error_code = ["no-any-return"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = "test_*.py"
