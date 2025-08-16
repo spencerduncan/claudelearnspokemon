@@ -20,7 +20,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any, Optional
+from typing import Any
 
 from .dsl_ast import ASTNode, ASTVisitor, CompiledScript, NodeFactory, NodeType
 
@@ -176,7 +176,7 @@ class HighPerformanceLexer:
         while self._position < len(self._text) and self._text[self._position] != "\n":
             self._advance()
 
-    def _match_complex_token(self) -> Optional[Token]:
+    def _match_complex_token(self) -> Token | None:
         """Match complex tokens using pre-compiled regexes."""
         remaining = self._text[self._position :]
 
@@ -270,11 +270,11 @@ class MacroRegistry:
         # Update dependency graph for cycle detection
         self._update_dependencies(name, expansion)
 
-    def get_pattern(self, name: str) -> Optional[list[ASTNode]]:
+    def get_pattern(self, name: str) -> list[ASTNode] | None:
         """Get pattern by name with O(1) lookup."""
         return self._patterns.get(name)
 
-    def expand_macro(self, name: str, args: list[str] = None) -> list[str]:
+    def expand_macro(self, name: str, args: list[str] | None = None) -> list[str]:
         """
         Expand macro with caching for performance.
         Uses memoization to avoid re-expanding identical patterns.
@@ -289,7 +289,7 @@ class MacroRegistry:
             raise ValueError(f"Unknown macro: {name}")
 
         # Expand pattern nodes to strings
-        expanded = self._expand_pattern_nodes(pattern, args)
+        expanded = self._expand_pattern_nodes(pattern, args or [])
 
         # Cache result for future use
         self._expansion_cache[cache_key] = expanded
@@ -352,7 +352,7 @@ class MacroRegistry:
         if not pattern:
             return 0
 
-        total_frames = sum(node.metadata.get("frames", 1) for node in pattern)
+        total_frames = sum(int((node.metadata or {}).get("frames", 1)) for node in pattern)
 
         self._frame_estimates[name] = total_frames
         return total_frames
@@ -455,7 +455,7 @@ class ScriptParser:
                 [self._node_factory.create_input_node("NOOP")]
             )
 
-    def _parse_statement(self) -> Optional[ASTNode]:
+    def _parse_statement(self) -> ASTNode:
         """Parse a single statement."""
         if self._check(TokenType.IF):
             return self._parse_conditional()
@@ -485,7 +485,9 @@ class ScriptParser:
 
         self._consume(TokenType.END, "Expected 'end'")
 
-        return self._node_factory.create_conditional_node(condition, then_branch, else_branch)
+        return self._node_factory.create_conditional_node(
+            condition, then_branch, else_branch=else_branch
+        )
 
     def _parse_repeat(self) -> ASTNode:
         """Parse repeat loop construct."""
@@ -550,7 +552,7 @@ class ScriptParser:
                 if not 0.0 <= density <= 1.0:
                     raise ValueError(f"Density must be 0.0-1.0, got {density}")
             except ValueError as e:
-                raise Exception(f"Invalid density value: {e}")
+                raise Exception(f"Invalid density value: {e}") from e
             self._consume(TokenType.RPAREN, "Expected ')'")
 
         return self._node_factory.create_observation_node(density)
@@ -575,7 +577,7 @@ class ScriptParser:
                 frames = int(number_token)
                 return self._node_factory.create_delay_node(frames)
             except ValueError as e:
-                raise Exception(f"Invalid number: {e}")
+                raise Exception(f"Invalid number: {e}") from e
         else:
             raise Exception(f"Unexpected token: {self._peek().value}")
 
@@ -777,8 +779,8 @@ class ScriptCompiler:
         # Performance monitoring
         self._compilation_stats = {
             "total_compilations": 0,
-            "average_time_ms": 0,
-            "max_time_ms": 0,
+            "average_time_ms": 0.0,
+            "max_time_ms": 0.0,
             "cache_hits": 0,
         }
 
@@ -824,7 +826,7 @@ class ScriptCompiler:
         except Exception as e:
             end_time = time.perf_counter()
             compile_time_ms = (end_time - start_time) * 1000
-            raise Exception(f"Compilation failed after {compile_time_ms:.2f}ms: {e}")
+            raise Exception(f"Compilation failed after {compile_time_ms:.2f}ms: {e}") from e
 
     def register_pattern(self, name: str, expansion: list[str]):
         """Register a new macro pattern with validation."""
@@ -842,9 +844,9 @@ class ScriptCompiler:
         """Validate script syntax without full compilation."""
         try:
             tokens = self._lexer.tokenize(script_text)
-            ast = self._parser.parse(tokens)
+            self._parser.parse(tokens)
             return len(self._parser._parse_errors) == 0
-        except:
+        except Exception:
             return False
 
     def get_language_spec(self) -> dict[str, Any]:

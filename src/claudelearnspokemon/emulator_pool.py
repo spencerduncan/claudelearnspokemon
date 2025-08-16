@@ -184,6 +184,8 @@ class EmulatorPool:
             EmulatorPoolError: On startup or health check failure
         """
         try:
+            if not self.client:
+                raise EmulatorPoolError("Docker client not initialized. Call initialize() first.")
             container = self.client.containers.run(
                 image=self.image_name,
                 ports={"8080/tcp": port},  # Map internal port 8080 to host port
@@ -259,7 +261,7 @@ class EmulatorPool:
         """
         try:
             # Simple health check - verify container can execute commands
-            result = container.exec_run("echo 'health_check'", timeout=5)
+            result = container.exec_run("echo 'health_check'")
 
             if result.exit_code != 0:
                 raise EmulatorPoolError(
@@ -327,7 +329,9 @@ class EmulatorPool:
 
                 statuses.append(
                     {
-                        "id": container.id[:12],  # Short ID for readability
+                        "id": (
+                            container.id[:12] if container.id else "unknown"
+                        ),  # Short ID for readability
                         "status": status,
                         "name": container.name,
                     }
@@ -335,7 +339,11 @@ class EmulatorPool:
             except Exception as e:
                 statuses.append(
                     {
-                        "id": container.id[:12] if hasattr(container, "id") else "unknown",
+                        "id": (
+                            container.id[:12]
+                            if hasattr(container, "id") and container.id
+                            else "unknown"
+                        ),
                         "status": "error",
                         "error": str(e),
                     }

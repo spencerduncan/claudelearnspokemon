@@ -10,8 +10,9 @@ from unittest.mock import Mock, patch
 
 import docker
 import pytest
-from claudelearnspokemon.emulator_pool import EmulatorPool, EmulatorPoolError
 from docker.errors import APIError, ImageNotFound
+
+from claudelearnspokemon.emulator_pool import EmulatorPool, EmulatorPoolError
 
 
 class TestEmulatorPool:
@@ -115,7 +116,7 @@ class TestEmulatorPool:
 
     @pytest.mark.unit
     @patch("claudelearnspokemon.emulator_pool.docker.from_env")
-    def test_initialize_image_not_found(self, mock_docker):
+    def test_initialize_image_not_found(self, mock_docker) -> None:
         """Test failure when Pokemon-gym image doesn't exist."""
         mock_client = Mock()
         mock_docker.return_value = mock_client
@@ -128,7 +129,7 @@ class TestEmulatorPool:
 
     @pytest.mark.unit
     @patch("claudelearnspokemon.emulator_pool.docker.from_env")
-    def test_initialize_port_conflict(self, mock_docker):
+    def test_initialize_port_conflict(self, mock_docker) -> None:
         """Test handling of port conflicts - common production issue."""
         mock_client = Mock()
         mock_docker.return_value = mock_client
@@ -149,7 +150,7 @@ class TestEmulatorPool:
 
     @pytest.mark.unit
     @patch("claudelearnspokemon.emulator_pool.docker.from_env")
-    def test_initialize_partial_failure_cleanup(self, mock_docker):
+    def test_initialize_partial_failure_cleanup(self, mock_docker) -> None:
         """Test cleanup of successfully started containers when initialization fails."""
         mock_client = Mock()
         mock_docker.return_value = mock_client
@@ -179,7 +180,7 @@ class TestEmulatorPool:
 
     @pytest.mark.unit
     @patch("claudelearnspokemon.emulator_pool.docker.from_env")
-    def test_initialize_container_startup_timeout(self, mock_docker):
+    def test_initialize_container_startup_timeout(self, mock_docker) -> None:
         """Test timeout handling during container startup."""
         mock_client = Mock()
         mock_docker.return_value = mock_client
@@ -200,7 +201,7 @@ class TestEmulatorPool:
 
     @pytest.mark.unit
     @patch("claudelearnspokemon.emulator_pool.docker.from_env")
-    def test_shutdown_success(self, mock_docker):
+    def test_shutdown_success(self, mock_docker) -> None:
         """Test graceful shutdown of all containers."""
         mock_client = Mock()
         mock_docker.return_value = mock_client
@@ -227,7 +228,7 @@ class TestEmulatorPool:
 
     @pytest.mark.unit
     @patch("claudelearnspokemon.emulator_pool.docker.from_env")
-    def test_shutdown_with_stop_failures(self, mock_docker):
+    def test_shutdown_with_stop_failures(self, mock_docker) -> None:
         """Test shutdown continues even if some containers fail to stop."""
         mock_client = Mock()
         mock_docker.return_value = mock_client
@@ -256,14 +257,14 @@ class TestEmulatorPool:
             container.stop.assert_called_once()
 
     @pytest.mark.unit
-    def test_shutdown_before_initialization(self):
+    def test_shutdown_before_initialization(self) -> None:
         """Test shutdown is safe when called before initialization."""
         # Should not raise exception
         self.pool.shutdown()
 
     @pytest.mark.unit
     @patch("claudelearnspokemon.emulator_pool.docker.from_env")
-    def test_multiple_shutdown_calls(self, mock_docker):
+    def test_multiple_shutdown_calls(self, mock_docker) -> None:
         """Test multiple shutdown calls are safe - idempotent operation."""
         mock_client = Mock()
         mock_docker.return_value = mock_client
@@ -282,7 +283,7 @@ class TestEmulatorPool:
 
     @pytest.mark.unit
     @patch("claudelearnspokemon.emulator_pool.docker.from_env")
-    def test_logging_configuration(self, mock_docker, caplog):
+    def test_logging_configuration(self, mock_docker, caplog) -> None:
         """Test that proper logging is configured for operations."""
         mock_client = Mock()
         mock_docker.return_value = mock_client
@@ -301,7 +302,7 @@ class TestEmulatorPool:
 
     @pytest.mark.unit
     @patch("claudelearnspokemon.emulator_pool.docker.from_env")
-    def test_container_health_check(self, mock_docker):
+    def test_container_health_check(self, mock_docker) -> None:
         """Test container health verification after startup."""
         mock_client = Mock()
         mock_docker.return_value = mock_client
@@ -331,7 +332,7 @@ class TestEmulatorPool:
 
     @pytest.mark.unit
     @patch("claudelearnspokemon.emulator_pool.docker.from_env")
-    def test_resource_cleanup_on_exception(self, mock_docker):
+    def test_resource_cleanup_on_exception(self, mock_docker) -> None:
         """Test that resources are properly cleaned up when exceptions occur."""
         mock_client = Mock()
         mock_docker.return_value = mock_client
@@ -353,7 +354,7 @@ class TestEmulatorPool:
     @pytest.mark.integration
     @pytest.mark.slow
     @patch("claudelearnspokemon.emulator_pool.docker.from_env")
-    def test_full_lifecycle_integration(self, mock_docker):
+    def test_full_lifecycle_integration(self, mock_docker) -> None:
         """Integration test for full container lifecycle."""
         mock_client = Mock()
         mock_docker.return_value = mock_client
