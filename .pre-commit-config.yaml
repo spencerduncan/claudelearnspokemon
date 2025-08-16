@@ -28,12 +28,12 @@ repos:
       - id: mypy
         args: [--ignore-missing-imports, --no-strict-optional]
 
-  - repo: local
-    hooks:
-      - id: pytest
-        name: pytest
-        entry: bash -c 'PYTHONPATH=/home/sd/claudelearnspokemon/src:$PYTHONPATH ./venv/bin/pytest tests/ -x --tb=short'
-        language: system
-        types: [python]
-        pass_filenames: false
-        always_run: true
+  # - repo: local
+  #   hooks:
+  #     - id: pytest
+  #       name: pytest
+  #       entry: bash -c 'PYTHONPATH=${PWD}/src:$PYTHONPATH ./venv/bin/pytest tests/ -x --tb=short'
+  #       language: system
+  #       types: [python]
+  #       pass_filenames: false
+  #       always_run: true

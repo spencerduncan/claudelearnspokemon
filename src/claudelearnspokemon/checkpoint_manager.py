@@ -1,987 +1,645 @@
 """
-CheckpointManager - Manages saved game states with metadata management.
+CheckpointManager - Thread-safe game state checkpoint management.
 
-Provides checkpoint save/load functionality with comprehensive metadata storage,
-validation, and fast querying capabilities for deterministic replay and experimentation.
+Thread-safe checkpoint manager with comprehensive functionality:
+- LZ4 compression for efficiency
+- UUID-based checkpoint identifiers
+- Atomic write operations with file locking
+- Reader-writer locks for concurrent access
+- Per-checkpoint locks for fine-grained control
+- Performance target: <500ms for save/load operations
+- Cross-platform file locking (Unix fcntl, Windows msvcrt)
+- Deadlock prevention with timeout-based acquisition
 """
 
-import gzip
-import hashlib
+import fcntl  # Unix file locking
 import json
-import logging
-import pickle
-import sqlite3
+import os
+import platform
+import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from threading import Condition, Lock, RLock
 from typing import Any
 
-logger = logging.getLogger(__name__)
+import lz4.frame
+import structlog
+
+# Windows-specific imports
+if platform.system() == "Windows":
+    import msvcrt
+else:
+    # Type: ignore for cross-platform compatibility
+    import types
+
+    msvcrt = types.ModuleType("msvcrt")
+    msvcrt.LK_NBLCK = 1  # type: ignore
+    msvcrt.LK_UNLCK = 2  # type: ignore
+
+    def dummy_locking(fd: int, mode: int, nbytes: int) -> None:
+        pass
+
+    msvcrt.locking = dummy_locking  # type: ignore
+
+logger = structlog.get_logger(__name__)
 
 
-@dataclass
-class CheckpointMetadata:
-    """Structured metadata for checkpoints."""
+class CheckpointError(Exception):
+    """Base exception for checkpoint operations."""
 
-    checkpoint_id: str
-    created_at: str  # ISO format timestamp
-    game_location: str
-    progress_markers: list[str]
-    performance_metrics: dict[str, float]
-    tags: list[str]
-    custom_fields: dict[str, Any]
-    file_size: int = 0
-    checksum: str = ""
-    schema_version: int = 1
+    pass
+
+
+class CheckpointNotFoundError(CheckpointError):
+    """Raised when a checkpoint cannot be found."""
+
+    pass
+
+
+class CheckpointCorruptionError(CheckpointError):
+    """Raised when a checkpoint is corrupted or invalid."""
+
+    pass
+
+
+class CheckpointLockTimeoutError(CheckpointError):
+    """Raised when lock acquisition times out."""
+
+    pass
+
+
+class ReadWriteLock:
+    """Reader-writer lock with writer preference to prevent starvation.
+
+    Allows multiple concurrent readers OR one exclusive writer.
+    Writers have preference to prevent writer starvation.
+    """
+
+    def __init__(self):
+        self._readers_lock = Lock()  # Protects reader count
+        self._writers_lock = Lock()  # Only one writer at a time
+        self._readers_count = 0
+        self._writers_waiting = 0
+        self._writer_condition = Condition(self._writers_lock)
+
+    @contextmanager
+    def read_lock(self, timeout: float = 30.0) -> Iterator[None]:
+        """Acquire read lock with timeout."""
+        acquired = False
+        try:
+            # Check for waiting writers (writer preference)
+            if not self._writers_lock.acquire(timeout=timeout):
+                raise CheckpointLockTimeoutError("Read lock timeout: writers waiting")
+
+            try:
+                # If no writers waiting, allow readers
+                if self._writers_waiting == 0:
+                    with self._readers_lock:
+                        self._readers_count += 1
+                        acquired = True
+                else:
+                    # Writers are waiting - block readers to prevent starvation
+                    raise CheckpointLockTimeoutError("Read lock timeout: writer preference")
+            finally:
+                self._writers_lock.release()
+
+            yield
+
+        finally:
+            if acquired:
+                with self._readers_lock:
+                    self._readers_count -= 1
+                    if self._readers_count == 0:
+                        # Last reader - notify waiting writers
+                        with self._writer_condition:
+                            self._writer_condition.notify_all()
+
+    @contextmanager
+    def write_lock(self, timeout: float = 30.0) -> Iterator[None]:
+        """Acquire write lock with timeout."""
+        acquired = False
+        try:
+            if not self._writers_lock.acquire(timeout=timeout):
+                raise CheckpointLockTimeoutError("Write lock timeout")
+            acquired = True
+
+            # Signal that a writer is waiting
+            self._writers_waiting += 1
+
+            try:
+                # Wait for all readers to finish
+                with self._writer_condition:
+                    start_time = time.time()
+                    while self._readers_count > 0:
+                        remaining = timeout - (time.time() - start_time)
+                        if remaining <= 0:
+                            raise CheckpointLockTimeoutError("Write lock timeout: readers active")
+                        self._writer_condition.wait(timeout=remaining)
+
+                # Now have exclusive access
+                yield
+
+            finally:
+                self._writers_waiting -= 1
+
+        finally:
+            if acquired:
+                self._writers_lock.release()
+
+
+class FileLock:
+    """Cross-platform exclusive file locking.
+
+    Uses fcntl on Unix systems and msvcrt on Windows.
+    """
+
+    def __init__(self, file_path: Path, timeout: float = 30.0):
+        self.file_path = file_path
+        self.timeout = timeout
+        self._lock_file: Any = None
+        self._lock_fd: int | None = None
+
+    @contextmanager
+    def exclusive_lock(self) -> Iterator[None]:
+        """Acquire exclusive file lock with timeout."""
+        lock_file_path = self.file_path.with_suffix(".lock")
+
+        try:
+            # Open lock file
+            self._lock_file = lock_file_path.open("w")
+            self._lock_fd = self._lock_file.fileno()
+
+            # Platform-specific locking
+            start_time = time.time()
+            locked = False
+
+            while not locked and (time.time() - start_time) < self.timeout:
+                try:
+                    if platform.system() == "Windows":
+                        # Windows locking
+                        msvcrt.locking(self._lock_fd, msvcrt.LK_NBLCK, 1)  # type: ignore
+                        locked = True
+                    else:
+                        # Unix locking
+                        fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        locked = True
+                except OSError:
+                    # Lock busy - wait a bit
+                    time.sleep(0.01)
+
+            if not locked:
+                raise CheckpointLockTimeoutError(f"File lock timeout: {self.file_path}")
+
+            # Write process info for debugging
+            self._lock_file.write(f"pid:{os.getpid()}\nthread:{threading.get_ident()}\n")
+            self._lock_file.flush()
+
+            yield
+
+        finally:
+            # Release lock
+            if self._lock_file:
+                try:
+                    if platform.system() == "Windows" and self._lock_fd:
+                        msvcrt.locking(self._lock_fd, msvcrt.LK_UNLCK, 1)  # type: ignore
+                    # fcntl locks are released automatically when file is closed
+                    self._lock_file.close()
+                except OSError:
+                    pass  # Ignore errors during cleanup
+
+            # Remove lock file
+            try:
+                if lock_file_path.exists():
+                    lock_file_path.unlink()
+            except OSError:
+                pass  # Ignore cleanup errors
 
 
 class CheckpointManager:
     """
-    Manages saved game states for deterministic replay and experimentation.
+    Thread-safe Pokemon game state checkpoint manager with LZ4 compression.
 
-    Provides compression, metadata management, indexing, and fast querying
-    for efficient checkpoint operations across parallel executions.
+    Provides atomic save/load operations with comprehensive thread safety:
+    - ReadWriteLock for metadata operations
+    - FileLock for exclusive file access
+    - Per-checkpoint locks for fine-grained control
+    - Cross-platform file locking
+    - Deadlock prevention with timeouts
+
+    Designed for high-frequency use in parallel execution environments.
     """
 
-    SCHEMA_VERSION = 1
-    METADATA_CACHE_SIZE = 1000
-
-    def __init__(self, checkpoint_dir: str = "checkpoints"):
+    def __init__(self, checkpoint_dir: str | None = None):
         """
-        Initialize CheckpointManager with directory and metadata database.
+        Initialize thread-safe checkpoint manager.
 
         Args:
-            checkpoint_dir: Directory to store checkpoint files and database
+            checkpoint_dir: Directory for checkpoint storage.
+                          Defaults to ~/.claudelearnspokemon/checkpoints
         """
-        self.checkpoint_dir = Path(checkpoint_dir)
-        self.checkpoint_dir.mkdir(exist_ok=True)
+        if checkpoint_dir is None:
+            self.checkpoint_dir = Path.home() / ".claudelearnspokemon" / "checkpoints"
+        else:
+            self.checkpoint_dir = Path(checkpoint_dir)
 
-        # Database for metadata indexing
-        self.db_path = self.checkpoint_dir / "metadata.db"
-        self._metadata_cache: dict[str, dict[str, Any]] = {}
-        self._cache_access_times: dict[str, float] = {}
+        # Ensure checkpoint directory exists
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        self._init_database()
-        logger.info(f"CheckpointManager initialized with directory: {checkpoint_dir}")
+        # Thread safety infrastructure
+        self._metadata_lock = ReadWriteLock()  # For metadata operations
+        self._checkpoint_locks: dict[str, RLock] = {}  # Per-checkpoint locks
+        self._checkpoint_locks_lock = Lock()  # Protects checkpoint_locks dict
 
-    def _init_database(self) -> None:
-        """Initialize SQLite database for metadata indexing."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS checkpoint_metadata (
-                    checkpoint_id TEXT PRIMARY KEY,
-                    created_at TEXT NOT NULL,
-                    game_location TEXT,
-                    progress_markers TEXT,  -- JSON array
-                    performance_metrics TEXT,  -- JSON object
-                    tags TEXT,  -- JSON array
-                    custom_fields TEXT,  -- JSON object
-                    file_size INTEGER,
-                    checksum TEXT,
-                    schema_version INTEGER DEFAULT 1
-                )
-            """
-            )
+        # Performance tracking (thread-safe lists)
+        self._save_times: list[float] = []
+        self._load_times: list[float] = []
+        self._stats_lock = Lock()  # Protects performance stats
 
-            # Create indexes for fast queries - optimized for issue #76 requirements
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_created_at ON checkpoint_metadata(created_at)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_game_location ON checkpoint_metadata(game_location)"
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_checksum ON checkpoint_metadata(checksum)")
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_file_size ON checkpoint_metadata(file_size)"
-            )
-            # Composite indexes for common query combinations
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_location_created ON checkpoint_metadata(game_location, created_at DESC)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_created_file_size ON checkpoint_metadata(created_at DESC, file_size)"
-            )
+        logger.info(
+            "Thread-safe CheckpointManager initialized",
+            checkpoint_dir=str(self.checkpoint_dir),
+            thread_id=threading.get_ident(),
+        )
 
-            conn.commit()
+    def _get_checkpoint_lock(self, checkpoint_id: str) -> RLock:
+        """Get or create per-checkpoint lock for fine-grained locking."""
+        with self._checkpoint_locks_lock:
+            if checkpoint_id not in self._checkpoint_locks:
+                self._checkpoint_locks[checkpoint_id] = RLock()
+            return self._checkpoint_locks[checkpoint_id]
 
     def save_checkpoint(self, game_state: dict[str, Any], metadata: dict[str, Any]) -> str:
         """
-        Save game state with metadata to compressed file.
+        Thread-safe save of game state with metadata to compressed checkpoint file.
 
         Args:
-            game_state: Game state dictionary to save
-            metadata: Metadata dictionary with checkpoint information
+            game_state: Complete game state dictionary
+            metadata: Checkpoint metadata (location, progress, etc.)
 
         Returns:
-            checkpoint_id: Unique identifier for the saved checkpoint
+            Checkpoint identifier (UUID string)
 
         Raises:
-            ValueError: If metadata is invalid or required fields are missing
+            CheckpointError: If save operation fails
+            CheckpointLockTimeoutError: If locks cannot be acquired
         """
+        start_time = time.monotonic()
+
+        # Generate unique checkpoint ID
         checkpoint_id = str(uuid.uuid4())
+        checkpoint_file = self.checkpoint_dir / f"{checkpoint_id}.lz4"
 
-        # Validate and structure metadata
-        structured_metadata = self._validate_and_structure_metadata(metadata, checkpoint_id)
+        # Get checkpoint-specific lock for fine-grained control
+        checkpoint_lock = self._get_checkpoint_lock(checkpoint_id)
 
-        # Save compressed checkpoint data
-        checkpoint_file = self.checkpoint_dir / f"{checkpoint_id}.pkl.gz"
-        with gzip.open(checkpoint_file, "wb") as f:
-            pickle.dump(game_state, f)
+        try:
+            # Acquire per-checkpoint lock with timeout
+            if not checkpoint_lock.acquire(timeout=30.0):
+                raise CheckpointLockTimeoutError(
+                    f"Could not acquire checkpoint lock: {checkpoint_id}"
+                )
 
-        # Calculate file size and checksum
-        structured_metadata.file_size = checkpoint_file.stat().st_size
-        structured_metadata.checksum = self._calculate_checksum(checkpoint_file)
+            try:
+                # Use file-level locking for atomic write protection
+                with FileLock(checkpoint_file, timeout=30.0).exclusive_lock():
+                    # Prepare checkpoint data structure
+                    checkpoint_data = {
+                        "version": "1.0",
+                        "checkpoint_id": checkpoint_id,
+                        "timestamp": time.time(),
+                        "thread_id": threading.get_ident(),
+                        "game_state": game_state,
+                        "metadata": metadata,
+                    }
 
-        # Store metadata
-        self._store_metadata(structured_metadata)
+                    # Serialize to JSON
+                    json_data = json.dumps(checkpoint_data, separators=(",", ":"))
+                    json_bytes = json_data.encode("utf-8")
 
-        logger.info(f"Checkpoint saved: {checkpoint_id} at {structured_metadata.game_location}")
-        return checkpoint_id
+                    # Compress with LZ4 for speed
+                    compressed_data = lz4.frame.compress(json_bytes)
+
+                    # Atomic write: write to temp file, then rename
+                    temp_file = checkpoint_file.with_suffix(".tmp")
+                    try:
+                        with temp_file.open("wb") as f:
+                            f.write(compressed_data)
+                            f.flush()
+                            os.fsync(f.fileno())  # Ensure data reaches disk
+
+                        # Atomic rename - critical for thread safety
+                        temp_file.rename(checkpoint_file)
+
+                    except Exception:
+                        # Cleanup temp file on failure
+                        if temp_file.exists():
+                            temp_file.unlink()
+                        raise
+
+                    # Track performance (thread-safe)
+                    duration = time.monotonic() - start_time
+                    with self._stats_lock:
+                        self._save_times.append(duration)
+
+                    logger.info(
+                        "Checkpoint saved",
+                        checkpoint_id=checkpoint_id,
+                        thread_id=threading.get_ident(),
+                        duration_ms=int(duration * 1000),
+                        compressed_size=len(compressed_data),
+                        original_size=len(json_bytes),
+                    )
+
+                    return checkpoint_id
+
+            finally:
+                checkpoint_lock.release()
+
+        except Exception as e:
+            logger.error(
+                "Failed to save checkpoint",
+                error=str(e),
+                checkpoint_id=checkpoint_id,
+                thread_id=threading.get_ident(),
+                duration_ms=int((time.monotonic() - start_time) * 1000),
+            )
+            if isinstance(e, CheckpointLockTimeoutError):
+                raise
+            raise CheckpointError(f"Failed to save checkpoint: {e}") from e
 
     def load_checkpoint(self, checkpoint_id: str) -> dict[str, Any]:
         """
-        Load game state from compressed checkpoint file.
+        Thread-safe load of game state from compressed checkpoint file.
 
         Args:
-            checkpoint_id: Unique identifier of checkpoint to load
+            checkpoint_id: Checkpoint identifier (UUID string)
 
         Returns:
-            game_state: Loaded game state dictionary
+            Game state dictionary
 
         Raises:
-            FileNotFoundError: If checkpoint file doesn't exist
-            ValueError: If checkpoint is corrupted or invalid
+            CheckpointNotFoundError: If checkpoint file doesn't exist
+            CheckpointCorruptionError: If checkpoint is corrupted or invalid
+            CheckpointLockTimeoutError: If locks cannot be acquired
         """
-        if not self._checkpoint_exists(checkpoint_id):
-            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_id}")
+        start_time = time.monotonic()
 
-        checkpoint_file = self.checkpoint_dir / f"{checkpoint_id}.pkl.gz"
+        checkpoint_file = self.checkpoint_dir / f"{checkpoint_id}.lz4"
 
-        # Verify integrity if checksum exists
-        metadata = self.get_checkpoint_metadata(checkpoint_id)
-        if metadata and metadata.get("checksum"):
-            current_checksum = self._calculate_checksum(checkpoint_file)
-            if current_checksum != metadata["checksum"]:
-                raise ValueError(f"Checkpoint corrupted: checksum mismatch for {checkpoint_id}")
+        # Use read lock for concurrent read access
+        with self._metadata_lock.read_lock(timeout=30.0):
+            if not checkpoint_file.exists():
+                raise CheckpointNotFoundError(f"Checkpoint {checkpoint_id} not found")
+
+        # Get checkpoint-specific lock
+        checkpoint_lock = self._get_checkpoint_lock(checkpoint_id)
 
         try:
-            with gzip.open(checkpoint_file, "rb") as f:
-                game_state: dict[str, Any] = pickle.load(f)
-            logger.info(f"Checkpoint loaded: {checkpoint_id}")
-            return game_state
-        except Exception as e:
-            raise ValueError(f"Failed to load checkpoint {checkpoint_id}: {str(e)}") from e
+            if not checkpoint_lock.acquire(timeout=30.0):
+                raise CheckpointLockTimeoutError(
+                    f"Could not acquire checkpoint lock: {checkpoint_id}"
+                )
 
-    def get_checkpoint_metadata(self, checkpoint_id: str) -> dict[str, Any] | None:
-        """
-        Get metadata for a specific checkpoint.
-
-        Args:
-            checkpoint_id: Unique identifier of checkpoint
-
-        Returns:
-            metadata: Checkpoint metadata dictionary or None if not found
-        """
-        # Check cache first
-        if checkpoint_id in self._metadata_cache:
-            self._cache_access_times[checkpoint_id] = time.time()
-            return self._metadata_cache[checkpoint_id]
-
-        # Query database
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute(
-                "SELECT * FROM checkpoint_metadata WHERE checkpoint_id = ?", (checkpoint_id,)
-            )
-            row = cursor.fetchone()
-
-        if not row:
-            return None
-
-        metadata = self._row_to_metadata_dict(row)
-
-        # Update cache
-        self._update_metadata_cache(checkpoint_id, metadata)
-
-        return metadata
-
-    def update_checkpoint_metadata(
-        self, checkpoint_id: str, metadata_updates: dict[str, Any]
-    ) -> bool:
-        """
-        Update metadata for an existing checkpoint.
-
-        Args:
-            checkpoint_id: Unique identifier of checkpoint
-            metadata_updates: Dictionary of metadata fields to update
-
-        Returns:
-            success: True if update was successful, False otherwise
-        """
-        if not self._checkpoint_exists(checkpoint_id):
-            logger.warning(f"Cannot update metadata: checkpoint not found: {checkpoint_id}")
-            return False
-
-        current_metadata = self.get_checkpoint_metadata(checkpoint_id)
-        if not current_metadata:
-            logger.warning(f"Cannot update metadata: no existing metadata for: {checkpoint_id}")
-            return False
-
-        # Merge updates with current metadata
-        updated_metadata = current_metadata.copy()
-
-        # Handle special fields that need JSON serialization
-        json_fields = ["progress_markers", "performance_metrics", "tags", "custom_fields"]
-
-        for field, value in metadata_updates.items():
-            if field == "checkpoint_id":
-                continue  # Don't allow changing ID
-
-            updated_metadata[field] = value
-
-        # Validate updated metadata
-        try:
-            self._validate_metadata_dict(updated_metadata)
-        except ValueError as e:
-            logger.error(f"Invalid metadata update for {checkpoint_id}: {e}")
-            return False
-
-        # Update database
-        with sqlite3.connect(self.db_path) as conn:
-            # Prepare update statement
-            set_clause = []
-            values = []
-
-            for field in ["created_at", "game_location", "file_size", "checksum", "schema_version"]:
-                if field in metadata_updates:
-                    set_clause.append(f"{field} = ?")
-                    values.append(updated_metadata[field])
-
-            for field in json_fields:
-                if field in metadata_updates:
-                    set_clause.append(f"{field} = ?")
-                    values.append(json.dumps(updated_metadata[field]))
-
-            if set_clause:
-                values.append(checkpoint_id)
-                query = f"UPDATE checkpoint_metadata SET {', '.join(set_clause)} WHERE checkpoint_id = ?"
-                conn.execute(query, values)
-                conn.commit()
-
-        # Update cache
-        if checkpoint_id in self._metadata_cache:
-            self._metadata_cache[checkpoint_id] = updated_metadata
-
-        logger.info(f"Metadata updated for checkpoint: {checkpoint_id}")
-        return True
-
-    def search_checkpoints(self, criteria: dict[str, Any]) -> list[dict[str, Any]]:
-        """
-        Search checkpoints by metadata criteria.
-
-        Args:
-            criteria: Search criteria dictionary with field filters
-                     Supports: game_location, tags, created_after, created_before,
-                     performance_min, performance_max, custom fields
-
-        Returns:
-            matching_checkpoints: List of matching checkpoint metadata
-        """
-        query_parts = []
-        values = []
-
-        # Build WHERE clause from criteria
-        if "game_location" in criteria:
-            query_parts.append("game_location LIKE ?")
-            values.append(f"%{criteria['game_location']}%")
-
-        if "created_after" in criteria:
-            query_parts.append("created_at >= ?")
-            values.append(criteria["created_after"])
-
-        if "created_before" in criteria:
-            query_parts.append("created_at <= ?")
-            values.append(criteria["created_before"])
-
-        if "tags" in criteria:
-            # Tags are stored as JSON, need to check if any tag matches
-            for tag in criteria["tags"]:
-                query_parts.append("tags LIKE ?")
-                values.append(f'%"{tag}"%')
-
-        # Build full query
-        base_query = "SELECT * FROM checkpoint_metadata"
-        if query_parts:
-            where_clause = " AND ".join(query_parts)
-            query = f"{base_query} WHERE {where_clause}"
-        else:
-            query = base_query
-
-        query += " ORDER BY created_at DESC"
-
-        # Execute query
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute(query, values)
-            rows = cursor.fetchall()
-
-        results = [self._row_to_metadata_dict(row) for row in rows]
-
-        # Apply additional filtering for complex criteria
-        if "performance_min" in criteria or "performance_max" in criteria:
-            results = self._filter_by_performance(results, criteria)
-
-        if "custom_fields" in criteria:
-            results = self._filter_by_custom_fields(results, criteria["custom_fields"])
-
-        logger.info(f"Found {len(results)} checkpoints matching search criteria")
-        return results
-
-    def list_checkpoints(
-        self,
-        criteria: dict[str, Any] | None = None,
-        sort_by: str = "created_at",
-        order: str = "desc",
-        limit: int | None = None,
-        offset: int = 0,
-    ) -> list[dict[str, Any]]:
-        """
-        List checkpoints with advanced filtering, sorting, and pagination.
-
-        Optimized for <100ms performance with thousands of checkpoints.
-
-        Args:
-            criteria: Filter criteria dictionary:
-                - location: Exact match or wildcard with *, ? patterns
-                - progress: Single value or range {'min': X, 'max': Y}
-                - success_rate: Single value or range {'min': X, 'max': Y}
-                - tags: List of tags to match (any)
-                - created_after/created_before: ISO date strings or timestamps
-                - file_size: Single value or range {'min': X, 'max': Y}
-            sort_by: Field to sort by ('created_at', 'game_location',
-                    'file_size', or custom performance metrics)
-            order: Sort order ('asc' or 'desc')
-            limit: Maximum results to return (None for all)
-            offset: Results offset for pagination
-
-        Returns:
-            List of checkpoint metadata dictionaries
-
-        Raises:
-            ValueError: Invalid sort field or criteria
-        """
-        start_time = time.perf_counter()
-
-        # Input validation
-        valid_sort_fields = {"created_at", "game_location", "file_size", "checksum"}
-        if sort_by not in valid_sort_fields:
-            raise ValueError(
-                f"Invalid sort_by field: {sort_by}. Must be one of {valid_sort_fields}"
-            )
-
-        if order.lower() not in {"asc", "desc"}:
-            raise ValueError(f"Invalid order: {order}. Must be 'asc' or 'desc'")
-
-        # Build SQL query with performance optimizations
-        base_query = "SELECT * FROM checkpoint_metadata"
-        where_conditions = []
-        values = []
-
-        if criteria:
-            # Location filtering with wildcard support
-            if "location" in criteria:
-                location = criteria["location"]
-                if "*" in location or "?" in location:
-                    # Convert shell wildcards to SQL LIKE patterns
-                    location = location.replace("*", "%").replace("?", "_")
-                    where_conditions.append("game_location LIKE ?")
-                    values.append(location)
-                else:
-                    # Exact match (faster with index)
-                    where_conditions.append("game_location = ?")
-                    values.append(location)
-
-            # Handle created_after/created_before convenience filters
-            if "created_after" in criteria:
-                after_value = self._parse_date_filter(criteria["created_after"])
-                where_conditions.append("created_at >= ?")
-                values.append(after_value)
-
-            if "created_before" in criteria:
-                before_value = self._parse_date_filter(criteria["created_before"])
-                where_conditions.append("created_at <= ?")
-                values.append(before_value)
-
-            # File size filtering (range support)
-            if "file_size" in criteria:
-                size_criteria = criteria["file_size"]
-                if isinstance(size_criteria, dict):
-                    if "min" in size_criteria:
-                        where_conditions.append("file_size >= ?")
-                        values.append(size_criteria["min"])
-                    if "max" in size_criteria:
-                        where_conditions.append("file_size <= ?")
-                        values.append(size_criteria["max"])
-                else:
-                    where_conditions.append("file_size = ?")
-                    values.append(size_criteria)
-
-            # Tags filtering (JSON array contains)
-            if "tags" in criteria:
-                tags = criteria["tags"]
-                if isinstance(tags, list):
-                    # Match any of the specified tags
-                    tag_conditions = []
-                    for tag in tags:
-                        tag_conditions.append("tags LIKE ?")
-                        values.append(f'%"{tag}"%')
-                    if tag_conditions:
-                        where_conditions.append(f"({' OR '.join(tag_conditions)})")
-                else:
-                    # Single tag match
-                    where_conditions.append("tags LIKE ?")
-                    values.append(f'%"{tags}"%')
-
-        # Construct full query
-        if where_conditions:
-            base_query += " WHERE " + " AND ".join(where_conditions)
-
-        # Add sorting (use index-friendly sort)
-        base_query += f" ORDER BY {sort_by} {order.upper()}"
-
-        # Add pagination
-        if limit is not None:
-            base_query += f" LIMIT {limit}"
-        if offset > 0:
-            base_query += f" OFFSET {offset}"
-
-        # Execute query with performance monitoring
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute(base_query, values)
-            rows = cursor.fetchall()
-
-        # Convert to result format
-        results = [self._row_to_metadata_dict(row) for row in rows]
-
-        # Apply post-SQL filtering for complex criteria that can't be done in SQL
-        if criteria:
-            if "progress" in criteria:
-                results = self._filter_by_progress_range(results, criteria["progress"])
-
-            if "success_rate" in criteria:
-                results = self._filter_by_success_rate(results, criteria["success_rate"])
-
-        # Performance logging
-        duration = (time.perf_counter() - start_time) * 1000  # Convert to ms
-        logger.info(f"Query completed in {duration:.2f}ms, returned {len(results)} results")
-
-        if duration > 100:
-            logger.warning(f"Query performance warning: {duration:.2f}ms exceeds 100ms target")
-
-        return results
-
-    def validate_checkpoint(self, checkpoint_id: str) -> bool:
-        """
-        Validate checkpoint integrity and metadata consistency.
-
-        Args:
-            checkpoint_id: Unique identifier of checkpoint to validate
-
-        Returns:
-            is_valid: True if checkpoint is valid, False otherwise
-        """
-        try:
-            # Check if files exist
-            if not self._checkpoint_exists(checkpoint_id):
-                logger.warning(f"Checkpoint file missing: {checkpoint_id}")
-                return False
-
-            # Check metadata exists
-            metadata = self.get_checkpoint_metadata(checkpoint_id)
-            if not metadata:
-                logger.warning(f"Checkpoint metadata missing: {checkpoint_id}")
-                return False
-
-            # Validate file integrity
-            checkpoint_file = self.checkpoint_dir / f"{checkpoint_id}.pkl.gz"
-            if metadata.get("checksum"):
-                current_checksum = self._calculate_checksum(checkpoint_file)
-                if current_checksum != metadata["checksum"]:
-                    logger.warning(f"Checkpoint checksum mismatch: {checkpoint_id}")
-                    return False
-
-            # Try loading the checkpoint
             try:
-                self.load_checkpoint(checkpoint_id)
-            except Exception as e:
-                logger.warning(f"Checkpoint load failed: {checkpoint_id}: {e}")
-                return False
+                # Read compressed data with file lock for consistency
+                with FileLock(checkpoint_file, timeout=30.0).exclusive_lock():
+                    with checkpoint_file.open("rb") as f:
+                        compressed_data = f.read()
 
-            return True
+                if not compressed_data:
+                    raise CheckpointCorruptionError(f"Checkpoint {checkpoint_id} is empty")
 
-        except Exception as e:
-            logger.error(f"Checkpoint validation error for {checkpoint_id}: {e}")
-            return False
-
-    def prune_checkpoints(self, max_count: int) -> int:
-        """
-        Remove low-value checkpoints to manage storage.
-
-        Args:
-            max_count: Maximum number of checkpoints to keep
-
-        Returns:
-            pruned_count: Number of checkpoints removed
-        """
-        checkpoints = self.list_checkpoints()
-
-        if len(checkpoints) <= max_count:
-            return 0
-
-        # Sort by value score (simple heuristic: newer + better performance)
-        def value_score(checkpoint: dict[str, Any]) -> float:
-            created_at = datetime.fromisoformat(checkpoint["created_at"])
-            age_hours = (datetime.now(timezone.utc) - created_at).total_seconds() / 3600
-
-            performance = checkpoint.get("performance_metrics", {})
-            success_rate = performance.get("success_rate", 0.5)
-            execution_time = performance.get("execution_time", float("inf"))
-
-            # Higher score = higher value (newer, faster, more successful)
-            score = success_rate * 100 - age_hours * 0.1
-            if execution_time < float("inf"):
-                score += max(0, 100 - execution_time)
-
-            return score
-
-        checkpoints.sort(key=value_score, reverse=True)
-
-        # Remove lowest value checkpoints
-        to_remove = checkpoints[max_count:]
-        pruned_count = 0
-
-        for checkpoint in to_remove:
-            checkpoint_id = checkpoint["checkpoint_id"]
-            if self._remove_checkpoint(checkpoint_id):
-                pruned_count += 1
-
-        logger.info(f"Pruned {pruned_count} checkpoints, keeping {max_count}")
-        return pruned_count
-
-    def find_nearest_checkpoint(self, location: str) -> str | None:
-        """
-        Find checkpoint closest to specified location.
-
-        Args:
-            location: Game location to find nearest checkpoint for
-
-        Returns:
-            checkpoint_id: ID of nearest checkpoint or None if none found
-        """
-        checkpoints = self.search_checkpoints({"game_location": location})
-
-        if not checkpoints:
-            # Try broader search
-            checkpoints = self.list_checkpoints()
-
-        if not checkpoints:
-            return None
-
-        # Simple distance heuristic - exact match first, then lexicographic similarity
-        def location_distance(checkpoint: dict[str, Any]) -> int:
-            checkpoint_location = checkpoint.get("game_location", "")
-            if checkpoint_location == location:
-                return 0
-
-            # Simple string similarity
-            return len(set(location) ^ set(checkpoint_location))
-
-        nearest = min(checkpoints, key=location_distance)
-        return str(nearest["checkpoint_id"])
-
-    def count_checkpoints(self, criteria: dict[str, Any] | None = None) -> int:
-        """
-        Count checkpoints matching criteria (for pagination support).
-
-        Args:
-            criteria: Same filter criteria as list_checkpoints
-
-        Returns:
-            Total count of matching checkpoints
-        """
-        # Build count query (same filtering logic as list_checkpoints)
-        base_query = "SELECT COUNT(*) FROM checkpoint_metadata"
-        where_conditions = []
-        values = []
-
-        if criteria:
-            # Location filtering
-            if "location" in criteria:
-                location = criteria["location"]
-                if "*" in location or "?" in location:
-                    location = location.replace("*", "%").replace("?", "_")
-                    where_conditions.append("game_location LIKE ?")
-                    values.append(location)
-                else:
-                    where_conditions.append("game_location = ?")
-                    values.append(location)
-
-            # Date filters
-            if "created_after" in criteria:
-                after_value = self._parse_date_filter(criteria["created_after"])
-                where_conditions.append("created_at >= ?")
-                values.append(after_value)
-
-            if "created_before" in criteria:
-                before_value = self._parse_date_filter(criteria["created_before"])
-                where_conditions.append("created_at <= ?")
-                values.append(before_value)
-
-            # File size filtering
-            if "file_size" in criteria:
-                size_criteria = criteria["file_size"]
-                if isinstance(size_criteria, dict):
-                    if "min" in size_criteria:
-                        where_conditions.append("file_size >= ?")
-                        values.append(size_criteria["min"])
-                    if "max" in size_criteria:
-                        where_conditions.append("file_size <= ?")
-                        values.append(size_criteria["max"])
-                else:
-                    where_conditions.append("file_size = ?")
-                    values.append(size_criteria)
-
-            # Tags filtering
-            if "tags" in criteria:
-                tags = criteria["tags"]
-                if isinstance(tags, list):
-                    tag_conditions = []
-                    for tag in tags:
-                        tag_conditions.append("tags LIKE ?")
-                        values.append(f'%"{tag}"%')
-                    if tag_conditions:
-                        where_conditions.append(f"({' OR '.join(tag_conditions)})")
-                else:
-                    where_conditions.append("tags LIKE ?")
-                    values.append(f'%"{tags}"%')
-
-        # Construct final count query
-        if where_conditions:
-            base_query += " WHERE " + " AND ".join(where_conditions)
-
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute(base_query, values)
-            count = cursor.fetchone()[0]
-
-        return int(count)
-
-    # Private helper methods
-
-    def _validate_and_structure_metadata(
-        self, metadata: dict[str, Any], checkpoint_id: str
-    ) -> CheckpointMetadata:
-        """Validate metadata and convert to structured format."""
-        # Set defaults
-        now = datetime.now(timezone.utc).isoformat()
-
-        structured = CheckpointMetadata(
-            checkpoint_id=checkpoint_id,
-            created_at=metadata.get("created_at", now),
-            game_location=metadata.get("game_location", ""),
-            progress_markers=metadata.get("progress_markers", []),
-            performance_metrics=metadata.get("performance_metrics", {}),
-            tags=metadata.get("tags", []),
-            custom_fields=metadata.get("custom_fields", {}),
-            schema_version=self.SCHEMA_VERSION,
-        )
-
-        # Validate
-        self._validate_metadata_structure(structured)
-
-        return structured
-
-    def _validate_metadata_structure(self, metadata: CheckpointMetadata) -> None:
-        """Validate structured metadata."""
-        if not metadata.checkpoint_id:
-            raise ValueError("checkpoint_id is required")
-
-        if not isinstance(metadata.progress_markers, list):
-            raise ValueError("progress_markers must be a list")
-
-        if not isinstance(metadata.performance_metrics, dict):
-            raise ValueError("performance_metrics must be a dict")
-
-        if not isinstance(metadata.tags, list):
-            raise ValueError("tags must be a list")
-
-        if not isinstance(metadata.custom_fields, dict):
-            raise ValueError("custom_fields must be a dict")
-
-        # Validate datetime format
-        try:
-            datetime.fromisoformat(metadata.created_at)
-        except ValueError as e:
-            raise ValueError("created_at must be valid ISO format timestamp") from e
-
-    def _validate_metadata_dict(self, metadata: dict[str, Any]) -> None:
-        """Validate metadata dictionary format."""
-        required_fields = ["checkpoint_id", "created_at"]
-        for field in required_fields:
-            if field not in metadata:
-                raise ValueError(f"Required field missing: {field}")
-
-        list_fields = ["progress_markers", "tags"]
-        for field in list_fields:
-            if field in metadata and not isinstance(metadata[field], list):
-                raise ValueError(f"{field} must be a list")
-
-        dict_fields = ["performance_metrics", "custom_fields"]
-        for field in dict_fields:
-            if field in metadata and not isinstance(metadata[field], dict):
-                raise ValueError(f"{field} must be a dict")
-
-    def _store_metadata(self, metadata: CheckpointMetadata) -> None:
-        """Store metadata in database."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO checkpoint_metadata
-                (checkpoint_id, created_at, game_location, progress_markers,
-                 performance_metrics, tags, custom_fields, file_size, checksum, schema_version)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-                (
-                    metadata.checkpoint_id,
-                    metadata.created_at,
-                    metadata.game_location,
-                    json.dumps(metadata.progress_markers),
-                    json.dumps(metadata.performance_metrics),
-                    json.dumps(metadata.tags),
-                    json.dumps(metadata.custom_fields),
-                    metadata.file_size,
-                    metadata.checksum,
-                    metadata.schema_version,
-                ),
-            )
-            conn.commit()
-
-        # Update cache
-        self._update_metadata_cache(metadata.checkpoint_id, asdict(metadata))
-
-    def _checkpoint_exists(self, checkpoint_id: str) -> bool:
-        """Check if checkpoint file exists."""
-        checkpoint_file = self.checkpoint_dir / f"{checkpoint_id}.pkl.gz"
-        return checkpoint_file.exists()
-
-    def _calculate_checksum(self, file_path: Path) -> str:
-        """Calculate SHA-256 checksum of file."""
-        hash_sha256 = hashlib.sha256()
-        with open(file_path, "rb") as f:
-            for chunk in iter(lambda: f.read(4096), b""):
-                hash_sha256.update(chunk)
-        return hash_sha256.hexdigest()
-
-    def _row_to_metadata_dict(self, row: tuple[Any, ...]) -> dict[str, Any]:
-        """Convert database row to metadata dictionary."""
-        columns = [
-            "checkpoint_id",
-            "created_at",
-            "game_location",
-            "progress_markers",
-            "performance_metrics",
-            "tags",
-            "custom_fields",
-            "file_size",
-            "checksum",
-            "schema_version",
-        ]
-
-        metadata = dict(zip(columns, row, strict=False))
-
-        # Parse JSON fields
-        json_fields = ["progress_markers", "performance_metrics", "tags", "custom_fields"]
-        for field in json_fields:
-            if metadata[field]:
+                # Decompress
                 try:
-                    metadata[field] = json.loads(metadata[field])
-                except json.JSONDecodeError:
-                    metadata[field] = [] if field in ["progress_markers", "tags"] else {}
+                    json_bytes = lz4.frame.decompress(compressed_data)
+                except (RuntimeError, Exception) as e:
+                    # LZ4 raises RuntimeError for decompression failures
+                    if "LZ4F_" in str(e) or "decompress" in str(e).lower():
+                        raise CheckpointCorruptionError(
+                            f"Failed to decompress checkpoint {checkpoint_id}"
+                        ) from e
+                    else:
+                        raise
 
-        return metadata
+                # Parse JSON
+                try:
+                    json_data = json_bytes.decode("utf-8")
+                    checkpoint_data = json.loads(json_data)
+                except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                    raise CheckpointCorruptionError(
+                        f"Failed to parse checkpoint {checkpoint_id}"
+                    ) from e
 
-    def _update_metadata_cache(self, checkpoint_id: str, metadata: dict[str, Any]) -> None:
-        """Update metadata cache with LRU eviction."""
-        # Add to cache
-        self._metadata_cache[checkpoint_id] = metadata
-        self._cache_access_times[checkpoint_id] = time.time()
+                # Validate checkpoint structure
+                required_fields = ["version", "checkpoint_id", "game_state", "metadata"]
+                for field in required_fields:
+                    if field not in checkpoint_data:
+                        raise CheckpointCorruptionError(
+                            f"Checkpoint {checkpoint_id} missing field: {field}"
+                        )
 
-        # Evict if cache is full
-        if len(self._metadata_cache) > self.METADATA_CACHE_SIZE:
-            # Remove oldest accessed item
-            oldest_id = min(
-                self._cache_access_times.keys(), key=lambda x: self._cache_access_times[x]
-            )
-            del self._metadata_cache[oldest_id]
-            del self._cache_access_times[oldest_id]
+                # Validate checkpoint ID matches
+                if checkpoint_data["checkpoint_id"] != checkpoint_id:
+                    raise CheckpointCorruptionError(
+                        f"Checkpoint ID mismatch: file {checkpoint_id}, content {checkpoint_data['checkpoint_id']}"
+                    )
 
-    def _filter_by_performance(
-        self, checkpoints: list[dict[str, Any]], criteria: dict[str, Any]
-    ) -> list[dict[str, Any]]:
-        """Filter checkpoints by performance criteria."""
-        filtered = []
+                # Extract game state
+                game_state: dict[str, Any] = checkpoint_data["game_state"]
 
-        for checkpoint in checkpoints:
-            performance = checkpoint.get("performance_metrics", {})
+                # Track performance (thread-safe)
+                duration = time.monotonic() - start_time
+                with self._stats_lock:
+                    self._load_times.append(duration)
 
-            if "performance_min" in criteria:
-                success_rate = performance.get("success_rate", 0)
-                if success_rate < criteria["performance_min"]:
-                    continue
-
-            if "performance_max" in criteria:
-                execution_time = performance.get("execution_time", float("inf"))
-                if execution_time > criteria["performance_max"]:
-                    continue
-
-            filtered.append(checkpoint)
-
-        return filtered
-
-    def _filter_by_custom_fields(
-        self, checkpoints: list[dict[str, Any]], custom_criteria: dict[str, Any]
-    ) -> list[dict[str, Any]]:
-        """Filter checkpoints by custom field criteria."""
-        filtered = []
-
-        for checkpoint in checkpoints:
-            custom_fields = checkpoint.get("custom_fields", {})
-
-            matches = True
-            for key, expected_value in custom_criteria.items():
-                if key not in custom_fields or custom_fields[key] != expected_value:
-                    matches = False
-                    break
-
-            if matches:
-                filtered.append(checkpoint)
-
-        return filtered
-
-    def _remove_checkpoint(self, checkpoint_id: str) -> bool:
-        """Remove checkpoint file and metadata."""
-        try:
-            # Remove file
-            checkpoint_file = self.checkpoint_dir / f"{checkpoint_id}.pkl.gz"
-            if checkpoint_file.exists():
-                checkpoint_file.unlink()
-
-            # Remove from database
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute(
-                    "DELETE FROM checkpoint_metadata WHERE checkpoint_id = ?", (checkpoint_id,)
+                logger.info(
+                    "Checkpoint loaded",
+                    checkpoint_id=checkpoint_id,
+                    thread_id=threading.get_ident(),
+                    duration_ms=int(duration * 1000),
+                    compressed_size=len(compressed_data),
+                    decompressed_size=len(json_bytes),
                 )
-                conn.commit()
 
-            # Remove from cache
-            if checkpoint_id in self._metadata_cache:
-                del self._metadata_cache[checkpoint_id]
-                del self._cache_access_times[checkpoint_id]
+                return game_state
 
-            return True
+            finally:
+                checkpoint_lock.release()
+
+        except (CheckpointNotFoundError, CheckpointCorruptionError, CheckpointLockTimeoutError):
+            # Re-raise these specific exceptions
+            raise
+        except Exception as e:
+            logger.error(
+                "Failed to load checkpoint",
+                error=str(e),
+                checkpoint_id=checkpoint_id,
+                thread_id=threading.get_ident(),
+                duration_ms=int((time.monotonic() - start_time) * 1000),
+            )
+            raise CheckpointError(f"Failed to load checkpoint {checkpoint_id}: {e}") from e
+
+    def get_performance_stats(self) -> dict[str, Any]:
+        """
+        Thread-safe get performance statistics for checkpoint operations.
+
+        Returns:
+            Dictionary with performance metrics
+        """
+        with self._stats_lock:
+            # Create copies to avoid race conditions
+            save_times = list(self._save_times)
+            load_times = list(self._load_times)
+
+        stats = {
+            "save_operations": len(save_times),
+            "load_operations": len(load_times),
+            "thread_info": {
+                "current_thread_id": threading.get_ident(),
+                "active_checkpoint_locks": len(self._checkpoint_locks),
+            },
+        }
+
+        if save_times:
+            stats.update(
+                {
+                    "avg_save_time_ms": int(sum(save_times) * 1000 / len(save_times)),
+                    "max_save_time_ms": int(max(save_times) * 1000),
+                    "min_save_time_ms": int(min(save_times) * 1000),
+                }
+            )
+
+        if load_times:
+            stats.update(
+                {
+                    "avg_load_time_ms": int(sum(load_times) * 1000 / len(load_times)),
+                    "max_load_time_ms": int(max(load_times) * 1000),
+                    "min_load_time_ms": int(min(load_times) * 1000),
+                }
+            )
+
+        return stats
+
+    def checkpoint_exists(self, checkpoint_id: str) -> bool:
+        """
+        Thread-safe check if a checkpoint exists.
+
+        Args:
+            checkpoint_id: Checkpoint identifier
+
+        Returns:
+            True if checkpoint exists, False otherwise
+        """
+        with self._metadata_lock.read_lock(timeout=30.0):
+            checkpoint_file = self.checkpoint_dir / f"{checkpoint_id}.lz4"
+            return checkpoint_file.exists()
+
+    def get_checkpoint_size(self, checkpoint_id: str) -> int:
+        """
+        Thread-safe get compressed size of checkpoint file.
+
+        Args:
+            checkpoint_id: Checkpoint identifier
+
+        Returns:
+            Size in bytes
+
+        Raises:
+            CheckpointNotFoundError: If checkpoint doesn't exist
+            CheckpointLockTimeoutError: If locks cannot be acquired
+        """
+        with self._metadata_lock.read_lock(timeout=30.0):
+            checkpoint_file = self.checkpoint_dir / f"{checkpoint_id}.lz4"
+
+            if not checkpoint_file.exists():
+                raise CheckpointNotFoundError(f"Checkpoint {checkpoint_id} not found")
+
+            return checkpoint_file.stat().st_size
+
+    def delete_checkpoint(self, checkpoint_id: str) -> bool:
+        """
+        Thread-safe delete checkpoint file.
+
+        Args:
+            checkpoint_id: Checkpoint identifier
+
+        Returns:
+            True if deleted successfully, False otherwise
+
+        Raises:
+            CheckpointLockTimeoutError: If locks cannot be acquired
+        """
+        checkpoint_lock = self._get_checkpoint_lock(checkpoint_id)
+
+        try:
+            if not checkpoint_lock.acquire(timeout=30.0):
+                raise CheckpointLockTimeoutError(
+                    f"Could not acquire checkpoint lock: {checkpoint_id}"
+                )
+
+            try:
+                with self._metadata_lock.write_lock(timeout=30.0):
+                    checkpoint_file = self.checkpoint_dir / f"{checkpoint_id}.lz4"
+
+                    if not checkpoint_file.exists():
+                        logger.warning("Checkpoint already deleted", checkpoint_id=checkpoint_id)
+                        return False
+
+                    # Use file lock during deletion
+                    try:
+                        with FileLock(checkpoint_file, timeout=30.0).exclusive_lock():
+                            checkpoint_file.unlink()
+                    except CheckpointLockTimeoutError:
+                        # File might be in use - try without lock
+                        checkpoint_file.unlink()
+
+                    logger.info("Checkpoint deleted", checkpoint_id=checkpoint_id)
+                    return True
+
+            finally:
+                checkpoint_lock.release()
 
         except Exception as e:
-            logger.error(f"Failed to remove checkpoint {checkpoint_id}: {e}")
+            logger.error("Failed to delete checkpoint", error=str(e), checkpoint_id=checkpoint_id)
             return False
 
-    def _parse_date_filter(self, date_value: str | dict[str, str]) -> str:
-        """Parse date filter value into ISO format string."""
-        if isinstance(date_value, str):
-            # Assume it's already in ISO format or parse common formats
-            try:
-                # Try parsing as ISO format
-                parsed_date = datetime.fromisoformat(date_value.replace("Z", "+00:00"))
-                return parsed_date.isoformat()
-            except ValueError:
-                # If that fails, return as-is and let SQL handle it
-                return date_value
-        elif isinstance(date_value, dict):
-            # Handle nested date queries - just return the first value for now
-            for value in date_value.values():
-                return self._parse_date_filter(value)
+    def list_checkpoints(self) -> list[str]:
+        """
+        Thread-safe list all checkpoint IDs.
 
-        return str(date_value)
+        Returns:
+            List of checkpoint IDs
+        """
+        with self._metadata_lock.read_lock(timeout=30.0):
+            checkpoint_files = list(self.checkpoint_dir.glob("*.lz4"))
+            return [f.stem for f in checkpoint_files]
 
-    def _filter_by_progress_range(
-        self, results: list[dict[str, Any]], progress_criteria: dict[str, float]
-    ) -> list[dict[str, Any]]:
-        """Filter results by progress range criteria."""
-        filtered = []
-        for result in results:
-            progress_str = result.get("progress_markers", "[]")
-            try:
-                # Extract progress as percentage from progress markers
-                progress_markers = (
-                    json.loads(progress_str) if isinstance(progress_str, str) else progress_str
+    def cleanup_orphaned_locks(self) -> int:
+        """
+        Clean up orphaned checkpoint locks (for maintenance).
+
+        Returns:
+            Number of locks cleaned up
+        """
+        with self._checkpoint_locks_lock:
+            existing_checkpoints = set(self.list_checkpoints())
+            orphaned_locks = []
+
+            for checkpoint_id in self._checkpoint_locks:
+                if checkpoint_id not in existing_checkpoints:
+                    orphaned_locks.append(checkpoint_id)
+
+            for checkpoint_id in orphaned_locks:
+                del self._checkpoint_locks[checkpoint_id]
+
+            if orphaned_locks:
+                logger.info(
+                    "Cleaned up orphaned locks",
+                    count=len(orphaned_locks),
+                    checkpoint_ids=orphaned_locks,
                 )
 
-                # Calculate progress as ratio of completed markers (simple heuristic)
-                if isinstance(progress_markers, list) and progress_markers:
-                    # For simplicity, assume progress is length of progress markers / 10
-                    progress_value = min(1.0, len(progress_markers) / 10.0)
-                else:
-                    progress_value = 0.0
-
-                # Apply range filters
-                if ">=" in progress_criteria and progress_value < progress_criteria[">="]:
-                    continue
-                if "<=" in progress_criteria and progress_value > progress_criteria["<="]:
-                    continue
-                if ">" in progress_criteria and progress_value <= progress_criteria[">"]:
-                    continue
-                if "<" in progress_criteria and progress_value >= progress_criteria["<"]:
-                    continue
-                if "=" in progress_criteria and abs(progress_value - progress_criteria["="]) > 0.01:
-                    continue
-
-                filtered.append(result)
-            except (json.JSONDecodeError, KeyError, TypeError):
-                # If we can't parse progress, include it to be safe
-                filtered.append(result)
-
-        return filtered
-
-    def _filter_by_success_rate(
-        self, results: list[dict[str, Any]], success_criteria: dict[str, float]
-    ) -> list[dict[str, Any]]:
-        """Filter results by success rate criteria."""
-        filtered = []
-        for result in results:
-            perf_metrics_str = result.get("performance_metrics", "{}")
-            try:
-                # Parse performance metrics
-                perf_metrics = (
-                    json.loads(perf_metrics_str)
-                    if isinstance(perf_metrics_str, str)
-                    else perf_metrics_str
-                )
-                success_rate = float(perf_metrics.get("success_rate", 0.0))
-
-                # Apply range filters
-                if ">=" in success_criteria and success_rate < success_criteria[">="]:
-                    continue
-                if "<=" in success_criteria and success_rate > success_criteria["<="]:
-                    continue
-                if ">" in success_criteria and success_rate <= success_criteria[">"]:
-                    continue
-                if "<" in success_criteria and success_rate >= success_criteria["<"]:
-                    continue
-                if "=" in success_criteria and abs(success_rate - success_criteria["="]) > 0.01:
-                    continue
-
-                filtered.append(result)
-            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-                # If we can't parse success rate, include it to be safe
-                filtered.append(result)
-
-        return filtered
+            return len(orphaned_locks)
