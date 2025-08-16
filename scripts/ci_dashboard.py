@@ -498,6 +498,9 @@ class CIDashboard:
                     "-not",
                     "-path",
                     "./worktrees/*",
+                    "-not",
+                    "-path",
+                    "*/worktrees/*",
                 ]
             )
 
@@ -544,6 +547,9 @@ class CIDashboard:
                     "-not",
                     "-path",
                     "./worktrees/*",
+                    "-not",
+                    "-path",
+                    "*/worktrees/*",
                 ]
                 code, stdout, _ = self.run_command(find_args)
                 if code == 0:
