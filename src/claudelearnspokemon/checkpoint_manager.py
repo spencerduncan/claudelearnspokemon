@@ -498,7 +498,7 @@ class CheckpointManager:
             if not metadata or "checksum" not in metadata:
                 return False
 
-            stored_checksum = metadata["checksum"]
+            stored_checksum: str = metadata["checksum"]
 
             # Calculate current checksum
             current_checksum = self._calculate_checksum(checkpoint_file)
