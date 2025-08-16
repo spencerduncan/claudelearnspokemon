@@ -35,6 +35,12 @@ dev = [
     "pre-commit>=3.3.0",
 ]
 
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
 [tool.black]
 line-length = 100
 target-version = ['py310']
@@ -87,6 +93,7 @@ python_classes = "Test*"
 python_functions = "test_*"
 asyncio_mode = "auto"
 addopts = "-v --tb=short --strict-markers"
+pythonpath = ["src"]
 markers = [
     "unit: Unit tests",
     "integration: Integration tests",
