@@ -283,38 +283,41 @@ class CheckpointManager:
             if not checkpoint_path.exists():
                 raise CheckpointNotFoundError(f"Checkpoint {checkpoint_id} not found")
 
-            # Validate integrity before loading
-            if not self.validate_checkpoint(checkpoint_id):
-                raise CheckpointCorruptionError(
-                    f"Checkpoint {checkpoint_id} failed integrity validation"
-                )
-
-            # Load and decompress data using LZ4
-            with checkpoint_path.open("rb") as f:
-                compressed_data = f.read()
-
-            if not compressed_data:
-                raise CheckpointCorruptionError(f"Checkpoint {checkpoint_id} is empty")
-
-            # Decompress with LZ4
+            # Validate integrity before loading with specific error messages
             try:
-                json_bytes = lz4.frame.decompress(compressed_data)
-            except (RuntimeError, Exception) as e:
-                if "LZ4F_" in str(e) or "decompress" in str(e).lower():
+                # First try to validate - this will catch corruption and give us specific errors
+                with checkpoint_path.open("rb") as f:
+                    compressed_data = f.read()
+
+                if not compressed_data:
+                    raise CheckpointCorruptionError(f"Checkpoint {checkpoint_id} is empty")
+
+                # Test LZ4 decompression first
+                try:
+                    decompressed = lz4.frame.decompress(compressed_data)
+                except Exception as e:
                     raise CheckpointCorruptionError(
-                        f"Failed to decompress checkpoint {checkpoint_id}"
+                        f"Failed to decompress checkpoint {checkpoint_id}: {str(e)}"
                     ) from e
-                else:
-                    raise
 
-            # Parse JSON
-            try:
-                json_data = json_bytes.decode("utf-8")
-                checkpoint_data = json.loads(json_data)
-            except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                # Test JSON parsing
+                try:
+                    json_data = decompressed.decode("utf-8")
+                    checkpoint_data = json.loads(json_data)
+                except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                    raise CheckpointCorruptionError(
+                        f"Failed to parse JSON in checkpoint {checkpoint_id}: {str(e)}"
+                    ) from e
+
+            except CheckpointCorruptionError:
+                # Re-raise corruption errors with their specific messages
+                raise
+            except Exception as e:
                 raise CheckpointCorruptionError(
-                    f"Failed to parse checkpoint {checkpoint_id}"
+                    f"Checkpoint {checkpoint_id} failed integrity validation: {str(e)}"
                 ) from e
+
+            # We already have the parsed data from validation
 
             # Validate checkpoint structure
             required_fields = ["version", "checkpoint_id", "game_state", "metadata"]
@@ -323,6 +326,13 @@ class CheckpointManager:
                     raise CheckpointCorruptionError(
                         f"Checkpoint {checkpoint_id} missing field: {field}"
                     )
+
+            # Validate checkpoint ID matches what we expected to load
+            stored_checkpoint_id = checkpoint_data.get("checkpoint_id")
+            if stored_checkpoint_id != checkpoint_id:
+                raise CheckpointCorruptionError(
+                    f"Checkpoint ID mismatch: expected '{checkpoint_id}' but found '{stored_checkpoint_id}'"
+                )
 
             # Extract game state
             game_state: dict[str, Any] = checkpoint_data["game_state"]

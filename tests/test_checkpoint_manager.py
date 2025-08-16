@@ -47,6 +47,16 @@ def checkpoint_manager(temp_storage_dir):
 
 
 @pytest.fixture
+def checkpoint_manager_no_auto_prune(temp_storage_dir):
+    """Create CheckpointManager instance for pruning tests without auto-pruning interference."""
+    return CheckpointManager(
+        temp_storage_dir,
+        max_checkpoints=100,  # High limit to prevent auto-pruning during tests
+        enable_metrics=True,
+    )
+
+
+@pytest.fixture
 def temp_checkpoint_dir():
     """Create temporary checkpoint directory for testing."""
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -328,18 +338,18 @@ class TestCheckpointPruning:
         assert len(result["removed"]) == 0
 
     def test_prune_checkpoints_removes_excess(
-        self, checkpoint_manager, sample_game_state, sample_metadata
+        self, checkpoint_manager_no_auto_prune, sample_game_state, sample_metadata
     ):
         """Test pruning removes excess checkpoints."""
         # Save more checkpoints than the limit
         checkpoint_ids = []
         for i in range(10):
-            checkpoint_id = checkpoint_manager.save_checkpoint(
+            checkpoint_id = checkpoint_manager_no_auto_prune.save_checkpoint(
                 sample_game_state, {"location": f"location_{i}"}
             )
             checkpoint_ids.append(checkpoint_id)
 
-        result = checkpoint_manager.prune_checkpoints(5)
+        result = checkpoint_manager_no_auto_prune.prune_checkpoints(5)
 
         assert result["action"] == "pruning_executed"
         assert result["total_checkpoints"] == 10
@@ -349,24 +359,26 @@ class TestCheckpointPruning:
 
         # Verify files are actually removed
         for checkpoint_id in result["removed"]:
-            checkpoint_file = checkpoint_manager.storage_dir / f"{checkpoint_id}.lz4"
+            checkpoint_file = checkpoint_manager_no_auto_prune.storage_dir / f"{checkpoint_id}.lz4"
             assert not checkpoint_file.exists()
 
     def test_prune_checkpoints_dry_run(
-        self, checkpoint_manager, sample_game_state, sample_metadata
+        self, checkpoint_manager_no_auto_prune, sample_game_state, sample_metadata
     ):
         """Test pruning dry run doesn't remove files."""
         # Save checkpoints
         for i in range(8):
-            checkpoint_manager.save_checkpoint(sample_game_state, {"location": f"location_{i}"})
+            checkpoint_manager_no_auto_prune.save_checkpoint(
+                sample_game_state, {"location": f"location_{i}"}
+            )
 
-        result = checkpoint_manager.prune_checkpoints(5, dry_run=True)
+        result = checkpoint_manager_no_auto_prune.prune_checkpoints(5, dry_run=True)
 
         assert result["action"] == "dry_run"
         assert len(result["removed"]) == 3
 
         # Verify files still exist
-        all_checkpoint_ids = checkpoint_manager._get_all_checkpoint_ids()
+        all_checkpoint_ids = checkpoint_manager_no_auto_prune._get_all_checkpoint_ids()
         assert len(all_checkpoint_ids) == 8
 
     def test_prune_checkpoints_performance(self, checkpoint_manager, sample_game_state):
