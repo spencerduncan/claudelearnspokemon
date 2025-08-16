@@ -380,7 +380,6 @@ class CIDashboard:
                     "-m",
                     "pytest",
                     "tests/",
-                    "--cov=src",
                     "--cov=claudelearnspokemon",
                     "--cov-report=term-missing",
                     "--tb=no",
@@ -478,7 +477,7 @@ class CIDashboard:
         def _fetch_code_stats() -> dict[str, Any]:
             stats = {"largest_files": [], "total_lines": 0, "file_counts": {}, "total_py_files": 0}
 
-            # Find all Python files in project (excluding venv, .git, __pycache__ etc.)
+            # Find all Python files in project (excluding venv, .git, __pycache__, worktrees etc.)
             code, stdout, _ = self.run_command(
                 [
                     "find",
@@ -496,6 +495,9 @@ class CIDashboard:
                     "-not",
                     "-path",
                     "*/__pycache__/*",
+                    "-not",
+                    "-path",
+                    "./worktrees/*",
                 ]
             )
 
@@ -539,6 +541,9 @@ class CIDashboard:
                     "-not",
                     "-path",
                     "*/__pycache__/*",
+                    "-not",
+                    "-path",
+                    "./worktrees/*",
                 ]
                 code, stdout, _ = self.run_command(find_args)
                 if code == 0:
