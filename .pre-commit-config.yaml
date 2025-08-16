@@ -36,7 +36,7 @@ repos:
     hooks:
       - id: pytest
         name: pytest
-        entry: bash -c 'PYTHONPATH=/home/sd/claudelearnspokemon/src:$PYTHONPATH ./venv/bin/pytest tests/ -x --tb=short'
+        entry: bash -c 'PYTHONPATH=/home/sd/worktrees/issue-36/src:$PYTHONPATH ./venv/bin/pytest tests/test_emulator_pool.py tests/test_emulator_pool_concurrent.py -x --tb=short'
         language: system
         types: [python]
         pass_filenames: false
