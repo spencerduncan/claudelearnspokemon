@@ -10,8 +10,9 @@ from unittest.mock import Mock, patch
 
 import docker
 import pytest
-from claudelearnspokemon.emulator_pool import EmulatorPool, EmulatorPoolError
 from docker.errors import APIError, ImageNotFound
+
+from claudelearnspokemon.emulator_pool import EmulatorPool, EmulatorPoolError
 
 
 class TestEmulatorPool:

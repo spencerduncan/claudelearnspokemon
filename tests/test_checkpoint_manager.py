@@ -19,6 +19,7 @@ from unittest.mock import patch
 
 import lz4.frame
 import pytest
+
 from claudelearnspokemon.checkpoint_manager import (
     CheckpointCorruptionError,
     CheckpointError,

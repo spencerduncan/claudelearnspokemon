@@ -14,6 +14,7 @@ import statistics
 import time
 
 import pytest
+
 from claudelearnspokemon.dsl_ast import NodeFactory, NodeType
 from claudelearnspokemon.script_compiler import (
     CodeGenerator,

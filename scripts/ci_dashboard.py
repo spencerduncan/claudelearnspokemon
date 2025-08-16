@@ -950,9 +950,7 @@ class CIDashboard:
                 lines_style = (
                     "green"
                     if additions > deletions
-                    else "red"
-                    if deletions > additions
-                    else "yellow"
+                    else "red" if deletions > additions else "yellow"
                 )
             else:
                 lines_text = "-"
@@ -1016,7 +1014,8 @@ class CIDashboard:
         """Create the header panel."""
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         header_text = Text(
-            f"📊 CI Dashboard | Updated: {now} | Refresh: {self.refresh_interval}s", justify="center"
+            f"📊 CI Dashboard | Updated: {now} | Refresh: {self.refresh_interval}s",
+            justify="center",
         )
         return Panel(header_text, style="bold blue")
 
