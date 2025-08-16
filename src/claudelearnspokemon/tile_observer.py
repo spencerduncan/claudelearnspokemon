@@ -335,7 +335,7 @@ class TileObserver:
         """Handle menu overlay tiles by preserving underlying tile data."""
         # In a real implementation, this might preserve the underlying tiles
         # For now, we'll mark menu areas but not modify the core tiles
-        result = tiles.copy()
+        result: np.ndarray = tiles.copy()
         return result
 
     def _is_position_walkable(
