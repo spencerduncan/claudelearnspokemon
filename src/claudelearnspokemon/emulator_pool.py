@@ -11,25 +11,44 @@ import logging
 import queue
 import threading
 import time
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import docker
 import requests
 from docker.errors import APIError, DockerException, ImageNotFound
 
-# Import Pokemon functionality components (will be gracefully handled if not available)
-try:
-    from .checkpoint_manager import CheckpointManager, CheckpointError
-    from .script_compiler import ScriptCompiler
+if TYPE_CHECKING:
+    from .checkpoint_manager import CheckpointError, CheckpointManager
     from .dsl_ast import CompiledScript
-    POKEMON_COMPONENTS_AVAILABLE = True
-except ImportError:
-    # Graceful degradation when Pokemon components aren't available
-    CheckpointManager = None
-    CheckpointError = Exception
-    ScriptCompiler = None
-    CompiledScript = None
-    POKEMON_COMPONENTS_AVAILABLE = False
+    from .script_compiler import ScriptCompiler
+else:
+    # Import Pokemon functionality components (will be gracefully handled if not available)
+    try:
+        from .checkpoint_manager import CheckpointError, CheckpointManager
+        from .dsl_ast import CompiledScript
+        from .script_compiler import ScriptCompiler
+
+        POKEMON_COMPONENTS_AVAILABLE = True
+    except ImportError:
+        # Graceful degradation when Pokemon components aren't available
+        class CheckpointManager:  # type: ignore
+            pass
+
+        CheckpointError = Exception
+
+        class ScriptCompiler:  # type: ignore
+            pass
+
+        class CompiledScript:  # type: ignore
+            pass
+
+        POKEMON_COMPONENTS_AVAILABLE = False
+
+# Set the flag here so it's always available
+if not TYPE_CHECKING:
+    pass  # Flag already set above
+else:
+    POKEMON_COMPONENTS_AVAILABLE = True  # For type checking, assume available
 
 # Configure logging for production observability
 logging.basicConfig(level=logging.INFO)
@@ -177,6 +196,37 @@ class PokemonGymClient:
         return f"PokemonGymClient(port={self.port}, container={self.container_id[:12]})"
 
 
+class EmulatorContext:
+    """
+    Context manager for automatic emulator acquisition and release.
+
+    Ensures emulators are always properly returned to the pool, even on exceptions.
+    """
+
+    def __init__(self, pool: "EmulatorPool", timeout: float | None):
+        """
+        Initialize context manager.
+
+        Args:
+            pool: EmulatorPool instance to acquire from
+            timeout: Timeout for acquisition
+        """
+        self.pool = pool
+        self.timeout = timeout
+        self.client: PokemonGymClient | None = None
+
+    def __enter__(self) -> PokemonGymClient:
+        """Acquire emulator client when entering context."""
+        self.client = self.pool.acquire(timeout=self.timeout)
+        return self.client
+
+    def __exit__(self, exc_type: type | None, exc_val: Exception | None, exc_tb: Any) -> None:
+        """Release emulator client when exiting context."""
+        if self.client is not None:
+            self.pool.release(self.client)
+            self.client = None
+
+
 class EmulatorPool:
     """
     Manages a pool of Pokemon-gym Docker containers for parallel execution.
@@ -196,6 +246,7 @@ class EmulatorPool:
         image_name: str = "pokemon-gym:latest",
         startup_timeout: int = 30,
         checkpoint_manager: "CheckpointManager | None" = None,
+        default_timeout: float | None = None,
     ):
         """
         Initialize EmulatorPool with production configuration.
@@ -206,11 +257,13 @@ class EmulatorPool:
             image_name: Docker image name for containers (default: pokemon-gym:latest)
             startup_timeout: Max seconds to wait for container startup (default: 30)
             checkpoint_manager: CheckpointManager for state loading (optional)
+            default_timeout: Default timeout for acquire operations (optional)
         """
         self.pool_size = pool_size
         self.base_port = base_port
         self.image_name = image_name
         self.startup_timeout = startup_timeout
+        self.default_timeout = default_timeout
 
         # Container management state
         self.containers: list[docker.models.containers.Container] = []
@@ -224,8 +277,10 @@ class EmulatorPool:
 
         # Core Pokemon functionality components (with graceful degradation)
         if POKEMON_COMPONENTS_AVAILABLE:
-            self.checkpoint_manager = checkpoint_manager or CheckpointManager()
-            self.script_compiler = ScriptCompiler()
+            self.checkpoint_manager: CheckpointManager | None = (
+                checkpoint_manager or CheckpointManager()
+            )
+            self.script_compiler: ScriptCompiler | None = ScriptCompiler()
         else:
             self.checkpoint_manager = None
             self.script_compiler = None
@@ -395,6 +450,22 @@ class EmulatorPool:
                 f"All {self.pool_size} emulators are currently busy."
             ) from None
 
+    def acquire_emulator(self, timeout: float | None = None) -> "EmulatorContext":
+        """
+        Acquire an emulator client as a context manager for automatic resource cleanup.
+
+        Args:
+            timeout: Maximum seconds to wait for available emulator (None uses default_timeout)
+
+        Returns:
+            EmulatorContext that can be used in a 'with' statement
+
+        Raises:
+            EmulatorPoolError: If no emulators available within timeout or pool not initialized
+        """
+        effective_timeout = timeout if timeout is not None else self.default_timeout
+        return EmulatorContext(self, effective_timeout)
+
     def release(self, client: PokemonGymClient) -> None:
         """
         Release emulator client back to available pool.
@@ -453,17 +524,19 @@ class EmulatorPool:
             if POKEMON_COMPONENTS_AVAILABLE and self.script_compiler:
                 logger.info(f"Compiling script: {script_text[:100]}...")
                 compiled_script = self.script_compiler.compile(script_text)
-                
+
                 # Execute compiled script
                 return self.execute_compiled_script(client, compiled_script, checkpoint_id)
-            
+
             else:
                 # Fallback to basic script execution
                 logger.info(f"Using basic script execution for: {script_text[:100]}...")
 
                 # Load checkpoint if specified (basic mode)
                 if checkpoint_id:
-                    logger.warning(f"Checkpoint loading requested but Pokemon components not available")
+                    logger.warning(
+                        "Checkpoint loading requested but Pokemon components not available"
+                    )
 
                 # Compile DSL script to input sequence (simplified compilation)
                 input_sequence = self._compile_script(script_text)
@@ -511,18 +584,18 @@ class EmulatorPool:
     def compile_script(self, script_text: str) -> "CompiledScript":
         """
         Compile DSL script text to CompiledScript using high-performance ScriptCompiler.
-        
+
         This method provides access to the compilation step separately, which is useful for:
         - Pre-compiling scripts for batch execution
         - Validating script syntax before execution
         - Performance optimization by avoiding repeated compilation
-        
+
         Args:
             script_text: DSL script to compile
-            
+
         Returns:
             CompiledScript with instructions, frame estimates, and metadata
-            
+
         Raises:
             EmulatorPoolError: On compilation failure or if Pokemon components not available
         """
@@ -530,7 +603,7 @@ class EmulatorPool:
             raise EmulatorPoolError(
                 "Pokemon components not available. Install CheckpointManager and ScriptCompiler modules."
             )
-            
+
         try:
             return self.script_compiler.compile(script_text)
         except Exception as e:
@@ -572,7 +645,7 @@ class EmulatorPool:
                 try:
                     logger.info(f"Loading checkpoint {checkpoint_id} on {client}")
                     checkpoint_data = self.checkpoint_manager.load_checkpoint(checkpoint_id)
-                    
+
                     # Extract game state and load it into emulator
                     game_state = checkpoint_data.get("game_state", {})
                     if game_state:
@@ -582,7 +655,7 @@ class EmulatorPool:
                         logger.info(f"Checkpoint {checkpoint_id} loaded successfully")
                     else:
                         logger.warning(f"Checkpoint {checkpoint_id} has no game state")
-                        
+
                 except CheckpointError as e:
                     logger.error(f"Failed to load checkpoint {checkpoint_id}: {e}")
                     # Continue execution without checkpoint - this allows graceful degradation
@@ -593,7 +666,7 @@ class EmulatorPool:
             try:
                 # Convert instructions tuple to space-separated string for Pokemon-gym
                 input_sequence = " ".join(script.instructions)
-                
+
                 # Send inputs to emulator
                 response = client.send_input(input_sequence)
 
@@ -607,7 +680,11 @@ class EmulatorPool:
 
                 return ExecutionResult(
                     success=True,
-                    output={"response": response, "final_state": final_state, "script_metadata": script.metadata},
+                    output={
+                        "response": response,
+                        "final_state": final_state,
+                        "script_metadata": script.metadata,
+                    },
                     execution_time=execution_time,
                     checkpoint_reached=checkpoint_reached,
                 )
@@ -617,10 +694,10 @@ class EmulatorPool:
                 logger.error(f"Script execution failed on {client}: {e}")
 
                 return ExecutionResult(
-                    success=False, 
-                    output={"script_metadata": script.metadata}, 
-                    error=str(e), 
-                    execution_time=execution_time
+                    success=False,
+                    output={"script_metadata": script.metadata},
+                    error=str(e),
+                    execution_time=execution_time,
                 )
 
         except Exception as e:
@@ -628,10 +705,7 @@ class EmulatorPool:
             logger.error(f"Failed to execute compiled script: {e}")
 
             return ExecutionResult(
-                success=False, 
-                output=None, 
-                error=str(e), 
-                execution_time=execution_time
+                success=False, output=None, error=str(e), execution_time=execution_time
             )
 
     def health_check(self) -> dict[str, Any]:
@@ -673,6 +747,33 @@ class EmulatorPool:
             "healthy_count": healthy_count,
             "total_count": len(self.clients_by_port),
             "emulators": health_results,
+        }
+
+    def get_status(self) -> dict[str, Any]:
+        """
+        Get current pool status with available and busy emulator counts.
+
+        Returns:
+            Dictionary with pool status information
+        """
+        if not self.containers:
+            return {
+                "available_count": 0,
+                "busy_count": 0,
+                "total_count": 0,
+                "status": "not_initialized",
+            }
+
+        with self.pool_lock:
+            available_count = self.available_clients.qsize()
+            busy_count = len(self.busy_clients)
+
+        return {
+            "available_count": available_count,
+            "busy_count": busy_count,
+            "total_count": self.pool_size,
+            "queue_size": 0,  # Number of threads waiting for emulators (not currently tracked)
+            "status": "healthy" if available_count + busy_count == self.pool_size else "degraded",
         }
 
     def restart_emulator(self, port: int) -> None:
@@ -902,16 +1003,16 @@ class EmulatorPool:
     def _analyze_checkpoint_reached(self, game_state: dict[str, Any]) -> str | None:
         """
         Analyze game state to determine if any significant checkpoints were reached.
-        
+
         This is a simplified analysis - a full implementation would check:
         - Player location/coordinates
         - Story progress flags
         - Item acquisitions
         - Badge count, etc.
-        
+
         Args:
             game_state: Current game state from emulator
-            
+
         Returns:
             Checkpoint identifier if significant progress made, None otherwise
         """
@@ -919,14 +1020,14 @@ class EmulatorPool:
         # Real implementation would check location, story flags, items, etc.
         if not isinstance(game_state, dict):
             return None
-            
+
         # Example: check if player moved to a new location
         location = game_state.get("location", {})
         if isinstance(location, dict):
             map_id = location.get("map_id")
             if map_id and map_id != "starting_town":  # Example progression
                 return f"location_{map_id}"
-                
+
         return None
 
     def _cleanup_containers(self, containers: list[docker.models.containers.Container]) -> None:
