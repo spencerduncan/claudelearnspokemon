@@ -302,7 +302,7 @@ class CIDashboard:
                 test_lines = [
                     line
                     for line in stdout.splitlines()
-                    if re.search(r"<(Function|Method)\s+test_", line.strip())
+                    if re.search(r"<(Function|Method|TestCaseFunction)\s+test_", line.strip())
                 ]
                 status["total"] = len(test_lines)
 
