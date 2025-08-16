@@ -14,6 +14,15 @@ dependencies = [
     "pytest-mock>=3.11.0",
     "docker>=6.1.0",
     "numpy>=1.24.0",
+    "httpx>=0.24.0",
+    "lz4>=4.3.0",
+    "structlog>=23.0.0",
+    "pymgclient>=1.3.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "anyio>=3.7.0",
+    "jsonschema>=4.17.0",
+    "rich>=13.0.0",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +41,8 @@ include = '\.pyi?$'
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.ruff.lint]
 select = [
     "E",   # pycodestyle errors
     "W",   # pycodestyle warnings
@@ -45,7 +56,7 @@ ignore = [
     "E501",  # line too long - handled by black
 ]
 
-[tool.ruff.per-file-ignores]
+[tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101"]  # allow assert in tests
 
 [tool.mypy]
@@ -70,6 +81,12 @@ ignore_errors = true
 module = "claudelearnspokemon.*"
 disallow_untyped_defs = false
 warn_return_any = false
+
+# lz4 is required for checkpoint compression but doesn't have type stubs
+# The library works fine at runtime, we just can't type-check it
+[[tool.mypy.overrides]]
+module = "lz4.*"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
