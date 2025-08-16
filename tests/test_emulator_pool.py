@@ -1,340 +1,191 @@
 """
-Test suite for EmulatorPool Docker container management and concurrent access
+Unit tests for EmulatorPool Docker container lifecycle management.
 
-Combines comprehensive Docker container testing with concurrent access validation.
-Tests both basic pool operations and advanced thread safety scenarios.
+Tests cover production failure scenarios, timeouts, and resource management.
+Following Bot Dean's philosophy: test all failure modes first.
 """
 
-import time
-from unittest.mock import MagicMock, Mock, patch
+import logging
+from unittest.mock import Mock, patch
 
+import docker
 import pytest
 from docker.errors import APIError, ImageNotFound
 
 from claudelearnspokemon.emulator_pool import (
-    EmulatorInstance,
     EmulatorPool,
     EmulatorPoolError,
-    EmulatorState,
+    ExecutionResult,
+    PokemonGymClient,
 )
 
 
-class TestEmulatorPoolBasic:
-    """Test basic EmulatorPool functionality with Docker integration"""
+class TestEmulatorPool:
+    """Test EmulatorPool with production-grade failure scenarios."""
 
-    @pytest.fixture
-    def pool(self) -> EmulatorPool:
-        """Create EmulatorPool instance for testing"""
-        pool_instance = EmulatorPool(pool_size=4, default_timeout=2.0)
-        yield pool_instance
-        # Cleanup after test
-        if hasattr(pool_instance, "_initialized") and pool_instance._initialized:
-            pool_instance.shutdown()
+    def setup_method(self) -> None:
+        """Set up test environment for each test."""
+        self.pool = EmulatorPool()
 
-    @pytest.fixture
-    def mock_docker_client(self) -> Mock:
-        """Mock Docker client for testing"""
-        with patch("claudelearnspokemon.emulator_pool.docker.from_env") as mock_docker:
-            mock_client = Mock()
-            mock_docker.return_value = mock_client
+    def teardown_method(self) -> None:
+        """Clean up after each test - production hygiene."""
+        # Always attempt cleanup to prevent test pollution
+        try:
+            self.pool.shutdown()
+        except Exception:
+            pass  # Pool might not be initialized
 
-            # Create mock containers
-            containers = []
-            for i in range(4):
-                container = Mock()
-                container.id = f"container_{i}"
-                container.status = "running"
-                container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
-                containers.append(container)
+    @pytest.mark.unit
+    def test_initialization_defaults(self) -> None:
+        """Test EmulatorPool initializes with production defaults."""
+        pool = EmulatorPool()
+        assert pool.pool_size == 4  # Default pool size
+        assert pool.base_port == 8081  # Default starting port
+        assert pool.image_name == "pokemon-gym:latest"
+        assert pool.startup_timeout == 30  # Production timeout
+        assert pool.containers == []
+        assert pool.client is None
 
-            mock_client.containers.run.side_effect = containers
-            yield mock_client
-
-    def test_emulator_pool_starts_containers_on_sequential_ports(
-        self, pool: EmulatorPool, mock_docker_client: Mock
-    ) -> None:
-        """Test pool initializes Docker containers on sequential ports"""
-        pool.initialize(pool_size=4)
-
-        # Verify initialization state
-        assert pool._initialized is True
-        assert len(pool._emulators) == 4
-
-        # Verify sequential ports starting from 8081
-        expected_ports = [8081, 8082, 8083, 8084]
-        actual_ports = sorted(pool._emulators.keys())
-        assert actual_ports == expected_ports
-
-        # Verify all emulators are available
-        for _port, emulator in pool._emulators.items():
-            assert emulator.state == EmulatorState.AVAILABLE
-            assert emulator.owner_thread_id is None
-            assert emulator.container is not None
-
-    def test_emulator_pool_tracks_emulator_availability(
-        self, pool: EmulatorPool, mock_docker_client: Mock
-    ) -> None:
-        """Test pool tracks emulator state correctly"""
-        pool.initialize()
-
-        # Initially all available
-        status = pool.get_status()
-        assert status["available_count"] == 4
-        assert status["busy_count"] == 0
-
-        # Acquire one emulator
-        client = pool.acquire()
-        assert client is not None
-
-        # Verify state change
-        status = pool.get_status()
-        assert status["available_count"] == 3
-        assert status["busy_count"] == 1
-
-        # Release emulator
-        pool.release(client)
-
-        # Verify state restored
-        status = pool.get_status()
-        assert status["available_count"] == 4
-        assert status["busy_count"] == 0
-
-    def test_emulator_pool_blocks_acquisition_when_all_busy(
-        self, pool: EmulatorPool, mock_docker_client: Mock
-    ) -> None:
-        """Test acquisition blocks when all emulators are busy"""
-        pool.initialize()
-
-        # Acquire all emulators
-        clients = []
-        for _ in range(4):
-            client = pool.acquire()
-            assert client is not None
-            clients.append(client)
-
-        # Next acquisition should block/timeout
-        start_time = time.time()
-        blocked_client = pool.acquire(timeout=0.5)
-        duration = time.time() - start_time
-
-        assert blocked_client is None
-        assert 0.4 < duration < 0.7  # Should timeout around 0.5s
-
-        # Release one and verify acquisition works
-        pool.release(clients[0])
-        client = pool.acquire(timeout=0.1)
-        assert client is not None
-
-    def test_emulator_pool_execute_script_ownership_validation(
-        self, pool: EmulatorPool, mock_docker_client: Mock
-    ) -> None:
-        """Test script execution validates client ownership"""
-        pool.initialize()
-
-        # Acquire emulator
-        client = pool.acquire()
-        assert client is not None
-
-        # Mock script
-        mock_script = MagicMock()
-        mock_script.id = "test_script"
-
-        # Should succeed with correct owner
-        result = pool.execute_script(client, mock_script, "checkpoint_1")
-        assert result["success"] is True
-
-        # Clean up
-        pool.release(client)
-
-    def test_emulator_pool_maintains_checkpoint_isolation_between_instances(
-        self, pool: EmulatorPool, mock_docker_client: Mock
-    ) -> None:
-        """Test emulators maintain checkpoint isolation"""
-        pool.initialize()
-
-        # Acquire two emulators
-        client1 = pool.acquire()
-        client2 = pool.acquire()
-
-        assert client1 is not None
-        assert client2 is not None
-
-        # Mock script objects
-        mock_script1 = MagicMock()
-        mock_script1.id = "script_1"
-
-        mock_script2 = MagicMock()
-        mock_script2.id = "script_2"
-
-        # Execute scripts on different emulators with different checkpoints
-        result1 = pool.execute_script(client1, mock_script1, "checkpoint_A")
-        result2 = pool.execute_script(client2, mock_script2, "checkpoint_B")
-
-        # Verify isolation - different ports and checkpoints
-        assert result1["port"] != result2["port"]
-        assert result1["checkpoint_id"] == "checkpoint_A"
-        assert result2["checkpoint_id"] == "checkpoint_B"
-
-        # Clean up
-        pool.release(client1)
-        pool.release(client2)
-
-    def test_emulator_pool_gracefully_shuts_down_all_containers(
-        self, pool: EmulatorPool, mock_docker_client: Mock
-    ) -> None:
-        """Test pool gracefully shuts down all Docker containers"""
-        pool.initialize()
-
-        # Acquire two emulators
-        client1 = pool.acquire()
-        client2 = pool.acquire()
-
-        assert client1 is not None
-        assert client2 is not None
-
-        # Get status before shutdown
-        status = pool.get_status()
-        assert status["busy_count"] == 2
-        assert status["available_count"] == 2
-
-        # Shutdown
-        pool.shutdown()
-
-        # Verify shutdown state
-        assert pool._shutdown is True
-        assert len(pool._emulators) == 0
-        assert len(pool._available_ports) == 0
-        assert len(pool._busy_ports) == 0
-
-        # Verify new acquisitions fail
-        client = pool.acquire(timeout=0.5)
-        assert client is None
-
-    def test_emulator_pool_health_check(self, pool: EmulatorPool, mock_docker_client: Mock) -> None:
-        """Test health check functionality with Docker containers"""
-        pool.initialize()
-
-        # All should be healthy initially
-        health = pool.health_check()
-        expected_ports = [8081, 8082, 8083, 8084]
-
-        assert set(health.keys()) == set(expected_ports)
-        for port, is_healthy in health.items():
-            assert is_healthy is True, f"Port {port} should be healthy"
-
-        # Simulate container failure
-        pool._emulators[8081].state = EmulatorState.FAILED
-
-        health = pool.health_check()
-        assert health[8081] is False, "Failed emulator should be unhealthy"
-        assert health[8082] is True, "Other emulators should be healthy"
-
-    def test_emulator_pool_restart_emulator_conditions(
-        self, pool: EmulatorPool, mock_docker_client: Mock
-    ) -> None:
-        """Test conditions for Docker container restart"""
-        pool.initialize()
-
-        # Should not restart non-existent emulator
-        success = pool.restart_emulator(9999)
-        assert success is False
-
-        # Should not restart busy emulator
-        client = pool.acquire()
-        port = None
-        for p, emulator in pool._emulators.items():
-            if emulator.client == client:
-                port = p
-                break
-
-        assert port is not None
-        success = pool.restart_emulator(port)
-        assert success is False
-
-        # Should restart available emulator
-        pool.release(client)
-
-        # Mock the container creation for restart
-        new_container = Mock()
-        new_container.id = "restarted-container"
-        new_container.status = "running"
-        new_container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
-
-        with patch.object(pool, "_start_single_container", return_value=new_container):
-            success = pool.restart_emulator(port)
-            assert success is True
-
-    def test_emulator_pool_restarts_failed_emulator_automatically(
-        self, pool: EmulatorPool, mock_docker_client: Mock
-    ) -> None:
-        """Test automatic restart of failed Docker containers"""
-        pool.initialize()
-
-        # Get a test port
-        test_port = 8081
-        emulator = pool._emulators[test_port]
-
-        # Simulate emulator failure
-        emulator.state = EmulatorState.FAILED
-        pool._available_ports.discard(test_port)
-
-        # Verify failed state
-        status = pool.get_status()
-        assert status["available_count"] == 3
-
-        # Mock the container creation for restart
-        new_container = Mock()
-        new_container.id = "restarted-container"
-        new_container.status = "running"
-        new_container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
-
-        # Restart the failed emulator
-        with patch.object(pool, "_start_single_container", return_value=new_container):
-            restart_success = pool.restart_emulator(test_port)
-            assert restart_success is True
-
-        # Verify it's available again
-        status = pool.get_status()
-        assert status["available_count"] == 4
-
-        emulator = pool._emulators[test_port]
-        assert emulator.state == EmulatorState.AVAILABLE
-        assert test_port in pool._available_ports
-
-    # Docker-specific error handling tests
+    @pytest.mark.unit
+    def test_initialization_custom_parameters(self) -> None:
+        """Test EmulatorPool accepts custom configuration."""
+        pool = EmulatorPool(
+            pool_size=8, base_port=9000, image_name="custom-pokemon:v1", startup_timeout=60
+        )
+        assert pool.pool_size == 8
+        assert pool.base_port == 9000
+        assert pool.image_name == "custom-pokemon:v1"
+        assert pool.startup_timeout == 60
 
     @pytest.mark.unit
     @patch("claudelearnspokemon.emulator_pool.docker.from_env")
-    def test_initialize_image_not_found(self, mock_docker: Mock, pool: EmulatorPool) -> None:
+    def test_initialize_success(self, mock_docker) -> None:
+        """Test successful container pool initialization."""
+        # Mock Docker client and containers
+        mock_client = Mock()
+        mock_docker.return_value = mock_client
+
+        mock_containers = []
+        for i in range(4):
+            container = Mock()
+            container.id = f"container_{i}"
+            container.status = "running"
+            # Mock health check to return success
+            container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+            mock_containers.append(container)
+
+        mock_client.containers.run.side_effect = mock_containers
+
+        # Initialize pool
+        self.pool.initialize(4)
+
+        # Verify Docker client creation
+        mock_docker.assert_called_once()
+
+        # Verify containers were started with correct parameters
+        assert mock_client.containers.run.call_count == 4
+
+        expected_calls = []
+        for i in range(4):
+            port = 8081 + i
+            expected_calls.append(
+                {
+                    "image": "pokemon-gym:latest",
+                    "ports": {"8080/tcp": port},
+                    "detach": True,
+                    "remove": True,
+                    "name": f"pokemon-emulator-{port}",
+                }
+            )
+
+        # Verify each container was started with correct parameters
+        for i, call in enumerate(mock_client.containers.run.call_args_list):
+            args, kwargs = call
+            assert kwargs["image"] == "pokemon-gym:latest"
+            assert kwargs["ports"] == {"8080/tcp": 8081 + i}
+            assert kwargs["detach"] is True
+            assert kwargs["remove"] is True
+            assert kwargs["name"] == f"pokemon-emulator-{8081 + i}"
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    def test_initialize_docker_daemon_unavailable(self, mock_docker) -> None:
+        """Test failure when Docker daemon is unavailable - critical production scenario."""
+        mock_docker.side_effect = docker.errors.DockerException("Docker daemon not running")
+
+        with pytest.raises(EmulatorPoolError) as exc_info:
+            self.pool.initialize(4)
+
+        assert "Docker daemon unavailable" in str(exc_info.value)
+        assert "Ensure Docker daemon is running" in str(exc_info.value)
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    def test_initialize_image_not_found(self, mock_docker) -> None:
         """Test failure when Pokemon-gym image doesn't exist."""
         mock_client = Mock()
         mock_docker.return_value = mock_client
         mock_client.containers.run.side_effect = ImageNotFound("Image not found")
 
         with pytest.raises(EmulatorPoolError) as exc_info:
-            pool.initialize(1)
+            self.pool.initialize(4)
 
-        assert "not found" in str(exc_info.value)
+        assert "Pokemon-gym image not found" in str(exc_info.value)
 
     @pytest.mark.unit
     @patch("claudelearnspokemon.emulator_pool.docker.from_env")
-    def test_initialize_port_conflict(self, mock_docker: Mock, pool: EmulatorPool) -> None:
+    def test_initialize_port_conflict(self, mock_docker) -> None:
         """Test handling of port conflicts - common production issue."""
         mock_client = Mock()
         mock_docker.return_value = mock_client
 
-        # Simulate port conflict
-        api_error = APIError("port is already allocated")
-        mock_client.containers.run.side_effect = api_error
+        # First container succeeds, second fails due to port conflict
+        successful_container = Mock(id="container_1", status="running")
+        successful_container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+
+        mock_client.containers.run.side_effect = [
+            successful_container,
+            APIError("Port 8082 already in use"),
+        ]
 
         with pytest.raises(EmulatorPoolError) as exc_info:
-            pool.initialize(1)
+            self.pool.initialize(4)
 
-        assert "port" in str(exc_info.value).lower()
+        assert "Failed to start container on port 8082" in str(exc_info.value)
 
     @pytest.mark.unit
     @patch("claudelearnspokemon.emulator_pool.docker.from_env")
-    def test_initialize_container_startup_timeout(self, mock_docker: Mock) -> None:
+    def test_initialize_partial_failure_cleanup(self, mock_docker) -> None:
+        """Test cleanup of successfully started containers when initialization fails."""
+        mock_client = Mock()
+        mock_docker.return_value = mock_client
+
+        # Two containers succeed, third fails
+        successful_containers = [
+            Mock(id="container_1", status="running"),
+            Mock(id="container_2", status="running"),
+        ]
+
+        # Mock health checks for successful containers
+        for container in successful_containers:
+            container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+
+        mock_client.containers.run.side_effect = [
+            successful_containers[0],
+            successful_containers[1],
+            APIError("Resource exhausted"),
+        ]
+
+        with pytest.raises(EmulatorPoolError):
+            self.pool.initialize(4)
+
+        # Verify cleanup was attempted on successful containers
+        successful_containers[0].stop.assert_called_once()
+        successful_containers[1].stop.assert_called_once()
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    def test_initialize_container_startup_timeout(self, mock_docker) -> None:
         """Test timeout handling during container startup."""
         mock_client = Mock()
         mock_docker.return_value = mock_client
@@ -355,7 +206,108 @@ class TestEmulatorPoolBasic:
 
     @pytest.mark.unit
     @patch("claudelearnspokemon.emulator_pool.docker.from_env")
-    def test_container_health_check(self, mock_docker: Mock, pool: EmulatorPool) -> None:
+    def test_shutdown_success(self, mock_docker) -> None:
+        """Test graceful shutdown of all containers."""
+        mock_client = Mock()
+        mock_docker.return_value = mock_client
+
+        # Create mock containers
+        mock_containers = []
+        for i in range(4):
+            container = Mock()
+            container.id = f"container_{i}"
+            container.status = "running"
+            # Mock health check to return success
+            container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+            mock_containers.append(container)
+
+        mock_client.containers.run.side_effect = mock_containers
+
+        # Initialize and then shutdown
+        self.pool.initialize(4)
+        self.pool.shutdown()
+
+        # Verify all containers were stopped
+        for container in mock_containers:
+            container.stop.assert_called_once()
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    def test_shutdown_with_stop_failures(self, mock_docker) -> None:
+        """Test shutdown continues even if some containers fail to stop."""
+        mock_client = Mock()
+        mock_docker.return_value = mock_client
+
+        # Create mock containers, one will fail to stop
+        mock_containers = []
+        for i in range(3):
+            container = Mock()
+            container.id = f"container_{i}"
+            container.status = "running"
+            # Mock health check to return success
+            container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+            if i == 1:
+                # Second container fails to stop
+                container.stop.side_effect = APIError("Container stop failed")
+            mock_containers.append(container)
+
+        mock_client.containers.run.side_effect = mock_containers
+
+        # Initialize and shutdown
+        self.pool.initialize(3)
+        self.pool.shutdown()  # Should not raise exception
+
+        # Verify all stop attempts were made
+        for container in mock_containers:
+            container.stop.assert_called_once()
+
+    @pytest.mark.unit
+    def test_shutdown_before_initialization(self) -> None:
+        """Test shutdown is safe when called before initialization."""
+        # Should not raise exception
+        self.pool.shutdown()
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    def test_multiple_shutdown_calls(self, mock_docker) -> None:
+        """Test multiple shutdown calls are safe - idempotent operation."""
+        mock_client = Mock()
+        mock_docker.return_value = mock_client
+
+        container = Mock(id="container_1", status="running")
+        container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+        mock_client.containers.run.return_value = container
+
+        # Initialize, then shutdown multiple times
+        self.pool.initialize(1)
+        self.pool.shutdown()
+        self.pool.shutdown()  # Second call should be safe
+
+        # Container should only be stopped once
+        container.stop.assert_called_once()
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    def test_logging_configuration(self, mock_docker, caplog) -> None:
+        """Test that proper logging is configured for operations."""
+        mock_client = Mock()
+        mock_docker.return_value = mock_client
+
+        container = Mock(id="test_container", status="running")
+        container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+        mock_client.containers.run.return_value = container
+
+        with caplog.at_level(logging.INFO):
+            self.pool.initialize(1)
+
+        # Verify logging messages
+        assert "Initializing EmulatorPool with 1 containers" in caplog.text
+        assert "Starting container on port 8081" in caplog.text
+        assert "Container test_container started successfully" in caplog.text
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    def test_container_health_check(self, mock_docker) -> None:
         """Test container health verification after startup."""
         mock_client = Mock()
         mock_docker.return_value = mock_client
@@ -369,96 +321,517 @@ class TestEmulatorPoolBasic:
         mock_client.containers.run.return_value = mock_container
 
         with pytest.raises(EmulatorPoolError) as exc_info:
-            pool.initialize(1)
+            self.pool.initialize(1)
 
         assert "Container health check failed" in str(exc_info.value)
 
+    @pytest.mark.unit
+    def test_get_container_ports(self) -> None:
+        """Test port calculation for different pool sizes."""
+        pool = EmulatorPool(base_port=9000)
 
-class TestEmulatorInstance:
-    """Test EmulatorInstance data class"""
+        # Test port calculation
+        ports = pool._get_container_ports(5)
+        expected_ports = [9000, 9001, 9002, 9003, 9004]
+        assert ports == expected_ports
 
-    def test_emulator_instance_creation(self) -> None:
-        """Test EmulatorInstance initialization"""
-        emulator = EmulatorInstance(port=8081)
-
-        assert emulator.port == 8081
-        assert emulator.client is None
-        assert emulator.state == EmulatorState.AVAILABLE
-        assert emulator.owner_thread_id is None
-        assert emulator.acquired_at is None
-
-    def test_emulator_instance_availability_check(self) -> None:
-        """Test EmulatorInstance availability logic"""
-        emulator = EmulatorInstance(port=8081)
-
-        # Should be available initially
-        assert emulator.is_available() is True
-
-        # Should not be available when busy
-        emulator.state = EmulatorState.BUSY
-        assert emulator.is_available() is False
-
-        # Should not be available when owned by thread
-        emulator.state = EmulatorState.AVAILABLE
-        emulator.owner_thread_id = 12345
-        assert emulator.is_available() is False
-
-        # Should not be available when failed
-        emulator.owner_thread_id = None
-        emulator.state = EmulatorState.FAILED
-        assert emulator.is_available() is False
-
-
-class TestEmulatorPoolConfiguration:
-    """Test EmulatorPool configuration and lifecycle"""
-
-    def test_custom_pool_size_and_timeout(self) -> None:
-        """Test EmulatorPool with custom configuration"""
-        pool = EmulatorPool(pool_size=6, default_timeout=15.0, base_port=9000)
-
-        assert pool.pool_size == 6
-        assert pool.default_timeout == 15.0
-        assert pool.base_port == 9000
-
-    def test_acquisition_before_initialization(self) -> None:
-        """Test acquisition behavior before pool initialization"""
-        pool = EmulatorPool()
-
-        # Should timeout waiting for initialization
-        start_time = time.time()
-        client = pool.acquire(timeout=0.5)
-        duration = time.time() - start_time
-
-        assert client is None
-        assert 0.4 < duration < 0.7
-
+    @pytest.mark.unit
     @patch("claudelearnspokemon.emulator_pool.docker.from_env")
-    def test_double_initialization_handling(self, mock_docker: Mock) -> None:
-        """Test multiple initialization calls are handled gracefully"""
+    def test_resource_cleanup_on_exception(self, mock_docker) -> None:
+        """Test that resources are properly cleaned up when exceptions occur."""
         mock_client = Mock()
         mock_docker.return_value = mock_client
-        mock_client.containers.run.return_value = Mock(
-            id="test", status="running", exec_run=Mock(return_value=Mock(exit_code=0))
-        )
 
-        pool = EmulatorPool()
-        pool.initialize(1)
+        # First container succeeds, second fails
+        successful_container = Mock(id="success", status="running")
+        successful_container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+        mock_client.containers.run.side_effect = [
+            successful_container,
+            RuntimeError("Unexpected error"),
+        ]
 
-        # Second initialization should be ignored
-        pool.initialize(2)  # Different size should be ignored
+        with pytest.raises(EmulatorPoolError):
+            self.pool.initialize(2)
 
-        assert pool.pool_size == 1  # Should remain at original size
+        # Verify successful container was cleaned up
+        successful_container.stop.assert_called_once()
 
-    def test_double_shutdown_handling(self) -> None:
-        """Test multiple shutdown calls are safe - idempotent operation"""
-        pool = EmulatorPool()
+    @pytest.mark.integration
+    @pytest.mark.slow
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    def test_full_lifecycle_integration(self, mock_docker) -> None:
+        """Integration test for full container lifecycle."""
+        mock_client = Mock()
+        mock_docker.return_value = mock_client
 
-        # Multiple shutdowns should not raise exception
-        pool.shutdown()
-        pool.shutdown()  # Should be safe
+        # Create realistic container mocks
+        containers = []
+        for i in range(4):
+            container = Mock()
+            container.id = f"pokemon-emulator-{8081+i}"
+            container.status = "running"
+            container.exec_run.return_value = Mock(exit_code=0)  # Health check passes
+            containers.append(container)
+
+        mock_client.containers.run.side_effect = containers
+
+        # Full lifecycle test
+        self.pool.initialize(4)
+        assert len(self.pool.containers) == 4
+
+        self.pool.shutdown()
+        assert len(self.pool.containers) == 0
+
+        # Verify all containers were managed correctly
+        for container in containers:
+            container.stop.assert_called_once()
 
 
-# Import concurrent access tests from the dedicated test file
-# Note: These tests are maintained in test_emulator_pool_concurrent.py
-# to keep them focused on concurrent access scenarios while this file
-# focuses on basic Docker container operations.
+class TestEmulatorPoolResourcePool:
+    """Test resource pool functionality for EmulatorPool."""
+
+    def setup_method(self) -> None:
+        """Set up test environment for resource pool tests."""
+        self.pool = EmulatorPool(pool_size=2, base_port=9000)
+
+    def teardown_method(self) -> None:
+        """Clean up after each test."""
+        try:
+            self.pool.shutdown()
+        except Exception:
+            pass
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    @patch("claudelearnspokemon.emulator_pool.PokemonGymClient")
+    def test_acquire_release_basic_functionality(self, mock_client_class, mock_docker) -> None:
+        """Test basic acquire and release operations."""
+        # Setup mocks
+        mock_docker_client = Mock()
+        mock_docker.return_value = mock_docker_client
+
+        mock_containers = []
+        mock_clients = []
+        for i in range(2):
+            container = Mock()
+            container.id = f"container_{i}"
+            container.status = "running"
+            container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+            mock_containers.append(container)
+
+            client = Mock()
+            client.port = 9000 + i
+            client.container_id = container.id
+            mock_clients.append(client)
+
+        mock_docker_client.containers.run.side_effect = mock_containers
+        mock_client_class.side_effect = mock_clients
+
+        # Initialize pool
+        self.pool.initialize()
+
+        # Test acquire
+        acquired_client = self.pool.acquire()
+        assert acquired_client in mock_clients
+        assert acquired_client.port in self.pool.busy_clients
+
+        # Test release
+        self.pool.release(acquired_client)
+        assert acquired_client.port not in self.pool.busy_clients
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    @patch("claudelearnspokemon.emulator_pool.PokemonGymClient")
+    def test_emulator_pool_blocks_acquisition_when_all_busy(
+        self, mock_client_class, mock_docker
+    ) -> None:
+        """Test that acquire blocks when all emulators are busy."""
+        # Setup mocks
+        mock_docker_client = Mock()
+        mock_docker.return_value = mock_docker_client
+
+        mock_containers = []
+        mock_clients = []
+        for i in range(2):
+            container = Mock()
+            container.id = f"container_{i}"
+            container.status = "running"
+            container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+            mock_containers.append(container)
+
+            client = Mock()
+            client.port = 9000 + i
+            client.container_id = container.id
+            mock_clients.append(client)
+
+        mock_docker_client.containers.run.side_effect = mock_containers
+        mock_client_class.side_effect = mock_clients
+
+        # Initialize pool
+        self.pool.initialize()
+
+        # Acquire all clients
+        self.pool.acquire()  # First client acquired
+        self.pool.acquire()  # Second client acquired, pool now full
+
+        # Try to acquire when all busy - should timeout
+        with pytest.raises(EmulatorPoolError) as exc_info:
+            self.pool.acquire(timeout=0.1)
+
+        assert "No emulators available within 0.1s timeout" in str(exc_info.value)
+        assert "All 2 emulators are currently busy" in str(exc_info.value)
+
+    @pytest.mark.unit
+    def test_acquire_before_initialization_fails(self) -> None:
+        """Test that acquire fails before pool initialization."""
+        with pytest.raises(EmulatorPoolError) as exc_info:
+            self.pool.acquire()
+
+        assert "EmulatorPool not initialized" in str(exc_info.value)
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    @patch("claudelearnspokemon.emulator_pool.PokemonGymClient")
+    def test_release_invalid_client_type(self, mock_client_class, mock_docker) -> None:
+        """Test that release rejects invalid client types."""
+        # Setup mocks for initialization
+        mock_docker_client = Mock()
+        mock_docker.return_value = mock_docker_client
+
+        container = Mock()
+        container.id = "container_1"
+        container.status = "running"
+        container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+
+        client = Mock()
+        client.port = 9000
+        client.container_id = container.id
+
+        mock_docker_client.containers.run.return_value = container
+        mock_client_class.return_value = client
+
+        self.pool.initialize()
+
+        # Try to release invalid client type (string doesn't have port/container_id)
+        with pytest.raises(EmulatorPoolError) as exc_info:
+            self.pool.release("not_a_client")
+
+        assert "Invalid client type - must be PokemonGymClient" in str(exc_info.value)
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    @patch("claudelearnspokemon.emulator_pool.PokemonGymClient")
+    @patch("claudelearnspokemon.emulator_pool.requests.Session")
+    def test_execute_script_success(self, mock_session, mock_client_class, mock_docker) -> None:
+        """Test successful script execution."""
+        # Setup mocks
+        mock_docker_client = Mock()
+        mock_docker.return_value = mock_docker_client
+
+        container = Mock()
+        container.id = "container_1"
+        container.status = "running"
+        container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+
+        mock_client = Mock()
+        mock_client.port = 9000
+        mock_client.container_id = container.id
+        mock_client.send_input.return_value = {"status": "success"}
+        mock_client.get_state.return_value = {"game_state": "running"}
+
+        mock_docker_client.containers.run.return_value = container
+        mock_client_class.return_value = mock_client
+
+        self.pool.initialize()
+
+        # Execute script
+        result = self.pool.execute_script("PRESS A")
+
+        assert result.success is True
+        assert result.output["response"]["status"] == "success"
+        assert result.output["final_state"]["game_state"] == "running"
+        assert result.execution_time is not None
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    @patch("claudelearnspokemon.emulator_pool.PokemonGymClient")
+    def test_execute_script_client_failure(self, mock_client_class, mock_docker) -> None:
+        """Test script execution when client fails."""
+        # Setup mocks
+        mock_docker_client = Mock()
+        mock_docker.return_value = mock_docker_client
+
+        container = Mock()
+        container.id = "container_1"
+        container.status = "running"
+        container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+
+        mock_client = Mock()
+        mock_client.port = 9000
+        mock_client.container_id = container.id
+        mock_client.send_input.side_effect = Exception("Connection failed")
+
+        mock_docker_client.containers.run.return_value = container
+        mock_client_class.return_value = mock_client
+
+        self.pool.initialize()
+
+        # Execute script with failure
+        result = self.pool.execute_script("PRESS A")
+
+        assert result.success is False
+        assert "Connection failed" in result.error
+        assert result.execution_time is not None
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    @patch("claudelearnspokemon.emulator_pool.PokemonGymClient")
+    def test_health_check_all_healthy(self, mock_client_class, mock_docker) -> None:
+        """Test health check when all emulators are healthy."""
+        # Setup mocks
+        mock_docker_client = Mock()
+        mock_docker.return_value = mock_docker_client
+
+        mock_containers = []
+        mock_clients = []
+        for i in range(2):
+            container = Mock()
+            container.id = f"container_{i}"
+            container.status = "running"
+            container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+            mock_containers.append(container)
+
+            client = Mock()
+            client.port = 9000 + i
+            client.container_id = container.id
+            client.is_healthy.return_value = True
+            mock_clients.append(client)
+
+        mock_docker_client.containers.run.side_effect = mock_containers
+        mock_client_class.side_effect = mock_clients
+
+        self.pool.initialize()
+
+        # Check health
+        health_status = self.pool.health_check()
+
+        assert health_status["status"] == "healthy"
+        assert health_status["healthy_count"] == 2
+        assert health_status["total_count"] == 2
+        assert len(health_status["emulators"]) == 2
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    @patch("claudelearnspokemon.emulator_pool.PokemonGymClient")
+    def test_health_check_degraded(self, mock_client_class, mock_docker) -> None:
+        """Test health check when some emulators are unhealthy."""
+        # Setup mocks
+        mock_docker_client = Mock()
+        mock_docker.return_value = mock_docker_client
+
+        mock_containers = []
+        mock_clients = []
+        for i in range(2):
+            container = Mock()
+            container.id = f"container_{i}"
+            container.status = "running"
+            container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+            mock_containers.append(container)
+
+            client = Mock()
+            client.port = 9000 + i
+            client.container_id = container.id
+            client.is_healthy.return_value = i == 0  # First healthy, second unhealthy
+            mock_clients.append(client)
+
+        mock_docker_client.containers.run.side_effect = mock_containers
+        mock_client_class.side_effect = mock_clients
+
+        self.pool.initialize()
+
+        # Check health
+        health_status = self.pool.health_check()
+
+        assert health_status["status"] == "degraded"
+        assert health_status["healthy_count"] == 1
+        assert health_status["total_count"] == 2
+
+    @pytest.mark.unit
+    def test_health_check_before_initialization(self) -> None:
+        """Test health check before initialization."""
+        health_status = self.pool.health_check()
+
+        assert health_status["status"] == "not_initialized"
+        assert health_status["healthy_count"] == 0
+        assert health_status["total_count"] == 0
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    @patch("claudelearnspokemon.emulator_pool.PokemonGymClient")
+    def test_restart_emulator_success(self, mock_client_class, mock_docker) -> None:
+        """Test successful emulator restart."""
+        # Setup mocks
+        mock_docker_client = Mock()
+        mock_docker.return_value = mock_docker_client
+
+        # Original container and client
+        original_container = Mock()
+        original_container.id = "original_container"
+        original_container.status = "running"
+        original_container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+
+        # New container and client for restart
+        new_container = Mock()
+        new_container.id = "new_container"
+        new_container.status = "running"
+        new_container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+
+        original_client = Mock()
+        original_client.port = 9000
+        original_client.container_id = original_container.id
+
+        new_client = Mock()
+        new_client.port = 9000
+        new_client.container_id = new_container.id
+
+        # Setup mock calls
+        mock_docker_client.containers.run.side_effect = [original_container, new_container]
+        mock_client_class.side_effect = [original_client, new_client]
+
+        self.pool.initialize(1)
+
+        # Restart emulator
+        self.pool.restart_emulator(9000)
+
+        # Verify old container was stopped
+        original_container.stop.assert_called_once()
+
+        # Verify new client is in pool
+        assert self.pool.clients_by_port[9000] == new_client
+
+    @pytest.mark.unit
+    def test_restart_emulator_invalid_port(self) -> None:
+        """Test restart with invalid port."""
+        with pytest.raises(EmulatorPoolError) as exc_info:
+            self.pool.restart_emulator(9999)
+
+        assert "No emulator found on port 9999" in str(exc_info.value)
+
+    @pytest.mark.unit
+    def test_compile_script_basic_dsl(self) -> None:
+        """Test basic DSL compilation."""
+        script = "PRESS A PRESS B MOVE UP WAIT"
+        result = self.pool._compile_script(script)
+        assert result == "A B UP WAIT"
+
+    @pytest.mark.unit
+    def test_compile_script_case_insensitive(self) -> None:
+        """Test DSL compilation is case insensitive."""
+        script = "press a move down press start"
+        result = self.pool._compile_script(script)
+        assert result == "A DOWN START"
+
+
+class TestPokemonGymClient:
+    """Test PokemonGymClient functionality."""
+
+    @pytest.mark.unit
+    def test_initialization(self) -> None:
+        """Test PokemonGymClient initialization."""
+        client = PokemonGymClient(8081, "container123")
+        assert client.port == 8081
+        assert client.container_id == "container123"
+        assert client.base_url == "http://localhost:8081"
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.requests.Session")
+    def test_send_input_success(self, mock_session_class) -> None:
+        """Test successful input sending."""
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"status": "ok"}
+        mock_session.post.return_value = mock_response
+        mock_session_class.return_value = mock_session
+
+        client = PokemonGymClient(8081, "container123")
+        result = client.send_input("A B START")
+
+        assert result["status"] == "ok"
+        mock_session.post.assert_called_once()
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.requests.Session")
+    def test_get_state_success(self, mock_session_class) -> None:
+        """Test successful state retrieval."""
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"state": "running"}
+        mock_session.get.return_value = mock_response
+        mock_session_class.return_value = mock_session
+
+        client = PokemonGymClient(8081, "container123")
+        result = client.get_state()
+
+        assert result["state"] == "running"
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.requests.Session")
+    def test_is_healthy_true(self, mock_session_class) -> None:
+        """Test health check returns True."""
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_session.get.return_value = mock_response
+        mock_session_class.return_value = mock_session
+
+        client = PokemonGymClient(8081, "container123")
+        assert client.is_healthy() is True
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.requests.Session")
+    def test_is_healthy_false_on_exception(self, mock_session_class) -> None:
+        """Test health check returns False on exception."""
+        import requests
+
+        mock_session = Mock()
+        mock_session.get.side_effect = requests.RequestException("Connection failed")
+        mock_session_class.return_value = mock_session
+
+        # Create client after mocking the session
+        client = PokemonGymClient(8081, "container123")
+        assert client.is_healthy() is False
+
+
+class TestExecutionResult:
+    """Test ExecutionResult functionality."""
+
+    @pytest.mark.unit
+    def test_successful_result(self) -> None:
+        """Test successful execution result."""
+        result = ExecutionResult(success=True, output={"data": "test"}, execution_time=1.5)
+        assert result.success is True
+        assert result.output["data"] == "test"
+        assert result.execution_time == 1.5
+        assert "SUCCESS" in str(result)
+
+    @pytest.mark.unit
+    def test_failed_result(self) -> None:
+        """Test failed execution result."""
+        result = ExecutionResult(success=False, output=None, error="Test error", execution_time=0.5)
+        assert result.success is False
+        assert result.error == "Test error"
+        assert result.execution_time == 0.5
+        assert "FAILURE" in str(result)
+
+
+class TestEmulatorPoolError:
+    """Test custom exception class."""
+
+    @pytest.mark.unit
+    def test_emulator_pool_error_inheritance(self) -> None:
+        """Test EmulatorPoolError is proper Exception subclass."""
+        error = EmulatorPoolError("Test error")
+        assert isinstance(error, Exception)
+        assert str(error) == "Test error"
