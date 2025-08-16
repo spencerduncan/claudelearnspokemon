@@ -14,7 +14,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Union
 
 from rich.console import Console
 from rich.layout import Layout
@@ -34,7 +34,7 @@ class CIDashboard:
         self.worktrees_root = Path("/home/sd/worktrees")
 
     def run_command(
-        self, cmd: Union[str, list[str]], cwd: Optional[Path] = None
+        self, cmd: Union[str, list[str]], cwd: Path | None = None
     ) -> tuple[int, str, str]:
         """Run a command safely without shell injection vulnerabilities.
 
@@ -86,9 +86,7 @@ class CIDashboard:
         self.cache_times[key] = now
         return result
 
-    def _safe_git_command(
-        self, args: list[str], cwd: Optional[Path] = None
-    ) -> tuple[int, str, str]:
+    def _safe_git_command(self, args: list[str], cwd: Path | None = None) -> tuple[int, str, str]:
         """Execute a git command safely with argument validation.
 
         Args:
@@ -102,7 +100,7 @@ class CIDashboard:
         safe_args = ["git"] + [str(arg) for arg in args if arg is not None]
         return self.run_command(safe_args, cwd)
 
-    def _safe_gh_command(self, args: list[str], cwd: Optional[Path] = None) -> tuple[int, str, str]:
+    def _safe_gh_command(self, args: list[str], cwd: Path | None = None) -> tuple[int, str, str]:
         """Execute a gh CLI command safely with argument validation.
 
         Args:
@@ -434,12 +432,19 @@ class CIDashboard:
                 "pre_commit": "unknown",
             }
 
-            # Check ruff
-            code, stdout, _ = self.run_command(["ruff", "check", "src/", "tests/"])
+            # Check ruff - use --statistics to get accurate count
+            code, stdout, _ = self.run_command(["ruff", "check", "src/", "tests/", "--statistics"])
             if code != 0:
-                # Count lines in stderr for violations
-                violations = len([line for line in stdout.splitlines() if line.strip()])
-                quality["ruff_violations"] = violations
+                # Parse statistics output for actual violation count
+                # Each line looks like: "3  I001  [*] unsorted-imports"
+                import re
+
+                total_violations = 0
+                for line in stdout.splitlines():
+                    match = re.match(r"^\s*(\d+)\s+\w+", line.strip())
+                    if match:
+                        total_violations += int(match.group(1))
+                quality["ruff_violations"] = total_violations
             else:
                 quality["ruff_violations"] = 0
             # Check black
@@ -449,12 +454,10 @@ class CIDashboard:
             # Check mypy
             code, stdout, _ = self.run_command(["mypy", "src/"])
             if code != 0:
-                # Count error lines that start with 'src/'
+                # Count actual error lines - look for lines that contain ': error:'
                 import re
 
-                error_lines = [
-                    line for line in stdout.splitlines() if re.match(r"^src/", line.strip())
-                ]
+                error_lines = [line for line in stdout.splitlines() if re.search(r": error:", line)]
                 quality["mypy_errors"] = len(error_lines)
             else:
                 quality["mypy_errors"] = 0

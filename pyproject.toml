@@ -72,6 +72,12 @@ warn_no_return = true
 check_untyped_defs = true
 strict_equality = true
 
+# lz4 is required for checkpoint compression but doesn't have type stubs
+# The library works fine at runtime, we just can't type-check it
+[[tool.mypy.overrides]]
+module = "lz4.*"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = "test_*.py"
