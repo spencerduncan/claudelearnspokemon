@@ -58,4 +58,4 @@ jobs:
 
     - name: Run type checking
       run: |
-        python -m mypy src/claudelearnspokemon --ignore-missing-imports --strict
+        python -m mypy src/claudelearnspokemon --config-file=pyproject.toml
