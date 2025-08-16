@@ -8,6 +8,7 @@ import random
 import threading
 import time
 import unittest
+from unittest.mock import Mock, patch
 
 from claudelearnspokemon.emulator_pool import EmulatorPool
 
@@ -17,12 +18,32 @@ class TestEmulatorPoolConcurrentAccess(unittest.TestCase):
 
     def setUp(self):
         """Set up test environment"""
+        # Set up Docker mocking
+        self.mock_docker_patcher = patch("claudelearnspokemon.emulator_pool.docker.from_env")
+        mock_docker = self.mock_docker_patcher.start()
+
+        self.mock_client = Mock()
+        mock_docker.return_value = self.mock_client
+
+        # Create mock containers for the pool
+        containers = []
+        for i in range(4):
+            container = Mock()
+            container.id = f"container_{i}"
+            container.status = "running"
+            container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+            containers.append(container)
+
+        self.mock_client.containers.run.side_effect = containers
+
+        # Initialize the pool with mocked Docker
         self.pool = EmulatorPool(pool_size=4, default_timeout=5.0)
         self.pool.initialize()
 
     def tearDown(self):
         """Clean up test environment"""
         self.pool.shutdown()
+        self.mock_docker_patcher.stop()
 
     def test_handles_concurrent_acquisition_requests(self):
         """Test multiple threads can acquire different emulators simultaneously"""
@@ -510,11 +531,30 @@ class TestEmulatorPoolContextManager(unittest.TestCase):
     """Test context manager functionality"""
 
     def setUp(self):
+        # Set up Docker mocking
+        self.mock_docker_patcher = patch("claudelearnspokemon.emulator_pool.docker.from_env")
+        mock_docker = self.mock_docker_patcher.start()
+
+        self.mock_client = Mock()
+        mock_docker.return_value = self.mock_client
+
+        # Create mock containers for the pool
+        containers = []
+        for i in range(2):
+            container = Mock()
+            container.id = f"container_{i}"
+            container.status = "running"
+            container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+            containers.append(container)
+
+        self.mock_client.containers.run.side_effect = containers
+
         self.pool = EmulatorPool(pool_size=2)
         self.pool.initialize()
 
     def tearDown(self):
         self.pool.shutdown()
+        self.mock_docker_patcher.stop()
 
     def test_context_manager_automatic_release(self):
         """Test context manager automatically releases emulator"""
