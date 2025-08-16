@@ -41,3 +41,6 @@ temp/
 
 # Project tracking
 TASKS.md
+
+# Worktrees and development directories
+worktrees/
