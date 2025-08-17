@@ -2,6 +2,6 @@
 
 __version__ = "0.1.0"
 
-from .emulator_pool import EmulatorPool, EmulatorPoolError
+from .emulator_pool import EmulatorPool, EmulatorPoolError, ExecutionResult, PokemonGymClient
 
-__all__ = ["EmulatorPool", "EmulatorPoolError"]
+__all__ = ["EmulatorPool", "EmulatorPoolError", "ExecutionResult", "PokemonGymClient"]

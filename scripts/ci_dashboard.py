@@ -34,13 +34,14 @@ class CIDashboard:
         self.worktrees_root = Path("/home/sd/worktrees")
 
     def run_command(
-        self, cmd: Union[str, list[str]], cwd: Path | None = None
+        self, cmd: Union[str, list[str]], cwd: Path | None = None, timeout: int = 10
     ) -> tuple[int, str, str]:
         """Run a command safely without shell injection vulnerabilities.
 
         Args:
             cmd: Command as string (will be parsed) or list of arguments
             cwd: Working directory for command
+            timeout: Command timeout in seconds (default: 10)
 
         Returns:
             Tuple of (exit_code, stdout, stderr)
@@ -62,7 +63,7 @@ class CIDashboard:
                 capture_output=True,
                 text=True,
                 cwd=cwd or self.project_root,
-                timeout=10,
+                timeout=timeout,
             )
             return result.returncode, result.stdout, result.stderr
         except subprocess.TimeoutExpired:
@@ -302,7 +303,7 @@ class CIDashboard:
                 test_lines = [
                     line
                     for line in stdout.splitlines()
-                    if re.search(r"<(Function|Method)\s+test_", line.strip())
+                    if re.search(r"<(Function|Method|TestCaseFunction)\s+test_", line.strip())
                 ]
                 status["total"] = len(test_lines)
 
@@ -319,7 +320,7 @@ class CIDashboard:
                 should_run_tests = False
 
             if should_run_tests:
-                # Use timeout command safely
+                # Use timeout command safely - give extra buffer beyond the 30s timeout command
                 code, stdout, stderr = self.run_command(
                     [
                         "timeout",
@@ -331,16 +332,19 @@ class CIDashboard:
                         "-v",
                         "--tb=no",
                         "--no-header",
-                    ]
+                    ],
+                    timeout=35,
                 )
-                if code != 0:
+                # Don't treat test failures as timeout errors - pytest exits 1 when tests fail
+                # Only add timeout error if we actually got a timeout (checked in run_command)
+                if code != 0 and "Command timed out" in stderr:
                     stdout += "\nTIMEOUT_OR_ERROR"
             else:
                 # Skip test execution due to collection errors
                 stdout = "TIMEOUT_OR_ERROR - Collection errors prevent execution"
                 code = 1
 
-            if code == 0 and "TIMEOUT_OR_ERROR" not in stdout:
+            if "TIMEOUT_OR_ERROR" not in stdout:
                 # Parse pytest output for real results
                 import re
 
@@ -380,12 +384,12 @@ class CIDashboard:
                     "-m",
                     "pytest",
                     "tests/",
-                    "--cov=src",
                     "--cov=claudelearnspokemon",
                     "--cov-report=term-missing",
                     "--tb=no",
                     "-q",
-                ]
+                ],
+                timeout=35,
             )
 
             # Extract TOTAL line from coverage output
@@ -478,7 +482,7 @@ class CIDashboard:
         def _fetch_code_stats() -> dict[str, Any]:
             stats = {"largest_files": [], "total_lines": 0, "file_counts": {}, "total_py_files": 0}
 
-            # Find all Python files in project (excluding venv, .git, __pycache__ etc.)
+            # Find all Python files in project (excluding venv, .git, __pycache__, worktrees etc.)
             code, stdout, _ = self.run_command(
                 [
                     "find",
@@ -496,6 +500,12 @@ class CIDashboard:
                     "-not",
                     "-path",
                     "*/__pycache__/*",
+                    "-not",
+                    "-path",
+                    "./worktrees/*",
+                    "-not",
+                    "-path",
+                    "*/worktrees/*",
                 ]
             )
 
@@ -539,6 +549,12 @@ class CIDashboard:
                     "-not",
                     "-path",
                     "*/__pycache__/*",
+                    "-not",
+                    "-path",
+                    "./worktrees/*",
+                    "-not",
+                    "-path",
+                    "*/worktrees/*",
                 ]
                 code, stdout, _ = self.run_command(find_args)
                 if code == 0:

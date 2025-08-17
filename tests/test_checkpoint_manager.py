@@ -395,9 +395,10 @@ class TestCheckpointPruning:
         assert pruning_time < checkpoint_manager.MAX_PRUNING_TIME_S
 
     def test_prune_checkpoints_value_scoring(
-        self, checkpoint_manager, sample_game_state, sample_metadata
+        self, checkpoint_manager_no_auto_prune, sample_game_state, sample_metadata
     ):
         """Test pruning uses value scoring correctly."""
+        checkpoint_manager = checkpoint_manager_no_auto_prune
         # Create checkpoints with different access patterns
         checkpoint_ids = []
         for i in range(6):

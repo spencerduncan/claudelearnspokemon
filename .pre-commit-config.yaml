@@ -14,7 +14,6 @@ repos:
     rev: 25.1.0
     hooks:
       - id: black
-        language_version: python3.10
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.12.9
@@ -30,13 +29,13 @@ repos:
         # Use pyproject.toml for mypy configuration
         files: ^src/
         args: [--config-file=pyproject.toml]
-        additional_dependencies: [types-docker, numpy, structlog]
+        additional_dependencies: [types-docker, types-requests, numpy, structlog]
 
   - repo: local
     hooks:
       - id: pytest
         name: pytest
-        entry: bash -c 'PYTHONPATH=/home/sd/claudelearnspokemon/src:$PYTHONPATH ./venv/bin/pytest tests/ -x --tb=short'
+        entry: bash -c 'PYTHONPATH=${PWD}/src:$PYTHONPATH python -m pytest tests/ -x --tb=short'
         language: system
         types: [python]
         pass_filenames: false
