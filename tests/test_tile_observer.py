@@ -27,7 +27,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 # Import after path modification
 # ruff: noqa: E402
-from claudelearnspokemon.tile_observer import TileObserver
+from claudelearnspokemon.tile_observer import (
+    GamePosition,
+    GameState,
+    GameStateInterface,
+    TileInfo,
+    TileObserver,
+)
 
 
 class TestTileObserverBasicStructure:
@@ -458,3 +464,118 @@ class TestEdgeCasesAndErrorHandling:
         # Should have combined the observations appropriately
         tile_props = observer._tile_semantics["route_1"][50]
         assert tile_props["observation_count"] == 2
+
+
+class TestGameStateInterface:
+    """Test GameState interface classes and functionality."""
+
+    def test_gamestate_interface_initializes(self):
+        """Test GameStateInterface initializes correctly."""
+        interface = GameStateInterface()
+        assert interface is not None
+
+    def test_gameposition_dataclass(self):
+        """Test GamePosition dataclass creation."""
+        pos = GamePosition(x=10, y=5, map_id="route_1", facing_direction="up")
+        assert pos.x == 10
+        assert pos.y == 5
+        assert pos.map_id == "route_1"
+        assert pos.facing_direction == "up"
+
+    def test_gamestate_dataclass(self):
+        """Test GameState dataclass creation."""
+        position = GamePosition(0, 0, "test", "down")
+        tiles = np.zeros((20, 18), dtype=np.uint8)
+        state = GameState(
+            position=position,
+            tiles=tiles,
+            npcs=[],
+            menu_state=None,
+            inventory={},
+            timestamp=time.time(),
+            frame_count=0,
+        )
+        assert state.position == position
+        assert state.tiles.shape == (20, 18)
+
+    def test_tileinfo_dataclass(self):
+        """Test TileInfo dataclass creation."""
+        tile_info = TileInfo(
+            tile_id=42, passable=True, interaction_type="npc", semantic_tags={"walkable", "grass"}
+        )
+        assert tile_info.tile_id == 42
+        assert tile_info.passable is True
+        assert tile_info.interaction_type == "npc"
+        assert "walkable" in tile_info.semantic_tags
+
+    def test_extract_tile_grid_success(self):
+        """Test successful tile grid extraction."""
+        interface = GameStateInterface()
+        position = GamePosition(0, 0, "test", "down")
+        tiles = np.ones((20, 18), dtype=np.uint8) * 42
+        state = GameState(position, tiles, [], None, {}, time.time(), 0)
+
+        result = interface.extract_tile_grid(state)
+        assert result.shape == (20, 18)
+        assert np.all(result == 42)
+
+    def test_extract_tile_grid_invalid_state(self):
+        """Test tile grid extraction with invalid state."""
+        interface = GameStateInterface()
+
+        with pytest.raises(ValueError, match="Invalid GameState object"):
+            interface.extract_tile_grid("not a gamestate")
+
+    def test_get_player_position_success(self):
+        """Test successful player position retrieval."""
+        interface = GameStateInterface()
+        position = GamePosition(15, 8, "route_2", "right")
+        tiles = np.zeros((20, 18), dtype=np.uint8)
+        state = GameState(position, tiles, [], None, {}, time.time(), 0)
+
+        result = interface.get_player_position(state)
+        assert result.x == 15
+        assert result.y == 8
+        assert result.map_id == "route_2"
+        assert result.facing_direction == "right"
+
+    def test_serialize_state_success(self):
+        """Test successful state serialization."""
+        interface = GameStateInterface()
+        position = GamePosition(5, 10, "cerulean", "left")
+        tiles = np.random.randint(0, 256, (20, 18), dtype=np.uint8)
+        inventory = {"pokeball": 5, "potion": 3}
+        state = GameState(position, tiles, [], None, inventory, time.time(), 100)
+
+        serialized = interface.serialize_state(state)
+        assert isinstance(serialized, bytes)
+        assert len(serialized) > 0
+
+    def test_capture_current_state_mock_client(self):
+        """Test state capture with mock emulator client."""
+        interface = GameStateInterface()
+
+        # Create mock client
+        class MockClient:
+            def get_state(self):
+                return {
+                    "tiles": np.ones((20, 18), dtype=np.uint8) * 123,
+                    "player_position": (7, 3),
+                    "map_id": "viridian_forest",
+                    "facing_direction": "up",
+                    "npcs": [{"id": 1, "x": 5, "y": 8}],
+                    "inventory": {"pokeball": 2},
+                    "frame_count": 500,
+                }
+
+        mock_client = MockClient()
+        result = interface.capture_current_state(mock_client)
+
+        assert isinstance(result, GameState)
+        assert result.position.x == 7
+        assert result.position.y == 3
+        assert result.position.map_id == "viridian_forest"
+        assert result.position.facing_direction == "up"
+        assert result.tiles.shape == (20, 18)
+        assert np.all(result.tiles == 123)
+        assert result.frame_count == 500
