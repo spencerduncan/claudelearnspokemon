@@ -9,10 +9,13 @@ Author: John Botmack - Performance-First Integration Testing
 import unittest
 from unittest.mock import Mock, patch
 
+import pytest
+
 from src.claudelearnspokemon.emulator_pool import PokemonGymClient
 from src.claudelearnspokemon.health_monitor import HealthMonitor
 
 
+@pytest.mark.fast
 class TestHealthMonitorIntegration(unittest.TestCase):
     """Test HealthMonitor integration with EmulatorPool interface."""
 

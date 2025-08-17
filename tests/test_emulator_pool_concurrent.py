@@ -10,9 +10,12 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
+import pytest
+
 from claudelearnspokemon.emulator_pool import EmulatorPool
 
 
+@pytest.mark.slow
 class TestEmulatorPoolConcurrentAccess(unittest.TestCase):
     """Test concurrent access patterns and thread safety"""
 
@@ -385,6 +388,7 @@ class TestEmulatorPoolConcurrentAccess(unittest.TestCase):
             self.assertIn(":False", msg, "Timeout requests should fail")
 
 
+@pytest.mark.slow
 class TestEmulatorPoolContextManager(unittest.TestCase):
     """Test context manager functionality"""
 

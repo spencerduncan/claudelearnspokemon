@@ -645,6 +645,7 @@ class PokemonGymAdapterContractTest:
 # =================================================================
 
 
+@pytest.mark.fast
 class TestMockPokemonGymAdapterContracts(PokemonGymAdapterContractTest):
     """
     Contract tests using a mock implementation.
@@ -781,6 +782,7 @@ class TestMockPokemonGymAdapterContracts(PokemonGymAdapterContractTest):
 # =================================================================
 
 
+@pytest.mark.medium
 class TestContractValidationFramework:
     """Test the contract validation framework itself."""
 
