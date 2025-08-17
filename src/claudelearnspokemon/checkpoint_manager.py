@@ -21,6 +21,7 @@ Production Features:
 - Graceful degradation under load
 - LZ4 compression for efficiency
 - UUID-based checkpoint identifiers
+- Thread safety for parallel execution
 
 Author: Bot Dean - Production-First Engineering
 """
@@ -28,6 +29,8 @@ Author: Bot Dean - Production-First Engineering
 import hashlib
 import json
 import os
+import sqlite3
+import threading
 import time
 import uuid
 import zlib
@@ -104,6 +107,7 @@ class CheckpointManager:
     - Graceful degradation under resource constraints
     - LZ4 compression for efficiency
     - UUID-based checkpoint identifiers
+    - Thread safety for 4 parallel Pokemon-gym emulators
     """
 
     # Production constants for reliability and performance
@@ -124,6 +128,10 @@ class CheckpointManager:
         "strategic_value": 0.3,
         "success_rate": 0.2,
     }
+
+    # Thread safety constants
+    SCHEMA_VERSION = 1
+    METADATA_CACHE_SIZE = 1000
 
     def __init__(
         self,
@@ -148,11 +156,20 @@ class CheckpointManager:
         self.max_checkpoints = max_checkpoints
         self.enable_metrics = enable_metrics
 
+        # Thread safety locks
+        self._write_lock = threading.Lock()  # Single writer for database operations
+        self._cache_lock = threading.Lock()  # Protect metadata cache
+
+        # Database for metadata indexing
+        self.db_path = self.storage_dir / "metadata.db"
+        self._metadata_cache: dict[str, dict[str, Any]] = {}
+        self._cache_access_times: dict[str, float] = {}
+
         # Create storage directory if it doesn't exist
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
-        # Metadata cache for performance
-        self._metadata_cache: dict[str, CheckpointMetadata] = {}
+        # Metadata cache for performance (dual cache system)
+        self._metadata_cache_objects: dict[str, CheckpointMetadata] = {}
         self._cache_loaded = False
 
         # Production metrics
@@ -169,6 +186,12 @@ class CheckpointManager:
         self._save_times: list[float] = []
         self._load_times: list[float] = []
 
+        self._init_database()
+
+        # Verify database was created successfully
+        if not self.db_path.exists():
+            raise RuntimeError(f"Failed to create database file at {self.db_path}")
+
         logger.info(
             "CheckpointManager initialized",
             storage_dir=str(self.storage_dir),
@@ -176,11 +199,65 @@ class CheckpointManager:
             enable_metrics=self.enable_metrics,
         )
 
+    def _init_database(self) -> None:
+        """Initialize SQLite database for metadata indexing with concurrency support."""
+        try:
+            logger.info(f"Creating database at: {self.db_path}")
+            with sqlite3.connect(self.db_path) as conn:
+                logger.info("Database connection established")
+
+                # Configure SQLite for better concurrency
+                conn.execute(
+                    "PRAGMA journal_mode=WAL"
+                )  # Write-Ahead Logging for better concurrent reads
+                conn.execute("PRAGMA busy_timeout=5000")  # 5 second timeout for locked database
+                logger.info("SQLite configured for concurrency (WAL mode, 5s timeout)")
+
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS checkpoint_metadata (
+                        checkpoint_id TEXT PRIMARY KEY,
+                        created_at TEXT NOT NULL,
+                        game_location TEXT,
+                        progress_markers TEXT,
+                        performance_metrics TEXT,
+                        tags TEXT,
+                        custom_fields TEXT,
+                        file_size INTEGER,
+                        checksum TEXT,
+                        schema_version INTEGER DEFAULT 1
+                    )
+                    """
+                )
+                logger.info("Main table created")
+
+                # Create indexes for fast querying
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_created_at ON checkpoint_metadata(created_at)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_game_location ON checkpoint_metadata(game_location)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_checksum ON checkpoint_metadata(checksum)"
+                )
+                logger.info("Indexes created")
+
+                # Explicit commit to ensure database file is created
+                conn.commit()
+                logger.info("Database committed")
+
+            logger.info(f"Database file exists after init: {self.db_path.exists()}")
+        except Exception as e:
+            logger.error(f"Database initialization failed: {e}")
+            raise
+
     def save_checkpoint(self, game_state: dict[str, Any], metadata: dict[str, Any]) -> str:
         """
         Save game state with metadata and automatic pruning.
 
         Production features:
+        - Thread-safe operation using write lock
         - Atomic write operations to prevent corruption
         - LZ4 compression for storage efficiency
         - CRC32 checksum calculation for integrity
@@ -197,63 +274,65 @@ class CheckpointManager:
             CheckpointError: Failed to save checkpoint
             ValueError: Invalid input data
         """
-        start_time = time.monotonic()
+        # Acquire write lock for database operations
+        with self._write_lock:
+            start_time = time.monotonic()
 
-        # Input validation - fail fast principle
-        if not isinstance(game_state, dict):
-            raise ValueError("game_state must be a dictionary")
-        if not isinstance(metadata, dict):
-            raise ValueError("metadata must be a dictionary")
-        if not game_state:
-            raise ValueError("game_state cannot be empty")
+            # Input validation - fail fast principle
+            if not isinstance(game_state, dict):
+                raise ValueError("game_state must be a dictionary")
+            if not isinstance(metadata, dict):
+                raise ValueError("metadata must be a dictionary")
+            if not game_state:
+                raise ValueError("game_state cannot be empty")
 
-        try:
-            # Generate unique checkpoint ID using UUID
-            checkpoint_id = str(uuid.uuid4())
+            try:
+                # Generate unique checkpoint ID using UUID
+                checkpoint_id = str(uuid.uuid4())
 
-            # Create checkpoint metadata
-            checkpoint_meta = CheckpointMetadata(
-                checkpoint_id=checkpoint_id,
-                created_at=datetime.now(timezone.utc),
-                game_state_hash=self._calculate_state_hash(game_state),
-                file_size_bytes=0,  # Will be updated after writing
-                location=metadata.get("location", "unknown"),
-                progress_markers=metadata.get("progress_markers", {}),
-            )
-
-            # Write data atomically to prevent corruption
-            self._write_checkpoint_atomic(checkpoint_id, game_state, checkpoint_meta)
-
-            # Update metrics
-            if self.enable_metrics:
-                self._metrics["saves_total"] += 1
-                self._update_storage_metrics()
-
-            # Track performance
-            duration = time.monotonic() - start_time
-            self._save_times.append(duration)
-
-            # Auto-prune if necessary
-            if len(self._get_all_checkpoint_ids()) > self.max_checkpoints:
-                logger.info(
-                    "Checkpoint limit exceeded, triggering auto-prune",
-                    max_checkpoints=self.max_checkpoints,
-                    current_count=len(self._get_all_checkpoint_ids()),
+                # Create checkpoint metadata (production format)
+                checkpoint_meta = CheckpointMetadata(
+                    checkpoint_id=checkpoint_id,
+                    created_at=datetime.now(timezone.utc),
+                    game_state_hash=self._calculate_state_hash(game_state),
+                    file_size_bytes=0,  # Will be updated after writing
+                    location=metadata.get("location", "unknown"),
+                    progress_markers=metadata.get("progress_markers", {}),
                 )
-                self.prune_checkpoints(self.max_checkpoints)
 
-            logger.info(
-                "Checkpoint saved",
-                checkpoint_id=checkpoint_id,
-                duration_ms=int(duration * 1000),
-                location=checkpoint_meta.location,
-            )
+                # Write data atomically to prevent corruption
+                self._write_checkpoint_atomic(checkpoint_id, game_state, checkpoint_meta)
 
-            return checkpoint_id
+                # Update metrics
+                if self.enable_metrics:
+                    self._metrics["saves_total"] += 1
+                    self._update_storage_metrics()
 
-        except Exception as e:
-            logger.error("Failed to save checkpoint", error=str(e))
-            raise CheckpointError(f"Failed to save checkpoint: {e}") from e
+                # Track performance
+                duration = time.monotonic() - start_time
+                self._save_times.append(duration)
+
+                # Auto-prune if necessary
+                if len(self._get_all_checkpoint_ids()) > self.max_checkpoints:
+                    logger.info(
+                        "Checkpoint limit exceeded, triggering auto-prune",
+                        max_checkpoints=self.max_checkpoints,
+                        current_count=len(self._get_all_checkpoint_ids()),
+                    )
+                    self.prune_checkpoints(self.max_checkpoints)
+
+                logger.info(
+                    "Checkpoint saved",
+                    checkpoint_id=checkpoint_id,
+                    duration_ms=int(duration * 1000),
+                    location=checkpoint_meta.location,
+                )
+
+                return checkpoint_id
+
+            except Exception as e:
+                logger.error("Failed to save checkpoint", error=str(e))
+                raise CheckpointError(f"Failed to save checkpoint: {e}") from e
 
     def load_checkpoint(self, checkpoint_id: str) -> dict[str, Any]:
         """
@@ -464,9 +543,41 @@ class CheckpointManager:
             self._record_validation_failure(checkpoint_id)
             return False
 
+    def get_checkpoint_metadata(self, checkpoint_id: str) -> dict[str, Any] | None:
+        """
+        Get metadata for a checkpoint with thread-safe caching support.
+
+        Args:
+            checkpoint_id: Unique identifier of checkpoint
+
+        Returns:
+            Metadata dictionary or None if checkpoint not found
+        """
+        # Check cache first with thread safety
+        current_time = time.time()
+        with self._cache_lock:
+            if checkpoint_id in self._metadata_cache:
+                self._cache_access_times[checkpoint_id] = current_time
+                return self._metadata_cache[checkpoint_id].copy()
+
+        # Also check production metadata cache
+        metadata = self._load_metadata(checkpoint_id)
+        if not metadata:
+            return None
+
+        result = asdict(metadata)
+        result["value_score"] = self._calculate_value_score(metadata)
+        result["file_path"] = str(self._get_checkpoint_path(checkpoint_id))
+
+        # Update cache
+        self._update_cache(checkpoint_id, result)
+
+        return result
+
     def prune_checkpoints(self, max_count: int, dry_run: bool = False) -> dict[str, Any]:
         """
         Remove low-value checkpoints using production-grade scoring algorithm.
+        Thread-safe operation using write lock.
 
         Performance requirement: < 2s for 100 checkpoints
 
@@ -483,95 +594,96 @@ class CheckpointManager:
         Returns:
             dict: Pruning statistics and removed checkpoint list
         """
-        start_time = time.monotonic()
+        with self._write_lock:
+            start_time = time.monotonic()
 
-        if max_count < 1:
-            raise ValueError("max_count must be at least 1")
+            if max_count < 1:
+                raise ValueError("max_count must be at least 1")
 
-        try:
-            # Load all checkpoint metadata
-            all_checkpoints = self._get_all_checkpoint_metadata()
+            try:
+                # Load all checkpoint metadata
+                all_checkpoints = self._get_all_checkpoint_metadata()
 
-            if len(all_checkpoints) <= max_count:
-                return {
-                    "action": "no_pruning_needed",
+                if len(all_checkpoints) <= max_count:
+                    return {
+                        "action": "no_pruning_needed",
+                        "total_checkpoints": len(all_checkpoints),
+                        "target_count": max_count,
+                        "removed": [],
+                        "retained": [cp.checkpoint_id for cp in all_checkpoints],
+                    }
+
+                # Calculate value scores for all checkpoints
+                scored_checkpoints = []
+                for checkpoint in all_checkpoints:
+                    score = self._calculate_value_score(checkpoint)
+                    scored_checkpoints.append((score, checkpoint))
+
+                # Sort by score (descending - higher scores are better)
+                scored_checkpoints.sort(key=lambda x: x[0], reverse=True)
+
+                # Determine which checkpoints to keep vs remove
+                to_keep = scored_checkpoints[:max_count]
+                to_remove = scored_checkpoints[max_count:]
+
+                removal_plan = {
+                    "action": "pruning_executed" if not dry_run else "dry_run",
                     "total_checkpoints": len(all_checkpoints),
                     "target_count": max_count,
-                    "removed": [],
-                    "retained": [cp.checkpoint_id for cp in all_checkpoints],
+                    "removed": [cp[1].checkpoint_id for cp in to_remove],
+                    "retained": [cp[1].checkpoint_id for cp in to_keep],
+                    "score_range": {
+                        "kept_min": min(score for score, _ in to_keep) if to_keep else 0,
+                        "kept_max": max(score for score, _ in to_keep) if to_keep else 0,
+                        "removed_max": max(score for score, _ in to_remove) if to_remove else 0,
+                        "removed_min": min(score for score, _ in to_remove) if to_remove else 0,
+                    },
                 }
 
-            # Calculate value scores for all checkpoints
-            scored_checkpoints = []
-            for checkpoint in all_checkpoints:
-                score = self._calculate_value_score(checkpoint)
-                scored_checkpoints.append((score, checkpoint))
+                # Execute removal if not dry run
+                if not dry_run:
+                    removed_count = 0
+                    for _score, checkpoint in to_remove:
+                        try:
+                            self._remove_checkpoint_atomic(checkpoint.checkpoint_id)
+                            removed_count += 1
+                        except Exception as e:
+                            logger.error(
+                                "Failed to remove checkpoint",
+                                checkpoint_id=checkpoint.checkpoint_id,
+                                error=str(e),
+                            )
 
-            # Sort by score (descending - higher scores are better)
-            scored_checkpoints.sort(key=lambda x: x[0], reverse=True)
+                    logger.info(
+                        "Pruning completed",
+                        removed_count=removed_count,
+                        total_to_remove=len(to_remove),
+                    )
 
-            # Determine which checkpoints to keep vs remove
-            to_keep = scored_checkpoints[:max_count]
-            to_remove = scored_checkpoints[max_count:]
+                    # Update metrics
+                    if self.enable_metrics:
+                        self._metrics["pruning_operations"] += 1
+                        self._update_storage_metrics()
 
-            removal_plan = {
-                "action": "pruning_executed" if not dry_run else "dry_run",
-                "total_checkpoints": len(all_checkpoints),
-                "target_count": max_count,
-                "removed": [cp[1].checkpoint_id for cp in to_remove],
-                "retained": [cp[1].checkpoint_id for cp in to_keep],
-                "score_range": {
-                    "kept_min": min(score for score, _ in to_keep) if to_keep else 0,
-                    "kept_max": max(score for score, _ in to_keep) if to_keep else 0,
-                    "removed_max": max(score for score, _ in to_remove) if to_remove else 0,
-                    "removed_min": min(score for score, _ in to_remove) if to_remove else 0,
-                },
-            }
-
-            # Execute removal if not dry run
-            if not dry_run:
-                removed_count = 0
-                for _score, checkpoint in to_remove:
-                    try:
-                        self._remove_checkpoint_atomic(checkpoint.checkpoint_id)
-                        removed_count += 1
-                    except Exception as e:
-                        logger.error(
-                            "Failed to remove checkpoint",
-                            checkpoint_id=checkpoint.checkpoint_id,
-                            error=str(e),
-                        )
+                # Performance check
+                elapsed_s = time.monotonic() - start_time
+                if elapsed_s > self.MAX_PRUNING_TIME_S:
+                    logger.warning(
+                        "Pruning time exceeded target",
+                        elapsed_s=elapsed_s,
+                        target_s=self.MAX_PRUNING_TIME_S,
+                    )
 
                 logger.info(
-                    "Pruning completed",
-                    removed_count=removed_count,
-                    total_to_remove=len(to_remove),
+                    "Pruning completed" if not dry_run else "Pruning planned",
+                    duration_s=elapsed_s,
+                    removed_count=len(to_remove),
                 )
+                return removal_plan
 
-                # Update metrics
-                if self.enable_metrics:
-                    self._metrics["pruning_operations"] += 1
-                    self._update_storage_metrics()
-
-            # Performance check
-            elapsed_s = time.monotonic() - start_time
-            if elapsed_s > self.MAX_PRUNING_TIME_S:
-                logger.warning(
-                    "Pruning time exceeded target",
-                    elapsed_s=elapsed_s,
-                    target_s=self.MAX_PRUNING_TIME_S,
-                )
-
-            logger.info(
-                "Pruning completed" if not dry_run else "Pruning planned",
-                duration_s=elapsed_s,
-                removed_count=len(to_remove),
-            )
-            return removal_plan
-
-        except Exception as e:
-            logger.error("Pruning operation failed", error=str(e))
-            raise
+            except Exception as e:
+                logger.error("Pruning operation failed", error=str(e))
+                raise CheckpointError(f"Failed to prune checkpoints: {e}") from e
 
     def list_checkpoints(self, criteria: dict) -> list[dict]:
         """
@@ -607,26 +719,6 @@ class CheckpointManager:
         except Exception as e:
             logger.error("Failed to list checkpoints", error=str(e))
             return []
-
-    def get_checkpoint_metadata(self, checkpoint_id: str) -> dict:
-        """
-        Get comprehensive metadata for a checkpoint.
-
-        Args:
-            checkpoint_id: Target checkpoint
-
-        Returns:
-            dict: Complete metadata including scores and statistics
-        """
-        metadata = self._load_metadata(checkpoint_id)
-        if not metadata:
-            return {}
-
-        result = asdict(metadata)
-        result["value_score"] = self._calculate_value_score(metadata)
-        result["file_path"] = str(self._get_checkpoint_path(checkpoint_id))
-
-        return result
 
     def find_nearest_checkpoint(self, location: str) -> str:
         """
@@ -811,7 +903,7 @@ class CheckpointManager:
             temp_metadata.rename(metadata_path)
 
             # Update cache
-            self._metadata_cache[checkpoint_id] = metadata
+            self._metadata_cache_objects[checkpoint_id] = metadata
 
         except Exception:
             # Cleanup on failure
@@ -826,12 +918,33 @@ class CheckpointManager:
         metadata_path = self._get_metadata_path(checkpoint_id)
 
         # Remove from cache first
-        self._metadata_cache.pop(checkpoint_id, None)
+        self._metadata_cache_objects.pop(checkpoint_id, None)
+        with self._cache_lock:
+            self._metadata_cache.pop(checkpoint_id, None)
+            self._cache_access_times.pop(checkpoint_id, None)
 
         # Remove files
         for file_path in [checkpoint_path, metadata_path]:
             if file_path.exists():
                 file_path.unlink()
+
+    def _update_cache(self, checkpoint_id: str, metadata: dict[str, Any]) -> None:
+        """Update metadata cache with LRU eviction. Thread-safe with cache lock."""
+        with self._cache_lock:
+            current_time = time.time()
+
+            # Add to cache
+            self._metadata_cache[checkpoint_id] = metadata
+            self._cache_access_times[checkpoint_id] = current_time
+
+            # Evict if cache too large
+            if len(self._metadata_cache) > self.METADATA_CACHE_SIZE:
+                # Find least recently used item
+                oldest_id = min(
+                    self._cache_access_times.keys(), key=lambda k: self._cache_access_times[k]
+                )
+                del self._metadata_cache[oldest_id]
+                del self._cache_access_times[oldest_id]
 
     def _calculate_value_score(self, metadata: CheckpointMetadata) -> float:
         """
@@ -897,8 +1010,8 @@ class CheckpointManager:
 
     def _update_access_tracking(self, checkpoint_id: str) -> None:
         """Update access statistics for pruning algorithm."""
-        if checkpoint_id in self._metadata_cache:
-            metadata = self._metadata_cache[checkpoint_id]
+        if checkpoint_id in self._metadata_cache_objects:
+            metadata = self._metadata_cache_objects[checkpoint_id]
             metadata.access_count += 1
             metadata.last_accessed = datetime.now(timezone.utc)
 
@@ -912,8 +1025,8 @@ class CheckpointManager:
 
     def _update_validation_tracking(self, checkpoint_id: str, success: bool) -> None:
         """Update validation statistics."""
-        if checkpoint_id in self._metadata_cache:
-            metadata = self._metadata_cache[checkpoint_id]
+        if checkpoint_id in self._metadata_cache_objects:
+            metadata = self._metadata_cache_objects[checkpoint_id]
             metadata.last_validated = datetime.now(timezone.utc)
             if not success:
                 metadata.validation_failures += 1
@@ -971,22 +1084,22 @@ class CheckpointManager:
 
     def _load_metadata_cache(self) -> None:
         """Load all metadata into cache for performance."""
-        self._metadata_cache.clear()
+        self._metadata_cache_objects.clear()
         checkpoint_ids = self._get_all_checkpoint_ids()
 
         for checkpoint_id in checkpoint_ids:
             metadata = self._load_metadata(checkpoint_id)
             if metadata:
-                self._metadata_cache[checkpoint_id] = metadata
+                self._metadata_cache_objects[checkpoint_id] = metadata
 
         self._cache_loaded = True
-        logger.debug("Metadata cache loaded", checkpoint_count=len(self._metadata_cache))
+        logger.debug("Metadata cache loaded", checkpoint_count=len(self._metadata_cache_objects))
 
     def _load_metadata(self, checkpoint_id: str) -> CheckpointMetadata | None:
         """Load metadata for specific checkpoint."""
         # Check cache first
-        if checkpoint_id in self._metadata_cache:
-            return self._metadata_cache[checkpoint_id]
+        if checkpoint_id in self._metadata_cache_objects:
+            return self._metadata_cache_objects[checkpoint_id]
 
         # Load from disk
         metadata_path = self._get_metadata_path(checkpoint_id)
@@ -1006,7 +1119,7 @@ class CheckpointManager:
                 data["last_validated"] = datetime.fromisoformat(data["last_validated"])
 
             metadata = CheckpointMetadata(**data)
-            self._metadata_cache[checkpoint_id] = metadata
+            self._metadata_cache_objects[checkpoint_id] = metadata
             return metadata
 
         except Exception as e:
@@ -1022,7 +1135,7 @@ class CheckpointManager:
                 json.dump(asdict(metadata), f, indent=2, default=str)
 
             # Update cache
-            self._metadata_cache[checkpoint_id] = metadata
+            self._metadata_cache_objects[checkpoint_id] = metadata
 
         except Exception as e:
             logger.error("Failed to save metadata", checkpoint_id=checkpoint_id, error=str(e))
