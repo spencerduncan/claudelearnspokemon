@@ -784,6 +784,318 @@ class TestExecutionResult:
         assert "FAILURE" in str(result)
 
 
+@pytest.mark.fast
+class TestContainerReplacement:
+    """Test container replacement functionality for auto-restart support."""
+
+    def setup_method(self) -> None:
+        """Set up test environment for container replacement tests."""
+        self.pool = EmulatorPool(pool_size=2, base_port=9000)
+
+    def teardown_method(self) -> None:
+        """Clean up after each test."""
+        try:
+            self.pool.shutdown()
+        except Exception:
+            pass
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    @patch("claudelearnspokemon.emulator_pool.PokemonGymClient")
+    def test_replace_failed_container_success(self, mock_client_class, mock_docker) -> None:
+        """Test successful container replacement."""
+        # Setup initial pool state
+        mock_docker_client = Mock()
+        mock_docker.return_value = mock_docker_client
+
+        # Create initial containers and clients
+        old_container = Mock()
+        old_container.id = "old_container_123"
+        old_container.name = "pokemon-emulator-9000"
+        old_container.status = "running"
+        old_container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+
+        new_container = Mock()
+        new_container.id = "new_container_456"
+        new_container.status = "running"
+        new_container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+
+        # Mock container creation sequence
+        mock_docker_client.containers.run.side_effect = [old_container, new_container]
+
+        old_client = Mock()
+        old_client.port = 9000
+        old_client.container_id = "old_container_123"
+        old_client.close = Mock()
+
+        new_client = Mock()
+        new_client.port = 9000
+        new_client.container_id = "new_container_456"
+
+        mock_client_class.side_effect = [old_client, new_client]
+
+        # Initialize pool with one container
+        self.pool.initialize(1)
+
+        # Acquire client to make it busy (not in available queue)
+        acquired_client = self.pool.acquire()
+        assert acquired_client == old_client
+
+        # Replace the failed container
+        success = self.pool.replace_failed_container(9000)
+
+        assert success is True
+
+        # Verify old container was stopped
+        old_container.stop.assert_called_once_with(timeout=10)
+
+        # Verify old client was closed
+        old_client.close.assert_called_once()
+
+        # Verify new client is in the mapping
+        assert self.pool.clients_by_port[9000] == new_client
+
+        # Verify new container is in containers list
+        assert new_container in self.pool.containers
+        assert old_container not in self.pool.containers
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    @patch("claudelearnspokemon.emulator_pool.PokemonGymClient")
+    def test_replace_failed_container_available_client(
+        self, mock_client_class, mock_docker
+    ) -> None:
+        """Test container replacement when client was available in queue."""
+        # Setup mocks
+        mock_docker_client = Mock()
+        mock_docker.return_value = mock_docker_client
+
+        old_container = Mock()
+        old_container.id = "old_container_123"
+        old_container.name = "pokemon-emulator-9000"
+        old_container.status = "running"
+        old_container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+
+        new_container = Mock()
+        new_container.id = "new_container_456"
+        new_container.status = "running"
+        new_container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+
+        mock_docker_client.containers.run.side_effect = [old_container, new_container]
+
+        old_client = Mock()
+        old_client.port = 9000
+        old_client.container_id = "old_container_123"
+        old_client.close = Mock()
+
+        new_client = Mock()
+        new_client.port = 9000
+        new_client.container_id = "new_container_456"
+
+        mock_client_class.side_effect = [old_client, new_client]
+
+        # Initialize pool - client will be available in queue
+        self.pool.initialize(1)
+
+        # Don't acquire - client remains in available queue
+
+        # Replace the failed container
+        success = self.pool.replace_failed_container(9000)
+
+        assert success is True
+
+        # Verify new client was added back to available queue
+        # (This is tested indirectly through the queue size)
+        assert self.pool.available_clients.qsize() == 1
+
+    @pytest.mark.unit
+    def test_replace_failed_container_pool_not_initialized(self) -> None:
+        """Test replacement fails when pool not initialized."""
+        success = self.pool.replace_failed_container(9000)
+        assert success is False
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    @patch("claudelearnspokemon.emulator_pool.PokemonGymClient")
+    def test_replace_failed_container_client_not_found(
+        self, mock_client_class, mock_docker
+    ) -> None:
+        """Test replacement fails when client not found for port."""
+        # Setup basic pool
+        mock_docker_client = Mock()
+        mock_docker.return_value = mock_docker_client
+
+        container = Mock()
+        container.id = "container_123"
+        container.status = "running"
+        container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+
+        mock_docker_client.containers.run.return_value = container
+        mock_client_class.return_value = Mock(port=9000, container_id="container_123")
+
+        self.pool.initialize(1)
+
+        # Try to replace non-existent port
+        success = self.pool.replace_failed_container(9999)
+        assert success is False
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    @patch("claudelearnspokemon.emulator_pool.PokemonGymClient")
+    def test_replace_failed_container_new_container_fails(
+        self, mock_client_class, mock_docker
+    ) -> None:
+        """Test replacement handles new container creation failure."""
+        # Setup initial pool
+        mock_docker_client = Mock()
+        mock_docker.return_value = mock_docker_client
+
+        old_container = Mock()
+        old_container.id = "old_container_123"
+        old_container.name = "pokemon-emulator-9000"
+        old_container.status = "running"
+        old_container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+
+        # First call succeeds (initialization), second fails (replacement)
+        mock_docker_client.containers.run.side_effect = [
+            old_container,
+            APIError("Port conflict during replacement"),
+        ]
+
+        old_client = Mock()
+        old_client.port = 9000
+        old_client.container_id = "old_container_123"
+        old_client.close = Mock()
+
+        mock_client_class.return_value = old_client
+
+        self.pool.initialize(1)
+
+        # Replace should fail due to new container creation error
+        success = self.pool.replace_failed_container(9000)
+
+        assert success is False
+
+        # Verify old container was still stopped
+        old_container.stop.assert_called_once()
+
+        # Verify client mapping was cleaned up
+        assert 9000 not in self.pool.clients_by_port
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    @patch("claudelearnspokemon.emulator_pool.PokemonGymClient")
+    def test_replace_failed_container_old_container_not_found(
+        self, mock_client_class, mock_docker
+    ) -> None:
+        """Test replacement continues when old container can't be found."""
+        # Setup initial pool
+        mock_docker_client = Mock()
+        mock_docker.return_value = mock_docker_client
+
+        old_container = Mock()
+        old_container.id = "old_container_123"
+        old_container.name = "different-name"  # Won't match expected name
+        old_container.status = "running"
+        old_container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+
+        new_container = Mock()
+        new_container.id = "new_container_456"
+        new_container.status = "running"
+        new_container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+
+        mock_docker_client.containers.run.side_effect = [old_container, new_container]
+
+        old_client = Mock()
+        old_client.port = 9000
+        old_client.container_id = "old_container_123"
+        old_client.close = Mock()
+
+        new_client = Mock()
+        new_client.port = 9000
+        new_client.container_id = "new_container_456"
+
+        mock_client_class.side_effect = [old_client, new_client]
+
+        self.pool.initialize(1)
+
+        # Replace should succeed even though old container wasn't found by name
+        success = self.pool.replace_failed_container(9000)
+
+        assert success is True
+
+        # Old container shouldn't have been stopped since it wasn't found
+        old_container.stop.assert_not_called()
+
+        # New container should still be created
+        assert self.pool.clients_by_port[9000] == new_client
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    @patch("claudelearnspokemon.emulator_pool.PokemonGymClient")
+    def test_is_client_available_true(self, mock_client_class, mock_docker) -> None:
+        """Test _is_client_available returns True for available client."""
+        # Setup pool with available client
+        mock_docker_client = Mock()
+        mock_docker.return_value = mock_docker_client
+
+        container = Mock()
+        container.id = "container_123"
+        container.status = "running"
+        container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+
+        mock_docker_client.containers.run.return_value = container
+
+        client = Mock()
+        client.port = 9000
+        client.container_id = "container_123"
+
+        mock_client_class.return_value = client
+
+        self.pool.initialize(1)
+
+        # Client should be available in queue
+        is_available = self.pool._is_client_available(client)
+        assert is_available is True
+
+        # Queue should be restored after check
+        assert self.pool.available_clients.qsize() == 1
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    @patch("claudelearnspokemon.emulator_pool.PokemonGymClient")
+    def test_is_client_available_false(self, mock_client_class, mock_docker) -> None:
+        """Test _is_client_available returns False for busy client."""
+        # Setup pool
+        mock_docker_client = Mock()
+        mock_docker.return_value = mock_docker_client
+
+        container = Mock()
+        container.id = "container_123"
+        container.status = "running"
+        container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+
+        mock_docker_client.containers.run.return_value = container
+
+        client = Mock()
+        client.port = 9000
+        client.container_id = "container_123"
+
+        mock_client_class.return_value = client
+
+        self.pool.initialize(1)
+
+        # Acquire client to make it busy
+        self.pool.acquire()
+
+        # Client should not be available in queue
+        is_available = self.pool._is_client_available(client)
+        assert is_available is False
+
+        # Queue should be empty after check
+        assert self.pool.available_clients.qsize() == 0
+
+
 @pytest.mark.medium
 class TestEmulatorPoolError:
     """Test custom exception class."""
