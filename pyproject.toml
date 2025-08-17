@@ -12,8 +12,10 @@ dependencies = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
     "pytest-mock>=3.11.0",
+    "pytest-benchmark>=4.0.0",
     "docker>=6.1.0",
     "requests>=2.28.0",
+    "aiohttp>=3.8.0",
     "numpy>=1.24.0",
     "httpx>=0.24.0",
     "lz4>=4.3.0",
@@ -111,4 +113,5 @@ markers = [
     "unit: Unit tests",
     "integration: Integration tests",
     "slow: Slow tests",
+    "performance: Performance benchmarks",
 ]
