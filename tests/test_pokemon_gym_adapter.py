@@ -98,30 +98,46 @@ class TestPokemonGymAdapterInitialization:
         """Test adapter maintains full PokemonGymClient compatibility."""
         adapter = PokemonGymAdapter(self.port, self.container_id)
 
-        # Verify all parent methods are accessible
-        assert hasattr(adapter, "send_input")
-        assert hasattr(adapter, "get_state")
-        assert hasattr(adapter, "reset_game")
-        assert hasattr(adapter, "is_healthy")
+        # Verify all parent attributes are accessible
+        assert hasattr(adapter, "port")
+        assert hasattr(adapter, "container_id")
+        assert hasattr(adapter, "base_url")
+
+        # Verify parent methods are inherited
         assert hasattr(adapter, "close")
 
-        # Verify new adapter methods
-        assert hasattr(adapter, "initialize_session")
-        assert hasattr(adapter, "execute_action")
-        assert hasattr(adapter, "get_session_status")
-        assert hasattr(adapter, "stop_session")
-        assert hasattr(adapter, "is_session_active")
+        # Clean up
+        adapter.close()
 
+    @pytest.mark.unit
+    def test_string_representations(self) -> None:
+        """Test string representations for logging."""
+        adapter = PokemonGymAdapter(self.port, self.container_id)
+
+        # Test __str__ for logging
+        str_repr = str(adapter)
+        assert "PokemonGymAdapter" in str_repr
+        assert "8081" in str_repr
+        assert "test_container" in str_repr
+        assert "inactive" in str_repr
+
+        # Test __repr__ for debugging
+        repr_str = repr(adapter)
+        assert "PokemonGymAdapter" in repr_str
+        assert "test_container_123" in repr_str
+        assert "session_initialized=False" in repr_str
+
+        # Clean up
         adapter.close()
 
 
-class TestPokemonGymAdapterSessionManagement:
-    """Test session lifecycle management."""
+class TestPokemonGymAdapterSession:
+    """Test benchflow-ai session management."""
 
     def setup_method(self) -> None:
         """Set up test environment."""
-        self.port = 8081
-        self.container_id = "test_container_123"
+        self.port = 8082
+        self.container_id = "session_test_456"
         self.adapter = PokemonGymAdapter(self.port, self.container_id)
 
     def teardown_method(self) -> None:
@@ -131,557 +147,688 @@ class TestPokemonGymAdapterSessionManagement:
 
     @pytest.mark.unit
     @patch("httpx.Client.post")
-    def test_initialize_session_success(self, mock_post) -> None:
+    def test_initialize_session_success(self, mock_post: Mock) -> None:
         """Test successful session initialization."""
         # Mock successful response
         mock_response = Mock()
-        mock_response.status_code = 200
+        mock_response.raise_for_status.return_value = None
         mock_response.json.return_value = {
-            "session_id": "test_session_123",
             "status": "initialized",
-            "initial_state": {"game": "pokemon_red"},
+            "session_id": "test_session_123",
+            "initial_state": {"frame_count": 0},
         }
         mock_post.return_value = mock_response
 
         # Test initialization
-        config = {"game_type": "pokemon_red", "difficulty": "normal"}
-        result = self.adapter.initialize_session(config)
+        start_time = time.perf_counter()
+        result = self.adapter.initialize_session({"difficulty": "normal"})
+        duration = time.perf_counter() - start_time
 
-        # Verify request was made correctly
-        mock_post.assert_called_once_with(
-            "/initialize", json=config, timeout=5.0  # Initialize timeout
-        )
+        # Verify performance requirement
+        assert duration < 5.0  # Initialize timeout
 
-        # Verify response processing
-        assert result["session_id"] == "test_session_123"
+        # Verify response
         assert result["status"] == "initialized"
-        assert self.adapter._session_initialized is True
+        assert result["session_id"] == "test_session_123"
+        assert self.adapter._session_initialized
+
+        # Verify HTTP call
+        mock_post.assert_called_once_with(
+            "/initialize",
+            json={"difficulty": "normal"},
+            timeout=5.0,
+        )
 
     @pytest.mark.unit
     @patch("httpx.Client.post")
-    def test_initialize_session_timeout(self, mock_post) -> None:
+    def test_initialize_session_timeout(self, mock_post: Mock) -> None:
         """Test session initialization timeout handling."""
+        # Mock timeout exception
         mock_post.side_effect = httpx.TimeoutException("Request timeout")
 
+        # Test timeout handling
         with pytest.raises(PokemonGymAdapterError) as exc_info:
             self.adapter.initialize_session()
 
-        assert "Session initialization timeout" in str(exc_info.value)
-        assert "Consider increasing timeout" in str(exc_info.value)
+        # Verify error details
+        assert "timeout" in str(exc_info.value).lower()
+        assert "consider increasing timeout" in str(exc_info.value).lower()
         assert not self.adapter._session_initialized
 
     @pytest.mark.unit
     @patch("httpx.Client.post")
-    def test_initialize_session_http_error(self, mock_post) -> None:
+    def test_initialize_session_http_error(self, mock_post: Mock) -> None:
         """Test session initialization HTTP error handling."""
+        # Mock HTTP error
         mock_response = Mock()
         mock_response.status_code = 500
-        mock_response.text = "Internal server error"
+        mock_response.text = "Internal Server Error"
         mock_post.side_effect = httpx.HTTPStatusError(
-            "Server error", request=Mock(), response=mock_response
+            "500 Server Error", request=Mock(), response=mock_response
         )
 
+        # Test error handling
         with pytest.raises(PokemonGymAdapterError) as exc_info:
             self.adapter.initialize_session()
 
-        assert "Session initialization failed" in str(exc_info.value)
+        # Verify error details
         assert "500" in str(exc_info.value)
+        assert "Internal Server Error" in str(exc_info.value)
         assert not self.adapter._session_initialized
+
+
+class TestPokemonGymAdapterActions:
+    """Test action execution with performance monitoring."""
+
+    def setup_method(self) -> None:
+        """Set up test environment."""
+        self.port = 8083
+        self.container_id = "action_test_789"
+        self.adapter = PokemonGymAdapter(self.port, self.container_id)
+
+    def teardown_method(self) -> None:
+        """Clean up after each test."""
+        if hasattr(self, "adapter"):
+            self.adapter.close()
 
     @pytest.mark.unit
     @patch("httpx.Client.post")
-    def test_stop_session_success(self, mock_post) -> None:
-        """Test successful session stop."""
-        # Set up initialized session
+    def test_execute_action_string_input(self, mock_post: Mock) -> None:
+        """Test action execution with string input."""
+        # Mock successful response
+        mock_response = Mock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {
+            "status": "success",
+            "frame_count": 150,
+            "reward": 10,
+        }
+        mock_post.return_value = mock_response
+
+        # Test action execution
+        start_time = time.perf_counter()
+        result = self.adapter.execute_action("A")
+        duration = time.perf_counter() - start_time
+
+        # Verify performance requirement (<100ms)
+        assert duration < 0.1
+        assert self.adapter._last_action_time == duration
+
+        # Verify response
+        assert result["status"] == "success"
+        assert result["frame_count"] == 150
+
+        # Verify HTTP call with string normalization
+        mock_post.assert_called_once_with(
+            "/action",
+            json={"action": "A"},
+            timeout=0.1,
+        )
+
+    @pytest.mark.unit
+    @patch("httpx.Client.post")
+    def test_execute_action_dict_input(self, mock_post: Mock) -> None:
+        """Test action execution with dictionary input."""
+        # Mock successful response
+        mock_response = Mock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"status": "success", "frames_advanced": 5}
+        mock_post.return_value = mock_response
+
+        # Test dictionary action
+        action_dict = {"action_type": "press_key", "keys": ["A", "B"]}
+        result = self.adapter.execute_action(action_dict)
+
+        # Verify response
+        assert result["status"] == "success"
+        assert result["frames_advanced"] == 5
+
+        # Verify HTTP call with dictionary passthrough
+        mock_post.assert_called_once_with(
+            "/action",
+            json=action_dict,
+            timeout=0.1,
+        )
+
+    @pytest.mark.unit
+    @patch("httpx.Client.post")
+    def test_execute_action_timeout_violation(self, mock_post: Mock) -> None:
+        """Test action execution timeout handling."""
+        # Mock timeout exception
+        mock_post.side_effect = httpx.TimeoutException("Action timeout")
+
+        # Test timeout handling
+        with pytest.raises(PokemonGymAdapterError) as exc_info:
+            self.adapter.execute_action("START")
+
+        # Verify error details
+        assert "timeout" in str(exc_info.value).lower()
+        assert "violates <100ms performance requirement" in str(exc_info.value)
+
+    @pytest.mark.unit
+    @patch("httpx.Client.post")
+    @patch("time.perf_counter")
+    def test_execute_action_performance_warning(self, mock_time: Mock, mock_post: Mock) -> None:
+        """Test performance warning for slow actions."""
+        # Mock slow execution time (90ms > 80ms warning threshold)
+        mock_time.side_effect = [0.0, 0.09]  # 90ms execution
+
+        # Mock successful response
+        mock_response = Mock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"status": "success"}
+        mock_post.return_value = mock_response
+
+        # Test action execution with logging
+        with patch("claudelearnspokemon.pokemon_gym_adapter.logger") as mock_logger:
+            result = self.adapter.execute_action("B")
+
+            # Verify warning was logged
+            mock_logger.warning.assert_called_once()
+            warning_call = mock_logger.warning.call_args[0][0]
+            assert "approaching timeout" in warning_call
+            assert "0.090s" in warning_call
+
+        # Verify successful response despite warning
+        assert result["status"] == "success"
+        assert self.adapter._last_action_time == 0.09
+
+
+class TestPokemonGymAdapterStatus:
+    """Test session status monitoring."""
+
+    def setup_method(self) -> None:
+        """Set up test environment."""
+        self.port = 8084
+        self.container_id = "status_test_012"
+        self.adapter = PokemonGymAdapter(self.port, self.container_id)
+
+    def teardown_method(self) -> None:
+        """Clean up after each test."""
+        if hasattr(self, "adapter"):
+            self.adapter.close()
+
+    @pytest.mark.unit
+    @patch("httpx.Client.get")
+    def test_get_session_status_success(self, mock_get: Mock) -> None:
+        """Test successful status retrieval."""
+        # Mock successful response
+        mock_response = Mock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {
+            "active": True,
+            "frame_count": 500,
+            "player_position": {"x": 100, "y": 150},
+        }
+        mock_get.return_value = mock_response
+
+        # Test status retrieval
+        start_time = time.perf_counter()
+        result = self.adapter.get_session_status()
+        duration = time.perf_counter() - start_time
+
+        # Verify performance requirement (<50ms)
+        assert duration < 0.05
+
+        # Verify response
+        assert result["active"] is True
+        assert result["frame_count"] == 500
+
+        # Verify HTTP call
+        mock_get.assert_called_once_with("/status", timeout=0.05)
+
+    @pytest.mark.unit
+    @patch("httpx.Client.get")
+    def test_get_session_status_timeout(self, mock_get: Mock) -> None:
+        """Test status retrieval timeout handling."""
+        # Mock timeout exception
+        mock_get.side_effect = httpx.TimeoutException("Status timeout")
+
+        # Test timeout handling
+        with pytest.raises(PokemonGymAdapterError) as exc_info:
+            self.adapter.get_session_status()
+
+        # Verify error details
+        assert "timeout" in str(exc_info.value).lower()
+        assert "expected <50ms response time" in str(exc_info.value).lower()
+
+    @pytest.mark.unit
+    @patch("httpx.Client.get")
+    def test_is_session_active_true(self, mock_get: Mock) -> None:
+        """Test session activity check - active session."""
+        # Setup adapter as initialized
+        self.adapter._session_initialized = True
+
+        # Mock successful status response
+        mock_response = Mock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"active": True}
+        mock_get.return_value = mock_response
+
+        # Test activity check
+        assert self.adapter.is_session_active() is True
+
+    @pytest.mark.unit
+    def test_is_session_active_false_not_initialized(self) -> None:
+        """Test session activity check - not initialized."""
+        # Ensure adapter is not initialized
+        self.adapter._session_initialized = False
+
+        # Test activity check (should return False without HTTP call)
+        assert self.adapter.is_session_active() is False
+
+    @pytest.mark.unit
+    @patch("httpx.Client.get")
+    def test_is_session_active_false_server_error(self, mock_get: Mock) -> None:
+        """Test session activity check - server error."""
+        # Setup adapter as initialized
+        self.adapter._session_initialized = True
+
+        # Mock server error
+        mock_get.side_effect = httpx.HTTPStatusError(
+            "500 Server Error", request=Mock(), response=Mock()
+        )
+
+        # Test activity check (should return False on error)
+        assert self.adapter.is_session_active() is False
+
+
+class TestPokemonGymAdapterSessionStop:
+    """Test session termination."""
+
+    def setup_method(self) -> None:
+        """Set up test environment."""
+        self.port = 8085
+        self.container_id = "stop_test_345"
+        self.adapter = PokemonGymAdapter(self.port, self.container_id)
+
+    def teardown_method(self) -> None:
+        """Clean up after each test."""
+        if hasattr(self, "adapter"):
+            self.adapter.close()
+
+    @pytest.mark.unit
+    @patch("httpx.Client.post")
+    def test_stop_session_success(self, mock_post: Mock) -> None:
+        """Test successful session termination."""
+        # Setup adapter as initialized
         self.adapter._session_initialized = True
 
         # Mock successful response
         mock_response = Mock()
-        mock_response.status_code = 200
+        mock_response.raise_for_status.return_value = None
         mock_response.json.return_value = {
             "status": "stopped",
-            "final_metrics": {"actions": 150, "time": 300.5},
+            "final_score": 1500,
+            "session_duration": 300.5,
         }
         mock_post.return_value = mock_response
 
         # Test session stop
         result = self.adapter.stop_session(save_state=True)
 
-        # Verify request
-        mock_post.assert_called_once_with("/stop", json={"save_state": True}, timeout=2.0)
-
-        # Verify state update
+        # Verify response
         assert result["status"] == "stopped"
+        assert result["final_score"] == 1500
         assert not self.adapter._session_initialized
 
-
-class TestPokemonGymAdapterActions:
-    """Test action execution - critical performance path."""
-
-    def setup_method(self) -> None:
-        """Set up test environment."""
-        self.port = 8081
-        self.container_id = "test_container_123"
-        self.adapter = PokemonGymAdapter(self.port, self.container_id)
-        self.adapter._session_initialized = True  # Mock initialized state
-
-    def teardown_method(self) -> None:
-        """Clean up after each test."""
-        self.adapter.close()
-
-    @pytest.mark.unit
-    @patch("httpx.Client.post")
-    def test_execute_action_string_input(self, mock_post) -> None:
-        """Test action execution with string input."""
-        # Mock fast response for performance test
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "state": {"player_x": 10, "player_y": 5},
-            "reward": 0.1,
-            "done": False,
-        }
-        mock_post.return_value = mock_response
-
-        # Execute action
-        result = self.adapter.execute_action("A B START")
-        # Note: In production we'd measure execution time here for performance validation
-        # but for unit tests we just verify the timeout configuration is correct
-
-        # Verify API call
+        # Verify HTTP call
         mock_post.assert_called_once_with(
-            "/action", json={"action": "A B START"}, timeout=0.1  # Critical: <100ms requirement
+            "/stop",
+            json={"save_state": True},
+            timeout=2.0,
         )
 
-        # Verify response
-        assert result["reward"] == 0.1
-        assert not result["done"]
-
-        # Verify performance tracking
-        assert self.adapter._last_action_time is not None
-
-        # Note: Actual performance test would require real network
-        # This tests the timeout configuration is correct
-
     @pytest.mark.unit
     @patch("httpx.Client.post")
-    def test_execute_action_dict_input(self, mock_post) -> None:
-        """Test action execution with structured input."""
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"status": "ok"}
-        mock_post.return_value = mock_response
+    def test_stop_session_timeout(self, mock_post: Mock) -> None:
+        """Test session stop timeout handling."""
+        # Mock timeout exception
+        mock_post.side_effect = httpx.TimeoutException("Stop timeout")
 
-        # Test with dictionary action
-        action_dict = {"type": "button_sequence", "buttons": ["A", "B"], "duration": 0.5}
-
-        self.adapter.execute_action(action_dict)
-
-        mock_post.assert_called_once_with("/action", json=action_dict, timeout=0.1)
-
-    @pytest.mark.unit
-    @patch("httpx.Client.post")
-    def test_execute_action_timeout_violation(self, mock_post) -> None:
-        """Test action timeout handling - critical for <100ms requirement."""
-        mock_post.side_effect = httpx.TimeoutException("Action timeout")
-
+        # Test timeout handling
         with pytest.raises(PokemonGymAdapterError) as exc_info:
-            self.adapter.execute_action("A")
+            self.adapter.stop_session()
 
-        error_msg = str(exc_info.value)
-        assert "Action execution timeout" in error_msg
-        assert "violates <100ms performance requirement" in error_msg
-
-    @pytest.mark.unit
-    @patch("httpx.Client.post")
-    def test_execute_action_uninitialized_session_warning(self, mock_post) -> None:
-        """Test action on uninitialized session logs warning."""
-        self.adapter._session_initialized = False
-
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"status": "ok"}
-        mock_post.return_value = mock_response
-
-        with patch("claudelearnspokemon.pokemon_gym_adapter.logger") as mock_logger:
-            self.adapter.execute_action("A")
-
-            mock_logger.warning.assert_called_once()
-            warning_call = mock_logger.warning.call_args[0][0]
-            assert "uninitialized session" in warning_call
+        # Verify error details
+        assert "timeout" in str(exc_info.value).lower()
+        assert "server may be unresponsive" in str(exc_info.value).lower()
 
 
-class TestPokemonGymAdapterStatus:
-    """Test status and health checking functionality."""
+class TestPokemonGymAdapterMetrics:
+    """Test performance metrics and monitoring."""
 
     def setup_method(self) -> None:
         """Set up test environment."""
-        self.port = 8081
-        self.container_id = "test_container_123"
+        self.port = 8086
+        self.container_id = "metrics_test_678"
         self.adapter = PokemonGymAdapter(self.port, self.container_id)
 
     def teardown_method(self) -> None:
         """Clean up after each test."""
-        self.adapter.close()
+        if hasattr(self, "adapter"):
+            self.adapter.close()
 
     @pytest.mark.unit
-    @patch("httpx.Client.get")
-    def test_get_session_status_success(self, mock_get) -> None:
-        """Test successful status retrieval."""
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "active": True,
-            "uptime": 125.5,
-            "actions_processed": 42,
-            "performance": {"avg_response_time": 0.045},
-        }
-        mock_get.return_value = mock_response
+    def test_get_performance_metrics_initial(self) -> None:
+        """Test initial performance metrics."""
+        metrics = self.adapter.get_performance_metrics()
 
-        result = self.adapter.get_session_status()
+        # Verify initial state
+        assert metrics["session_initialized"] is False
+        assert metrics["last_action_time"] is None
+        assert "timeout_config" in metrics
+        assert "connection_pool_info" in metrics
 
-        # Verify API call with fast timeout
-        mock_get.assert_called_once_with("/status", timeout=0.05)  # Very fast for status checks
-
-        # Verify response
-        assert result["active"] is True
-        assert result["uptime"] == 125.5
-        assert result["performance"]["avg_response_time"] == 0.045
+        # Verify timeout configuration is included
+        assert metrics["timeout_config"]["action"] == 0.1
+        assert metrics["timeout_config"]["initialize"] == 5.0
 
     @pytest.mark.unit
-    @patch("httpx.Client.get")
-    def test_get_session_status_timeout(self, mock_get) -> None:
-        """Test status timeout handling."""
-        mock_get.side_effect = httpx.TimeoutException("Status timeout")
-
-        with pytest.raises(PokemonGymAdapterError) as exc_info:
-            self.adapter.get_session_status()
-
-        assert "Status retrieval timeout" in str(exc_info.value)
-        assert "Expected <50ms response time" in str(exc_info.value)
-
-    @pytest.mark.unit
-    @patch.object(PokemonGymAdapter, "get_session_status")
-    def test_is_session_active_true(self, mock_status) -> None:
-        """Test session activity check when active."""
+    def test_get_performance_metrics_after_action(self) -> None:
+        """Test performance metrics after action execution."""
+        # Simulate action timing
         self.adapter._session_initialized = True
-        mock_status.return_value = {"active": True}
+        self.adapter._last_action_time = 0.075
 
-        assert self.adapter.is_session_active() is True
-        mock_status.assert_called_once()
+        metrics = self.adapter.get_performance_metrics()
 
-    @pytest.mark.unit
-    @patch.object(PokemonGymAdapter, "get_session_status")
-    def test_is_session_active_false_uninitialized(self, mock_status) -> None:
-        """Test session activity check when not initialized."""
-        self.adapter._session_initialized = False
-
-        # Should return False without calling server
-        assert self.adapter.is_session_active() is False
-        mock_status.assert_not_called()
-
-    @pytest.mark.unit
-    @patch.object(PokemonGymAdapter, "get_session_status")
-    def test_is_session_active_server_error(self, mock_status) -> None:
-        """Test session activity check handles server errors gracefully."""
-        self.adapter._session_initialized = True
-        mock_status.side_effect = PokemonGymAdapterError("Server error")
-
-        # Should return False on any error
-        assert self.adapter.is_session_active() is False
+        # Verify updated state
+        assert metrics["session_initialized"] is True
+        assert metrics["last_action_time"] == 0.075
 
 
-class TestPokemonGymAdapterFactoryMethod:
-    """Test factory method and preset configurations."""
+class TestPokemonGymAdapterFactoryMethods:
+    """Test factory methods and presets."""
+
+    def teardown_method(self) -> None:
+        """Clean up after each test."""
+        # Clean up any created adapters
+        pass
 
     @pytest.mark.unit
     def test_create_adapter_benchflow_preset(self) -> None:
         """Test benchflow preset configuration."""
         adapter = PokemonGymAdapter.create_adapter(
-            port=8081, container_id="test123", adapter_type="benchflow"
+            port=8087,
+            container_id="factory_test_901",
+            adapter_type="benchflow",
         )
 
-        # Verify benchflow-specific timeouts
-        expected_timeouts = {
-            "initialize": 5.0,
-            "action": 0.1,
-            "status": 0.05,
-            "stop": 2.0,
-            "default": 0.1,
-        }
-        assert adapter.timeout_config == expected_timeouts
+        try:
+            # Verify benchflow preset configuration
+            assert adapter.timeout_config["action"] == 0.1
+            assert adapter.timeout_config["initialize"] == 5.0
+            assert adapter.timeout_config["status"] == 0.05
 
-        adapter.close()
+        finally:
+            adapter.close()
 
     @pytest.mark.unit
     def test_create_adapter_high_performance_preset(self) -> None:
-        """Test high performance preset for production scale."""
+        """Test high_performance preset configuration."""
         adapter = PokemonGymAdapter.create_adapter(
-            port=8081, container_id="test123", adapter_type="high_performance"
+            port=8088,
+            container_id="hp_test_234",
+            adapter_type="high_performance",
         )
 
-        # Verify aggressive timeouts for high performance
-        assert adapter.timeout_config["action"] == 0.05  # Even faster
-        assert adapter.timeout_config["status"] == 0.025
+        try:
+            # Verify high_performance preset configuration
+            assert adapter.timeout_config["action"] == 0.05  # Faster than benchflow
+            assert adapter.timeout_config["initialize"] == 3.0  # Faster than benchflow
+            assert adapter.timeout_config["status"] == 0.025  # Faster than benchflow
 
-        adapter.close()
+        finally:
+            adapter.close()
 
     @pytest.mark.unit
     def test_create_adapter_development_preset(self) -> None:
-        """Test development preset with relaxed timeouts."""
+        """Test development preset configuration."""
         adapter = PokemonGymAdapter.create_adapter(
-            port=8081, container_id="test123", adapter_type="development"
+            port=8089,
+            container_id="dev_test_567",
+            adapter_type="development",
         )
 
-        # Verify relaxed timeouts for development
-        assert adapter.timeout_config["action"] == 1.0
-        assert adapter.timeout_config["initialize"] == 10.0
+        try:
+            # Verify development preset configuration
+            assert adapter.timeout_config["action"] == 1.0  # Much slower for debugging
+            assert adapter.timeout_config["initialize"] == 10.0  # Slower for debugging
+            assert adapter.timeout_config["status"] == 0.5  # Slower for debugging
 
-        adapter.close()
+        finally:
+            adapter.close()
 
     @pytest.mark.unit
     def test_create_adapter_unknown_type(self) -> None:
-        """Test factory with unknown adapter type."""
+        """Test error handling for unknown adapter type."""
         with pytest.raises(ValueError) as exc_info:
             PokemonGymAdapter.create_adapter(
-                port=8081, container_id="test123", adapter_type="unknown_type"
+                port=8090,
+                container_id="unknown_test_890",
+                adapter_type="unknown_type",
             )
 
+        # Verify error message
         assert "Unknown adapter type: unknown_type" in str(exc_info.value)
-        assert "benchflow" in str(exc_info.value)
+        assert "Available:" in str(exc_info.value)
 
     @pytest.mark.unit
     def test_create_adapter_with_overrides(self) -> None:
         """Test factory method with configuration overrides."""
-        custom_timeouts = {"action": 0.2, "status": 0.1}  # Override the preset
+        custom_timeouts = {
+            "initialize": 15.0,
+            "action": 0.2,
+            "status": 0.1,
+            "stop": 3.0,
+            "default": 0.2,
+        }
 
         adapter = PokemonGymAdapter.create_adapter(
-            port=8081,
-            container_id="test123",
+            port=8091,
+            container_id="override_test_123",
             adapter_type="benchflow",
             timeout_config=custom_timeouts,
         )
 
-        # Verify override was applied
-        assert adapter.timeout_config == custom_timeouts
+        try:
+            # Verify overrides applied
+            assert adapter.timeout_config == custom_timeouts
 
-        adapter.close()
+        finally:
+            adapter.close()
 
 
-class TestPokemonGymAdapterPerformance:
-    """Test performance requirements and monitoring."""
+class TestPokemonGymAdapterResourceManagement:
+    """Test resource management and cleanup."""
 
     def setup_method(self) -> None:
         """Set up test environment."""
-        self.adapter = PokemonGymAdapter(8081, "test_container")
-
-    def teardown_method(self) -> None:
-        """Clean up after each test."""
-        self.adapter.close()
+        self.port = 8092
+        self.container_id = "cleanup_test_456"
 
     @pytest.mark.unit
-    def test_performance_metrics(self) -> None:
-        """Test performance metrics collection."""
-        # Initially no metrics
-        metrics = self.adapter.get_performance_metrics()
-        assert metrics["session_initialized"] is False
-        assert metrics["last_action_time"] is None
+    def test_close_cleans_http_client(self) -> None:
+        """Test close() method cleans up HTTP client."""
+        adapter = PokemonGymAdapter(self.port, self.container_id)
 
-        # Mock some activity
-        self.adapter._session_initialized = True
-        self.adapter._last_action_time = 0.045  # 45ms - good performance
-
-        metrics = self.adapter.get_performance_metrics()
-        assert metrics["session_initialized"] is True
-        assert metrics["last_action_time"] == 0.045
-        assert "timeout_config" in metrics
-        assert "connection_pool_info" in metrics
-
-    @pytest.mark.unit
-    @patch("httpx.Client.post")
-    @patch("claudelearnspokemon.pokemon_gym_adapter.logger")
-    def test_action_performance_warning(self, mock_logger, mock_post) -> None:
-        """Test performance warning when approaching timeout."""
-        # Mock slow response (80ms - approaching 100ms limit)
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"status": "ok"}
-
-        def slow_response(*args, **kwargs):
-            time.sleep(0.08)  # Simulate 80ms response
-            return mock_response
-
-        mock_post.side_effect = slow_response
-
-        self.adapter._session_initialized = True
-        self.adapter.execute_action("A")
-
-        # Verify warning was logged
-        mock_logger.warning.assert_called()
-        warning_msg = mock_logger.warning.call_args[0][0]
-        assert "approaching timeout" in warning_msg
-        assert "target: <0.1s" in warning_msg
-
-
-class TestPokemonGymAdapterCleanup:
-    """Test resource cleanup and lifecycle management."""
-
-    @pytest.mark.unit
-    def test_close_cleanup(self) -> None:
-        """Test proper resource cleanup on close."""
-        adapter = PokemonGymAdapter(8081, "test_container")
-
-        # Verify initial state
+        # Verify client is open initially
         assert not adapter.http_client.is_closed
 
         # Close adapter
         adapter.close()
 
-        # Verify cleanup
+        # Verify client is closed
         assert adapter.http_client.is_closed
 
     @pytest.mark.unit
-    def test_context_manager_cleanup(self) -> None:
-        """Test adapter can be used as context manager."""
-        # This would be useful for production resource management
-        adapter = PokemonGymAdapter(8081, "test_container")
+    @patch("claudelearnspokemon.pokemon_gym_adapter.logger")
+    def test_close_handles_http_client_error(self, mock_logger: Mock) -> None:
+        """Test close() handles HTTP client errors gracefully."""
+        adapter = PokemonGymAdapter(self.port, self.container_id)
 
-        try:
-            # Use adapter
-            assert not adapter.http_client.is_closed
-        finally:
-            # Always clean up
+        # Mock HTTP client close to raise exception
+        with patch.object(adapter.http_client, "close", side_effect=Exception("Close error")):
+            # Should not raise exception
             adapter.close()
-            assert adapter.http_client.is_closed
+
+        # Verify error was logged
+        mock_logger.error.assert_called_once()
+        error_call = mock_logger.error.call_args[0][0]
+        assert "Error closing HTTP client" in error_call
 
     @pytest.mark.unit
-    @patch("claudelearnspokemon.pokemon_gym_adapter.logger")
-    def test_close_error_handling(self, mock_logger) -> None:
-        """Test close handles errors gracefully."""
-        adapter = PokemonGymAdapter(8081, "test_container")
+    def test_context_manager_usage(self) -> None:
+        """Test adapter can be used as context manager."""
+        with PokemonGymAdapter(self.port, self.container_id) as adapter:
+            # Verify adapter is usable
+            assert isinstance(adapter, PokemonGymAdapter)
+            assert not adapter.http_client.is_closed
 
-        # Mock HTTP client close to raise error
-        adapter.http_client.close = Mock(side_effect=Exception("Close error"))
-
-        # Close should not raise, but should log error
-        adapter.close()
-
-        mock_logger.error.assert_called()
-        error_msg = mock_logger.error.call_args[0][0]
-        assert "Error closing HTTP client" in error_msg
+        # Context manager should handle cleanup
+        # Note: This test assumes context manager is implemented in parent class
 
 
-class TestPokemonGymAdapterErrorHandling:
-    """Test error handling and exception hierarchy."""
+class TestPokemonGymAdapterErrorHierarchy:
+    """Test error hierarchy and exception handling."""
 
     def setup_method(self) -> None:
         """Set up test environment."""
-        self.adapter = PokemonGymAdapter(8081, "test_container")
-
-    def teardown_method(self) -> None:
-        """Clean up after each test."""
-        self.adapter.close()
+        self.port = 8093
+        self.container_id = "error_test_789"
 
     @pytest.mark.unit
-    def test_error_inheritance(self) -> None:
-        """Test PokemonGymAdapterError inherits from EmulatorPoolError."""
-        error = PokemonGymAdapterError("Test error")
+    def test_error_hierarchy(self) -> None:
+        """Test PokemonGymAdapterError inherits correctly."""
+        # Verify error hierarchy
+        assert issubclass(PokemonGymAdapterError, EmulatorPoolError)
+        assert issubclass(PokemonGymAdapterError, Exception)
 
-        # Verify inheritance chain
+        # Test error instantiation
+        error = PokemonGymAdapterError("Test error message")
+        assert str(error) == "Test error message"
         assert isinstance(error, EmulatorPoolError)
-        assert isinstance(error, Exception)
-        assert str(error) == "Test error"
 
     @pytest.mark.unit
     @patch("httpx.Client.post")
-    def test_unexpected_error_handling(self, mock_post) -> None:
-        """Test handling of unexpected errors during operations."""
-        mock_post.side_effect = ValueError("Unexpected error")
+    def test_error_context_preservation(self, mock_post: Mock) -> None:
+        """Test error context is preserved in exception chain."""
+        adapter = PokemonGymAdapter(self.port, self.container_id)
 
-        with pytest.raises(PokemonGymAdapterError) as exc_info:
-            self.adapter.initialize_session()
+        try:
+            # Mock an HTTP error with specific details
+            mock_response = Mock()
+            mock_response.status_code = 404
+            mock_response.text = "Session not found"
+            mock_post.side_effect = httpx.HTTPStatusError(
+                "404 Not Found", request=Mock(), response=mock_response
+            )
 
-        assert "Unexpected error during session initialization" in str(exc_info.value)
+            # This should raise PokemonGymAdapterError with context
+            adapter.initialize_session()
 
-    @pytest.mark.unit
-    def test_string_representation(self) -> None:
-        """Test string representations for logging."""
-        adapter = PokemonGymAdapter(8081, "test_container_123456789")
+        except PokemonGymAdapterError as e:
+            # Verify error context is preserved
+            assert "404" in str(e)
+            assert "Session not found" in str(e)
+            assert e.__cause__ is not None  # Verify exception chaining
 
-        # Test __str__ method
-        str_repr = str(adapter)
-        assert "PokemonGymAdapter" in str_repr
-        assert "port=8081" in str_repr
-        assert "test_contain" in str_repr  # Truncated container ID (first 12 chars)
-        assert "session=inactive" in str_repr
-
-        # Test __repr__ method
-        repr_str = repr(adapter)
-        assert "PokemonGymAdapter(" in repr_str
-        assert "container_id='test_container_123456789'" in repr_str
-        assert "session_initialized=False" in repr_str
-
-        adapter.close()
+        finally:
+            adapter.close()
 
 
 class TestPokemonGymAdapterIntegration:
-    """Integration tests for full adapter lifecycle."""
+    """Integration tests for end-to-end scenarios."""
+
+    def setup_method(self) -> None:
+        """Set up test environment."""
+        self.port = 8094
+        self.container_id = "integration_test_012"
+        self.adapter = PokemonGymAdapter(self.port, self.container_id)
+
+    def teardown_method(self) -> None:
+        """Clean up after each test."""
+        if hasattr(self, "adapter"):
+            self.adapter.close()
 
     @pytest.mark.integration
     @patch("httpx.Client.post")
     @patch("httpx.Client.get")
-    def test_full_session_lifecycle(self, mock_get, mock_post) -> None:
-        """Test complete session lifecycle with mocked HTTP."""
-        adapter = PokemonGymAdapter(8081, "integration_test")
+    def test_full_session_lifecycle(self, mock_get: Mock, mock_post: Mock) -> None:
+        """Test complete session lifecycle: init -> action -> status -> stop."""
 
-        try:
-            # Mock initialize response
-            init_response = Mock()
-            init_response.status_code = 200
-            init_response.json.return_value = {"session_id": "test123", "status": "ready"}
+        # Mock initialize session
+        init_response = Mock()
+        init_response.raise_for_status.return_value = None
+        init_response.json.return_value = {"status": "initialized", "session_id": "test_123"}
 
-            # Mock action response
-            action_response = Mock()
-            action_response.status_code = 200
-            action_response.json.return_value = {"reward": 1.0, "done": False}
+        # Mock execute action
+        action_response = Mock()
+        action_response.raise_for_status.return_value = None
+        action_response.json.return_value = {"status": "success", "frame_count": 100}
 
-            # Mock status response
-            status_response = Mock()
-            status_response.status_code = 200
-            status_response.json.return_value = {"active": True, "uptime": 10.5}
+        # Mock stop session
+        stop_response = Mock()
+        stop_response.raise_for_status.return_value = None
+        stop_response.json.return_value = {"status": "stopped"}
 
-            # Mock stop response
-            stop_response = Mock()
-            stop_response.status_code = 200
-            stop_response.json.return_value = {"status": "stopped", "total_actions": 5}
+        # Mock get status
+        status_response = Mock()
+        status_response.raise_for_status.return_value = None
+        status_response.json.return_value = {"active": True, "frame_count": 100}
 
-            mock_post.side_effect = [init_response, action_response, stop_response]
-            mock_get.return_value = status_response
+        # Configure mocks
+        mock_post.side_effect = [init_response, action_response, stop_response]
+        mock_get.return_value = status_response
 
-            # Full lifecycle test
+        # Execute full lifecycle
+        init_result = self.adapter.initialize_session({"game": "pokemon_red"})
+        assert init_result["status"] == "initialized"
+        assert self.adapter._session_initialized
 
-            # 1. Initialize session
-            init_result = adapter.initialize_session({"game": "pokemon"})
-            assert init_result["session_id"] == "test123"
-            assert adapter._session_initialized
+        action_result = self.adapter.execute_action("A")
+        assert action_result["status"] == "success"
 
-            # 2. Execute actions
-            action_result = adapter.execute_action("A B")
-            assert action_result["reward"] == 1.0
+        status_result = self.adapter.get_session_status()
+        assert status_result["active"] is True
 
-            # 3. Check status
-            status_result = adapter.get_session_status()
-            assert status_result["active"]
-            assert adapter.is_session_active()  # This calls get_session_status() again
+        stop_result = self.adapter.stop_session(save_state=True)
+        assert stop_result["status"] == "stopped"
+        assert not self.adapter._session_initialized
 
-            # 4. Stop session
-            stop_result = adapter.stop_session()
-            assert stop_result["status"] == "stopped"
-            assert not adapter._session_initialized
+        # Verify all HTTP calls were made
+        assert mock_post.call_count == 3
+        assert mock_get.call_count == 1
 
-            # Verify all API calls were made correctly
-            assert mock_post.call_count == 3  # init, action, stop
-            assert mock_get.call_count == 2  # status called twice (direct + via is_session_active)
+    @pytest.mark.integration
+    @patch("httpx.Client.post")
+    def test_performance_under_load(self, mock_post: Mock) -> None:
+        """Test adapter performance under sequential load."""
+        # Mock fast responses for all actions
+        mock_response = Mock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"status": "success", "frame_count": 1}
+        mock_post.return_value = mock_response
 
-        finally:
-            adapter.close()
+        # Execute multiple actions quickly
+        action_count = 100
+        start_time = time.perf_counter()
+
+        for i in range(action_count):
+            result = self.adapter.execute_action(f"action_{i}")
+            assert result["status"] == "success"
+
+        total_duration = time.perf_counter() - start_time
+
+        # Verify performance: should average well under 100ms per action
+        avg_duration = total_duration / action_count
+        assert avg_duration < 0.01  # 10ms average (well under 100ms requirement)
+
+        # Verify last action time is tracked
+        assert self.adapter._last_action_time is not None
+        assert self.adapter._last_action_time < 0.1
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

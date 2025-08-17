@@ -8,7 +8,9 @@ Displays git status, worktree info, test results, and code statistics
 
 import argparse
 import asyncio
+import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -24,14 +26,79 @@ from rich.table import Table
 from rich.text import Text
 
 
+def detect_ssh_environment() -> bool:
+    """Detect if we're running over SSH connection.
+
+    Production wisdom: SSH environments have different terminal capabilities.
+    Unicode characters, full-screen mode, and some Rich features don't work well.
+
+    Returns:
+        True if SSH detected, False for local terminal
+    """
+    # Check common SSH environment variables
+    return bool(os.getenv("SSH_CLIENT") or os.getenv("SSH_TTY") or os.getenv("SSH_CONNECTION"))
+
+
+def get_terminal_size() -> tuple[int, int]:
+    """Get terminal dimensions safely.
+
+    Production wisdom: Always have fallbacks for terminal operations.
+    Different environments report size differently.
+
+    Returns:
+        Tuple of (columns, lines) with safe defaults
+    """
+    try:
+        size = shutil.get_terminal_size()
+        return size.columns, size.lines
+    except (OSError, AttributeError):
+        # Fallback for environments where terminal size detection fails
+        return 80, 24  # Standard VT100 dimensions
+
+
+def safe_unicode_char(unicode_char: str, ascii_fallback: str, is_ssh: bool) -> str:
+    """Return appropriate character based on environment.
+
+    Production wisdom: Always have ASCII fallbacks for SSH/limited terminals.
+    Unicode looks great locally but breaks over SSH.
+
+    Args:
+        unicode_char: The preferred unicode character
+        ascii_fallback: ASCII alternative for SSH environments
+        is_ssh: Whether we're in an SSH environment
+
+    Returns:
+        The appropriate character for the environment
+    """
+    return ascii_fallback if is_ssh else unicode_char
+
+
 class CIDashboard:
     def __init__(self, refresh_interval: int = 30):
-        self.console = Console()
+        # Production-ready SSH detection and console setup
+        self.is_ssh = detect_ssh_environment()
+        self.terminal_width, self.terminal_height = get_terminal_size()
+
+        # SSH-aware console initialization
+        # Over SSH: disable problematic features, use legacy mode
+        # Local: full Rich features enabled
+        self.console = Console(
+            force_terminal=True,
+            legacy_windows=self.is_ssh,  # Use legacy mode for SSH
+            width=self.terminal_width if self.is_ssh else None,
+        )
+
         self.refresh_interval = refresh_interval
         self.cache: dict[str, Any] = {}
         self.cache_times: dict[str, float] = {}
         self.project_root = Path("/home/sd/claudelearnspokemon")
         self.worktrees_root = Path("/home/sd/worktrees")
+
+        # Production debugging: log environment detection
+        if self.is_ssh:
+            self.console.print(
+                f"[dim]SSH detected - using ASCII mode, terminal: {self.terminal_width}x{self.terminal_height}[/dim]"
+            )
 
     def run_command(
         self, cmd: Union[str, list[str]], cwd: Path | None = None, timeout: int = 10
@@ -759,11 +826,23 @@ class CIDashboard:
         worktrees = self.get_worktree_status()
 
         table = Table(show_header=True, box=None)
-        table.add_column("Worktree", style="cyan", width=15)
-        table.add_column("Last Activity", justify="right", width=10)
-        table.add_column("Changes", justify="center", width=7)
-        table.add_column("PR Status", justify="center", width=10)
-        table.add_column("Status", justify="center", width=6)
+
+        # Responsive column widths based on terminal size
+        # SSH environments get narrower columns to fit
+        if self.is_ssh or self.terminal_width < 100:
+            # Narrow terminal or SSH - compress columns
+            table.add_column("Worktree", style="cyan", width=12)
+            table.add_column("Activity", justify="right", width=8)
+            table.add_column("Ch", justify="center", width=3)
+            table.add_column("PR", justify="center", width=8)
+            table.add_column("St", justify="center", width=3)
+        else:
+            # Wide terminal - use original widths
+            table.add_column("Worktree", style="cyan", width=15)
+            table.add_column("Last Activity", justify="right", width=10)
+            table.add_column("Changes", justify="center", width=7)
+            table.add_column("PR Status", justify="center", width=10)
+            table.add_column("Status", justify="center", width=6)
 
         # Sort worktrees: active first, then recent, then stale, then merged, then inactive
         def sort_priority(w):
@@ -777,40 +856,44 @@ class CIDashboard:
         sorted_worktrees = sorted(worktrees, key=sort_priority)
 
         for worktree in sorted_worktrees:  # Show ALL worktrees, no limit
-            # Determine status style and icon
+            # Determine status style and icon - SSH-aware
             if worktree["status"] == "active":
-                status_icon = "✅"
+                status_icon = safe_unicode_char("✅", "[+]", self.is_ssh)
                 time_style = "green"
             elif worktree["status"] == "recent":
-                status_icon = "⚠️"
+                status_icon = safe_unicode_char("⚠️", "[!]", self.is_ssh)
                 time_style = "yellow"
             elif worktree["status"] == "merged":
-                status_icon = "🟢"  # Green circle for merged
+                status_icon = safe_unicode_char("🟢", "[M]", self.is_ssh)  # Merged
                 time_style = "green"
             elif worktree["status"] == "stale":
-                status_icon = "🟠"  # Orange circle for stale
+                status_icon = safe_unicode_char("🟠", "[S]", self.is_ssh)  # Stale
                 time_style = "orange"
             else:  # inactive
-                status_icon = "🔴"  # Red circle for inactive
+                status_icon = safe_unicode_char("🔴", "[-]", self.is_ssh)  # Inactive
                 time_style = "red"
 
-            # PR Status indicator
+            # PR Status indicator - SSH-aware
             pr_status = worktree["pr_status"]
             if pr_status == "active-pr":
-                pr_icon = "🔄"  # Active PR
-                pr_text = f"PR #{worktree['pr_number']}"
+                pr_icon = safe_unicode_char("🔄", "[>]", self.is_ssh)  # Active PR
+                pr_text = (
+                    f"PR #{worktree['pr_number']}"
+                    if not self.is_ssh
+                    else f"#{worktree['pr_number']}"
+                )
                 pr_style = "blue"
             elif pr_status == "merged":
-                pr_icon = "🟢"  # Merged PR
-                pr_text = "merged"
+                pr_icon = safe_unicode_char("🟢", "[✓]", self.is_ssh)  # Merged PR
+                pr_text = "merged" if not self.is_ssh else "mrgd"
                 pr_style = "green"
             elif pr_status == "closed-pr":
-                pr_icon = "🔴"  # Closed PR
-                pr_text = "closed"
+                pr_icon = safe_unicode_char("🔴", "[X]", self.is_ssh)  # Closed PR
+                pr_text = "closed" if not self.is_ssh else "clsd"
                 pr_style = "red"
             else:  # no-pr
-                pr_icon = "⚫"  # No PR
-                pr_text = "no PR"
+                pr_icon = safe_unicode_char("⚫", "[ ]", self.is_ssh)  # No PR
+                pr_text = "no PR" if not self.is_ssh else "none"
                 pr_style = "dim"
 
             # Changes indicator
@@ -842,23 +925,36 @@ class CIDashboard:
         content.add_column("Metric", style="cyan")
         content.add_column("Status")
 
-        # Test results
-        test_icon = "✅" if test_status["failed"] == 0 else "❌"
+        # Test results - SSH-aware icons
+        test_icon = (
+            safe_unicode_char("✅", "[✓]", self.is_ssh)
+            if test_status["failed"] == 0
+            else safe_unicode_char("❌", "[X]", self.is_ssh)
+        )
         test_text = f"{test_status['passed']}/{test_status['total']} passed"
         if test_status["failed"] > 0:
             test_text += f" ([red]{test_status['failed']} failed[/red])"
         content.add_row("Tests:", f"{test_icon} {test_text}")
 
-        # Coverage bar
+        # Coverage bar - SSH-aware characters
         coverage = test_status["coverage"]
-        bar_width = 10
-        filled = int(coverage / 10)
-        bar = "█" * filled + "░" * (bar_width - filled)
+        bar_width = 10 if not self.is_ssh else 8  # Shorter bars for SSH
+        filled = int(coverage / (100 / bar_width))
+        if self.is_ssh:
+            # ASCII progress bar for SSH
+            bar = "=" * filled + "-" * (bar_width - filled)
+        else:
+            # Unicode progress bar for local
+            bar = "█" * filled + "░" * (bar_width - filled)
         coverage_color = "green" if coverage >= 80 else "yellow" if coverage >= 60 else "red"
         content.add_row("Coverage:", f"[{coverage_color}]{bar} {coverage}%[/{coverage_color}]")
 
-        # Ruff
-        ruff_icon = "✅" if quality["ruff_violations"] == 0 else "⚠️"
+        # Ruff - SSH-aware icons
+        ruff_icon = (
+            safe_unicode_char("✅", "[✓]", self.is_ssh)
+            if quality["ruff_violations"] == 0
+            else safe_unicode_char("⚠️", "[!]", self.is_ssh)
+        )
         ruff_text = (
             f"{quality['ruff_violations']} violations"
             if quality["ruff_violations"] > 0
@@ -867,23 +963,35 @@ class CIDashboard:
         ruff_color = "green" if quality["ruff_violations"] == 0 else "yellow"
         content.add_row("Ruff:", f"{ruff_icon} [{ruff_color}]{ruff_text}[/{ruff_color}]")
 
-        # Black
-        black_icon = "✅" if quality["black_status"] == "formatted" else "⚠️"
+        # Black - SSH-aware icons
+        black_icon = (
+            safe_unicode_char("✅", "[✓]", self.is_ssh)
+            if quality["black_status"] == "formatted"
+            else safe_unicode_char("⚠️", "[!]", self.is_ssh)
+        )
         black_color = "green" if quality["black_status"] == "formatted" else "yellow"
         content.add_row(
             "Black:", f"{black_icon} [{black_color}]{quality['black_status']}[/{black_color}]"
         )
 
-        # Mypy
-        mypy_icon = "✅" if quality["mypy_errors"] == 0 else "❌"
+        # Mypy - SSH-aware icons
+        mypy_icon = (
+            safe_unicode_char("✅", "[✓]", self.is_ssh)
+            if quality["mypy_errors"] == 0
+            else safe_unicode_char("❌", "[X]", self.is_ssh)
+        )
         mypy_text = (
             f"{quality['mypy_errors']} errors" if quality["mypy_errors"] > 0 else "no errors"
         )
         mypy_color = "green" if quality["mypy_errors"] == 0 else "red"
         content.add_row("Mypy:", f"{mypy_icon} [{mypy_color}]{mypy_text}[/{mypy_color}]")
 
-        # Pre-commit
-        pc_icon = "✅" if quality["pre_commit"] == "installed" else "⚠️"
+        # Pre-commit - SSH-aware icons
+        pc_icon = (
+            safe_unicode_char("✅", "[✓]", self.is_ssh)
+            if quality["pre_commit"] == "installed"
+            else safe_unicode_char("⚠️", "[!]", self.is_ssh)
+        )
         pc_color = "green" if quality["pre_commit"] == "installed" else "yellow"
         content.add_row(
             "Pre-commit:", f"{pc_icon} [{pc_color}]{quality['pre_commit']}[/{pc_color}]"
@@ -937,15 +1045,29 @@ class CIDashboard:
             no_prs_text = Text("No open pull requests", style="dim", justify="center")
             return Panel(no_prs_text, title="Pull Requests (0)", border_style="dim")
 
-        # Create table with PR data
+        # Create table with PR data - SSH-aware column headers and widths
         table = Table(show_header=True, box=None)
-        table.add_column("PR#", justify="right", style="cyan", width=5)
-        table.add_column("Title", style="white", min_width=30)  # More space for title
-        table.add_column("💬", justify="center", width=3)  # Comments
-        table.add_column("+/-", justify="right", width=14)  # Wider to show full +1454/-234 etc
-        table.add_column("📝", justify="right", width=3)  # Commits
-        table.add_column("CI", justify="center", width=4)  # CI status
-        table.add_column("Review", justify="center", width=6)  # Review status
+
+        if self.is_ssh or self.terminal_width < 120:
+            # Narrow terminal or SSH - compressed layout
+            table.add_column("PR#", justify="right", style="cyan", width=4)
+            table.add_column("Title", style="white", min_width=20)
+            table.add_column("C", justify="center", width=2)  # Comments (C instead of emoji)
+            table.add_column("+/-", justify="right", width=10)
+            table.add_column("Cm", justify="right", width=2)  # Commits (Cm instead of emoji)
+            table.add_column("CI", justify="center", width=3)
+            table.add_column("Rev", justify="center", width=3)
+        else:
+            # Wide terminal - original layout with ASCII headers for SSH
+            comment_header = "C" if self.is_ssh else "💬"
+            commits_header = "Cm" if self.is_ssh else "📝"
+            table.add_column("PR#", justify="right", style="cyan", width=5)
+            table.add_column("Title", style="white", min_width=30)
+            table.add_column(comment_header, justify="center", width=3)
+            table.add_column("+/-", justify="right", width=14)
+            table.add_column(commits_header, justify="right", width=3)
+            table.add_column("CI", justify="center", width=4)
+            table.add_column("Review", justify="center", width=6)
 
         for pr in pr_status["prs"]:
             # Format title with truncation - allow longer titles now
@@ -977,19 +1099,19 @@ class CIDashboard:
             commits_text = str(commits) if commits > 0 else "-"
             commits_style = "green" if commits > 0 else "dim"
 
-            # Format CI status
+            # Format CI status - SSH-aware icons
             ci_status = pr.get("ci_status", "unknown")
             if ci_status == "passing":
-                ci_text = "✅"
+                ci_text = safe_unicode_char("✅", "✓", self.is_ssh)  # ✓ for SSH
                 ci_style = "green"
             elif ci_status == "failing":
-                ci_text = "❌"
+                ci_text = safe_unicode_char("❌", "X", self.is_ssh)
                 ci_style = "red"
             elif ci_status == "pending":
-                ci_text = "⏳"
+                ci_text = safe_unicode_char("⏳", "?", self.is_ssh)
                 ci_style = "yellow"
             elif ci_status == "mixed":
-                ci_text = "⚠️"
+                ci_text = safe_unicode_char("⚠️", "!", self.is_ssh)
                 ci_style = "yellow"
             elif ci_status == "none":
                 ci_text = "-"
@@ -998,19 +1120,19 @@ class CIDashboard:
                 ci_text = "?"
                 ci_style = "dim"
 
-            # Format review status
+            # Format review status - SSH-aware icons
             review_status = pr.get("review_status", "pending")
             if review_status == "approved":
-                review_text = "✅"
+                review_text = safe_unicode_char("✅", "A", self.is_ssh)  # A for Approved
                 review_style = "green"
             elif review_status == "changes_requested":
-                review_text = "❌"
+                review_text = safe_unicode_char("❌", "C", self.is_ssh)  # C for Changes
                 review_style = "red"
             elif review_status == "commented":
-                review_text = "💬"
+                review_text = safe_unicode_char("💬", "R", self.is_ssh)  # R for Reviewed
                 review_style = "yellow"
             else:  # pending
-                review_text = "⏳"
+                review_text = safe_unicode_char("⏳", "P", self.is_ssh)  # P for Pending
                 review_style = "dim"
 
             table.add_row(
@@ -1027,10 +1149,13 @@ class CIDashboard:
         return Panel(table, title=title_text, border_style="purple")
 
     def create_header(self) -> Panel:
-        """Create the header panel."""
+        """Create the header panel - SSH-aware."""
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # SSH-safe header without emoji
+        chart_icon = safe_unicode_char("📊", "[DASH]", self.is_ssh)
+        env_info = " [SSH]" if self.is_ssh else ""
         header_text = Text(
-            f"📊 CI Dashboard | Updated: {now} | Refresh: {self.refresh_interval}s",
+            f"{chart_icon} CI Dashboard{env_info} | Updated: {now} | Refresh: {self.refresh_interval}s",
             justify="center",
         )
         return Panel(header_text, style="bold blue")
@@ -1081,9 +1206,20 @@ class CIDashboard:
         return layout
 
     async def run(self) -> None:
-        """Main dashboard loop."""
+        """Main dashboard loop - SSH-aware screen mode.
+
+        Production wisdom: SSH terminals don't support full-screen mode well.
+        Over SSH: use scrollable output (screen=False)
+        Local: use full-screen mode (screen=True) for better UX
+        """
+        # SSH-safe Live configuration
+        use_screen_mode = not self.is_ssh  # Disable screen mode for SSH
+
         with Live(
-            self.create_layout(), console=self.console, refresh_per_second=1, screen=True
+            self.create_layout(),
+            console=self.console,
+            refresh_per_second=1,
+            screen=use_screen_mode,  # False for SSH, True for local
         ) as live:
             while True:
                 try:
@@ -1102,7 +1238,9 @@ def main() -> None:
     parser.add_argument(
         "--refresh", type=int, default=30, help="Refresh interval in seconds (default: 30)"
     )
-    parser.add_argument("--watch", action="store_true", help="Watch mode (no screen clear)")
+    parser.add_argument(
+        "--watch", action="store_true", help="Force watch mode (scrollable output, useful for SSH)"
+    )
 
     args = parser.parse_args()
 
@@ -1112,13 +1250,25 @@ def main() -> None:
         print("Error: Project directory not found at /home/sd/claudelearnspokemon")
         sys.exit(1)
 
+    # Production info: Show environment detection
+    is_ssh = detect_ssh_environment()
+    if is_ssh:
+        print("SSH environment detected - using ASCII mode for compatibility")
+
     # Create and run dashboard
     dashboard = CIDashboard(refresh_interval=args.refresh)
+
+    # Override SSH detection if --watch is specified
+    if args.watch:
+        dashboard.is_ssh = True  # Force SSH-like behavior
+        print("Watch mode enabled - using scrollable output")
 
     try:
         asyncio.run(dashboard.run())
     except KeyboardInterrupt:
-        print("\n👋 Dashboard stopped")
+        # SSH-safe goodbye message
+        goodbye = "Dashboard stopped" if is_ssh else "👋 Dashboard stopped"
+        print(f"\n{goodbye}")
         sys.exit(0)
 
 
