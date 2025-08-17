@@ -30,7 +30,7 @@ async with session.post(...) as response:
 
 **Configuration Optimizations**:
 - Connection pool: 10 connections
-- Per-host limit: 5 connections  
+- Per-host limit: 5 connections
 - Keepalive timeout: 60 seconds
 - Connection cleanup enabled
 
@@ -70,7 +70,7 @@ Latency reduction:    90.3%
 Scenario              Time    Inputs  Status
 --------------------------------------------
 battle_sequence       3ms     5       ✅ PASS
-menu_navigation       3ms     5       ✅ PASS  
+menu_navigation       3ms     5       ✅ PASS
 movement_combo        4ms     5       ✅ PASS
 item_usage            3ms     6       ✅ PASS
 ```
@@ -160,7 +160,7 @@ with pool.acquire_emulator() as client:
 
 ### Real-time Systems Performance
 - **Target**: <100ms for responsiveness
-- **Achievement**: <10ms actual performance  
+- **Achievement**: <10ms actual performance
 - **Margin**: 10x better than required
 
 ### HTTP Performance Benchmarks

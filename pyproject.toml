@@ -101,6 +101,11 @@ warn_return_any = false
 module = "lz4.*"
 ignore_missing_imports = true
 
+# aiohttp is required for async HTTP operations but MyPy has issues finding it
+[[tool.mypy.overrides]]
+module = "aiohttp.*"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

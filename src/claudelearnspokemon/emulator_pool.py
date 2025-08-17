@@ -13,6 +13,7 @@ import queue
 import time
 from typing import TYPE_CHECKING, Any, cast
 
+import aiohttp
 import docker
 import requests
 from docker.errors import APIError, DockerException, ImageNotFound
