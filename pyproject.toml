@@ -103,6 +103,11 @@ warn_return_any = false
 module = "lz4.*"
 ignore_missing_imports = true
 
+# httpx response.json() returns Any in older mypy versions
+[[tool.mypy.overrides]]
+module = "claudelearnspokemon.pokemon_gym_adapter"
+disable_error_code = ["no-any-return"]
+
 # psutil has type stubs but they might not be installed in all environments
 [[tool.mypy.overrides]]
 module = "psutil.*"

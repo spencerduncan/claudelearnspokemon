@@ -5,6 +5,7 @@ __version__ = "0.1.0"
 from .circuit_breaker import CircuitBreaker, CircuitBreakerError, CircuitConfig, CircuitState
 from .emulator_pool import EmulatorPool, EmulatorPoolError, ExecutionResult, PokemonGymClient
 from .enhanced_client import EnhancedPokemonGymClient
+from .pokemon_gym_adapter import PokemonGymAdapter, PokemonGymAdapterError
 
 # Error recovery and retry logic components
 from .retry_manager import FailureType, RetryConfig, RetryManager, RetryOutcome
@@ -16,6 +17,8 @@ __all__ = [
     "EmulatorPoolError",
     "ExecutionResult",
     "PokemonGymClient",
+    "PokemonGymAdapter",
+    "PokemonGymAdapterError",
     # Error recovery components
     "RetryManager",
     "RetryConfig",
