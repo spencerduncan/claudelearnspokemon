@@ -573,6 +573,12 @@ class CIDashboard:
                     "-not",
                     "-path",
                     "*/worktrees/*",
+                    "-not",
+                    "-path",
+                    "./pokemon-gym/*",
+                    "-not",
+                    "-path",
+                    "*/pokemon-gym/*",
                 ]
             )
 
@@ -622,6 +628,12 @@ class CIDashboard:
                     "-not",
                     "-path",
                     "*/worktrees/*",
+                    "-not",
+                    "-path",
+                    "./pokemon-gym/*",
+                    "-not",
+                    "-path",
+                    "*/pokemon-gym/*",
                 ]
                 code, stdout, _ = self.run_command(find_args)
                 if code == 0:
