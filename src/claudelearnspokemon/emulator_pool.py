@@ -1,15 +1,15 @@
 """
-EmulatorPool: Docker container lifecycle management for Pokemon-gym emulators.
+EmulatorPool: Simplified Docker container management for Pokemon-gym emulators.
 
-Production-grade container orchestration with proper failure handling,
-timeouts, and resource cleanup. Built with Google-scale engineering principles.
+Workstation-appropriate container orchestration with clear error handling
+and reliable resource management. Built with Bot Dean engineering principles
+optimized for development workflow.
 
-Author: Bot Dean - Production Systems Engineering
+Author: Bot Dean - Workstation Engineering
 """
 
 import logging
 import queue
-import threading
 import time
 from typing import TYPE_CHECKING, Any, cast
 
@@ -249,7 +249,7 @@ class EmulatorPool:
         default_timeout: float | None = None,
     ):
         """
-        Initialize EmulatorPool with production configuration.
+        Initialize EmulatorPool with workstation configuration.
 
         Args:
             pool_size: Number of containers in pool (default: 4)
@@ -269,11 +269,9 @@ class EmulatorPool:
         self.containers: list[docker.models.containers.Container] = []
         self.client: docker.DockerClient | None = None
 
-        # Resource pool state - thread-safe emulator allocation
+        # Simplified resource pool state - workstation-appropriate
         self.available_clients: queue.Queue = queue.Queue()
-        self.busy_clients: dict[int, PokemonGymClient] = {}  # port -> client mapping
         self.clients_by_port: dict[int, PokemonGymClient] = {}  # All clients by port
-        self.pool_lock = threading.RLock()  # For thread-safe pool operations
 
         # Core Pokemon functionality components (with graceful degradation)
         if POKEMON_COMPONENTS_AVAILABLE:
@@ -363,10 +361,10 @@ class EmulatorPool:
 
     def shutdown(self) -> None:
         """
-        Gracefully shutdown all containers with production-grade error handling.
+        Gracefully shutdown all containers with clear error handling.
 
         Continues shutdown process even if individual containers fail to stop.
-        Implements idempotent operation - safe to call multiple times.
+        Safe to call multiple times.
         """
         if not self.containers:
             logger.info("EmulatorPool shutdown called - no containers to stop")
@@ -374,52 +372,41 @@ class EmulatorPool:
 
         logger.info(f"Shutting down EmulatorPool with {len(self.containers)} containers")
 
-        # Track shutdown results for logging
-        shutdown_results = {"success": 0, "failed": 0}
-
+        # Stop all containers
         for container in self.containers:
             try:
                 logger.info(f"Stopping container {container.id}")
                 container.stop(timeout=10)  # Give containers time to gracefully stop
-                shutdown_results["success"] += 1
                 logger.info(f"Container {container.id} stopped successfully")
-
             except Exception as e:
                 # Log error but continue with other containers
                 logger.error(f"Failed to stop container {container.id}: {e}")
-                shutdown_results["failed"] += 1
 
-        # Clear container list - idempotent operation
+        # Clear container list
         self.containers.clear()
 
         # Clean up client resources
-        with self.pool_lock:
-            for client in self.clients_by_port.values():
-                try:
-                    client.close()
-                except Exception as e:
-                    logger.error(f"Error closing client {client}: {e}")
+        for client in self.clients_by_port.values():
+            try:
+                client.close()
+            except Exception as e:
+                logger.error(f"Error closing client {client}: {e}")
 
-            # Clear all client tracking
-            while not self.available_clients.empty():
-                try:
-                    self.available_clients.get_nowait()
-                except queue.Empty:
-                    break
+        # Clear all client tracking
+        while not self.available_clients.empty():
+            try:
+                self.available_clients.get_nowait()
+            except queue.Empty:
+                break
 
-            self.busy_clients.clear()
-            self.clients_by_port.clear()
-
-        logger.info(
-            f"EmulatorPool shutdown complete: {shutdown_results['success']} success, "
-            f"{shutdown_results['failed']} failed"
-        )
+        self.clients_by_port.clear()
+        logger.info("EmulatorPool shutdown complete")
 
     def acquire(self, timeout: float | None = None) -> PokemonGymClient:
         """
         Acquire an available emulator client from the pool.
 
-        Thread-safe resource allocation with blocking behavior when all emulators are busy.
+        Simple resource allocation with blocking behavior when all emulators are busy.
 
         Args:
             timeout: Maximum seconds to wait for available emulator (None = block indefinitely)
@@ -434,13 +421,8 @@ class EmulatorPool:
             raise EmulatorPoolError("EmulatorPool not initialized - call initialize() first")
 
         try:
-            # Block until emulator becomes available
+            # Block until emulator becomes available - queue handles thread safety
             client = cast(PokemonGymClient, self.available_clients.get(timeout=timeout))
-
-            with self.pool_lock:
-                # Move client from available to busy
-                self.busy_clients[client.port] = client
-
             logger.info(f"Acquired emulator {client}")
             return client
 
@@ -470,7 +452,7 @@ class EmulatorPool:
         """
         Release emulator client back to available pool.
 
-        Thread-safe operation that makes emulator available for other tasks.
+        Simple operation that makes emulator available for other tasks.
 
         Args:
             client: PokemonGymClient to return to pool
@@ -485,15 +467,8 @@ class EmulatorPool:
         else:
             raise EmulatorPoolError("Invalid client type - must be PokemonGymClient")
 
-        with self.pool_lock:
-            if client.port not in self.busy_clients:
-                logger.warning(f"Attempted to release client {client} that wasn't marked as busy")
-                return
-
-            # Move client from busy back to available
-            del self.busy_clients[client.port]
-            self.available_clients.put(client)
-
+        # Return client to available pool - queue handles thread safety
+        self.available_clients.put(client)
         logger.info(f"Released emulator {client}")
 
     def execute_script(self, script_text: str, checkpoint_id: str | None = None) -> ExecutionResult:
@@ -764,86 +739,19 @@ class EmulatorPool:
                 "status": "not_initialized",
             }
 
-        with self.pool_lock:
-            available_count = self.available_clients.qsize()
-            busy_count = len(self.busy_clients)
+        available_count = self.available_clients.qsize()
+        busy_count = self.pool_size - available_count  # Simple calculation
 
         return {
             "available_count": available_count,
             "busy_count": busy_count,
             "total_count": self.pool_size,
-            "queue_size": 0,  # Number of threads waiting for emulators (not currently tracked)
-            "status": "healthy" if available_count + busy_count == self.pool_size else "degraded",
+            "queue_size": 0,  # Simplified: not tracking waiting threads
+            "status": "healthy" if available_count <= self.pool_size else "degraded",
         }
 
-    def restart_emulator(self, port: int) -> None:
-        """
-        Restart specific emulator instance due to failure.
-
-        Args:
-            port: Port of the emulator to restart
-
-        Raises:
-            EmulatorPoolError: If restart fails or port is invalid
-        """
-        if port not in self.clients_by_port:
-            raise EmulatorPoolError(f"No emulator found on port {port}")
-
-        logger.info(f"Restarting emulator on port {port}")
-
-        with self.pool_lock:
-            # Remove old client from tracking
-            old_client = self.clients_by_port[port]
-
-            # Close old client connection
-            try:
-                old_client.close()
-            except Exception as e:
-                logger.error(f"Error closing old client on port {port}: {e}")
-
-            # Find and stop old container
-            old_container = None
-            for container in self.containers:
-                if container.id == old_client.container_id:
-                    old_container = container
-                    break
-
-            if old_container:
-                try:
-                    old_container.stop(timeout=5)
-                    self.containers.remove(old_container)
-                except Exception as e:
-                    logger.error(f"Error stopping old container {old_container.id}: {e}")
-
-            # Start new container
-            try:
-                new_container = self._start_single_container(port)
-                self.containers.append(new_container)
-
-                # Create new client
-                new_container_id = new_container.id or f"restarted-{port}"
-                new_client = PokemonGymClient(port, new_container_id)
-                self.clients_by_port[port] = new_client
-
-                # Remove old client from busy tracking if present
-                if port in self.busy_clients:
-                    del self.busy_clients[port]
-
-                # Add new client to available pool
-                self.available_clients.put(new_client)
-
-                logger.info(
-                    f"Successfully restarted emulator on port {port}, new container: {new_container_id[:12]}"
-                )
-
-            except Exception as e:
-                # Remove failed emulator from tracking
-                if port in self.clients_by_port:
-                    del self.clients_by_port[port]
-                if port in self.busy_clients:
-                    del self.busy_clients[port]
-
-                raise EmulatorPoolError(f"Failed to restart emulator on port {port}: {e}") from e
+    # Removed restart_emulator() method - too complex for workstation use
+    # For workstation development, if an emulator fails, shutdown and reinitialize the entire pool
 
     def _compile_script(self, script: str) -> str:
         """
