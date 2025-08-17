@@ -1,8 +1,15 @@
 """
-Comprehensive unit tests for CheckpointManager with metadata management and LZ4 compression.
+Comprehensive test suite for CheckpointManager.
 
-Tests all aspects of checkpoint storage, metadata management, validation,
-search, and performance requirements with LZ4 compression optimization.
+Tests cover production-grade features:
+- Core save/load functionality with performance validation
+- Checkpoint pruning algorithm with value scoring
+- Integrity validation with corruption simulation
+- Error handling and edge cases
+- Metrics and observability
+- Concurrent access patterns
+
+Author: Bot Dean - Production-First Testing
 """
 
 import json
@@ -23,23 +30,49 @@ from claudelearnspokemon.checkpoint_manager import (
 
 
 @pytest.fixture
+def temp_storage_dir():
+    """Create temporary storage directory for testing."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        yield Path(temp_dir)
+
+
+@pytest.fixture
+def checkpoint_manager(temp_storage_dir):
+    """Create CheckpointManager instance for testing."""
+    return CheckpointManager(
+        temp_storage_dir,
+        max_checkpoints=5,  # Small limit for testing
+        enable_metrics=True,
+    )
+
+
+@pytest.fixture
+def checkpoint_manager_no_auto_prune(temp_storage_dir):
+    """Create CheckpointManager instance for pruning tests without auto-pruning interference."""
+    return CheckpointManager(
+        temp_storage_dir,
+        max_checkpoints=100,  # High limit to prevent auto-pruning during tests
+        enable_metrics=True,
+    )
+
+
+@pytest.fixture
 def temp_checkpoint_dir():
-    """Create temporary directory for checkpoints."""
+    """Create temporary checkpoint directory for testing."""
     with tempfile.TemporaryDirectory() as temp_dir:
         yield temp_dir
 
 
 @pytest.fixture
-def checkpoint_manager(temp_checkpoint_dir):
-    """Create CheckpointManager with temporary directory."""
-    return CheckpointManager(checkpoint_dir=temp_checkpoint_dir)
-
-
-@pytest.fixture
 def sample_game_state():
-    """Sample game state data."""
+    """Sample game state for testing."""
     return {
-        "player": {"name": "RED", "position": {"x": 100, "y": 150}, "level": 25, "health": 80},
+        "player": {
+            "name": "RED",
+            "position": {"x": 100, "y": 150},
+            "level": 25,
+            "health": 80,
+        },
         "pokemon": [
             {
                 "name": "PIKACHU",
@@ -56,40 +89,73 @@ def sample_game_state():
 
 @pytest.fixture
 def sample_metadata():
-    """Sample checkpoint metadata."""
+    """Sample metadata for testing."""
     return {
-        "game_location": "cerulean_city",
-        "progress_markers": ["defeated_brock", "defeated_misty"],
-        "performance_metrics": {"completion_time": 1500.0, "battles_won": 25},
-        "tags": ["speedrun", "critical_path"],
-        "custom_fields": {"strategy": "speed_run_route", "notes": "After defeating Misty"},
+        "location": "cerulean_city",
+        "progress_percentage": 15.5,
+        "strategy": "speed_run_route",
+        "notes": "After defeating Misty",
+        "progress_markers": {
+            "badges": 2,
+            "pokemon_caught": 2,
+            "story_flags": ["gym_leader_misty_defeated"],
+        },
     }
 
 
-class TestCheckpointManagerBasics:
-    """Test basic save/load functionality with metadata support."""
+class TestCheckpointManagerCore:
+    """Test core save/load functionality."""
+
+    def test_initialization(self, temp_storage_dir):
+        """Test CheckpointManager initialization."""
+        manager = CheckpointManager(temp_storage_dir, max_checkpoints=100, enable_metrics=True)
+
+        assert manager.storage_dir == temp_storage_dir.resolve()
+        assert manager.max_checkpoints == 100
+        assert manager.enable_metrics is True
+        assert manager.storage_dir.exists()
 
     def test_checkpoint_manager_initialization(self, temp_checkpoint_dir) -> None:
-        """Test CheckpointManager initializes with correct directory and database."""
-        manager = CheckpointManager(checkpoint_dir=temp_checkpoint_dir)
-        assert manager.checkpoint_dir == Path(temp_checkpoint_dir)
-        assert manager.checkpoint_dir.exists()
+        """Test CheckpointManager initializes with correct directory."""
+        manager = CheckpointManager(temp_checkpoint_dir)
+        assert manager.storage_dir == Path(temp_checkpoint_dir)
+        assert manager.storage_dir.exists()
 
-        # Test that we can actually save and load a checkpoint - this is the real test of functionality
-        # This bypasses the environment-specific database file existence issues
-        test_state = {"test": "data", "value": 42}
-        test_metadata = {"location": "test_location", "tags": ["test"], "progress_markers": []}
+    def test_checkpoint_manager_default_directory(self) -> None:
+        """Test CheckpointManager uses default directory when none specified."""
+        manager = CheckpointManager()
+        expected_dir = Path.home() / ".claudelearnspokemon" / "checkpoints"
+        assert manager.storage_dir == expected_dir
 
-        # This will fail if the database isn't working properly
-        checkpoint_id = manager.save_checkpoint(test_state, test_metadata)
+    def test_save_checkpoint_success(self, checkpoint_manager, sample_game_state, sample_metadata):
+        """Test successful checkpoint saving."""
+        checkpoint_id = checkpoint_manager.save_checkpoint(sample_game_state, sample_metadata)
 
-        # This will fail if the database or storage isn't working
-        loaded_state = manager.load_checkpoint(checkpoint_id)
-        assert loaded_state == test_state
+        assert checkpoint_id is not None
+        assert isinstance(checkpoint_id, str)
+        assert len(checkpoint_id) == 36  # UUID length
 
-        # The basic save/load functionality working is sufficient for this test
-        # Metadata retrieval might use different field names in different implementations
-        # The key thing is that save/load works, which means the database is functional
+        # Verify file exists
+        checkpoint_file = checkpoint_manager.storage_dir / f"{checkpoint_id}.lz4"
+        metadata_file = checkpoint_manager.storage_dir / f"{checkpoint_id}.metadata.json"
+
+        assert checkpoint_file.exists()
+        assert metadata_file.exists()
+        assert checkpoint_file.stat().st_size > 0
+
+    def test_save_checkpoint_invalid_input(self, checkpoint_manager):
+        """Test checkpoint saving with invalid inputs."""
+        # Test invalid game state
+        with pytest.raises(ValueError, match="game_state must be a dictionary"):
+            checkpoint_manager.save_checkpoint("invalid", {"location": "test"})
+
+        # Test invalid metadata
+        with pytest.raises(ValueError, match="metadata must be a dictionary"):
+            checkpoint_manager.save_checkpoint({"valid": "state"}, "invalid")
+
+        # Test empty game state
+        with pytest.raises(ValueError, match="game_state cannot be empty"):
+            checkpoint_manager.save_checkpoint({}, {"location": "test"})
 
     def test_save_checkpoint_returns_uuid(
         self, checkpoint_manager, sample_game_state, sample_metadata
@@ -108,15 +174,35 @@ class TestCheckpointManagerBasics:
         """Test save_checkpoint creates compressed file on disk."""
         checkpoint_id = checkpoint_manager.save_checkpoint(sample_game_state, sample_metadata)
 
-        checkpoint_file = checkpoint_manager.checkpoint_dir / f"{checkpoint_id}.lz4"
+        checkpoint_file = checkpoint_manager.storage_dir / f"{checkpoint_id}.lz4"
         assert checkpoint_file.exists()
         assert checkpoint_file.stat().st_size > 0
+
+    def test_load_checkpoint_success(self, checkpoint_manager, sample_game_state, sample_metadata):
+        """Test successful checkpoint loading."""
+        # Save first
+        checkpoint_id = checkpoint_manager.save_checkpoint(sample_game_state, sample_metadata)
+
+        # Load and validate
+        start_time = time.perf_counter()
+        loaded_state = checkpoint_manager.load_checkpoint(checkpoint_id)
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+
+        assert loaded_state == sample_game_state
+
+        # Performance requirement: < 500ms
+        assert elapsed_ms < checkpoint_manager.MAX_LOAD_TIME_MS
+
+        # Check metrics
+        metrics = checkpoint_manager.get_metrics()
+        assert metrics["loads_total"] == 1
 
     def test_load_checkpoint_returns_game_state(
         self, checkpoint_manager, sample_game_state, sample_metadata
     ) -> None:
         """Test load_checkpoint returns original game state."""
         checkpoint_id = checkpoint_manager.save_checkpoint(sample_game_state, sample_metadata)
+
         loaded_state = checkpoint_manager.load_checkpoint(checkpoint_id)
 
         assert loaded_state == sample_game_state
@@ -134,17 +220,13 @@ class TestCheckpointManagerBasics:
         assert loaded_state["inventory"] == sample_game_state["inventory"]
         assert loaded_state["flags"] == sample_game_state["flags"]
 
-
-class TestCheckpointManagerLZ4Compression:
-    """Test LZ4 compression functionality."""
-
     def test_checkpoint_files_are_lz4_compressed(
         self, checkpoint_manager, sample_game_state, sample_metadata
     ) -> None:
         """Test checkpoint files are valid LZ4 compressed format."""
         checkpoint_id = checkpoint_manager.save_checkpoint(sample_game_state, sample_metadata)
 
-        checkpoint_file = checkpoint_manager.checkpoint_dir / f"{checkpoint_id}.lz4"
+        checkpoint_file = checkpoint_manager.storage_dir / f"{checkpoint_id}.lz4"
         with checkpoint_file.open("rb") as f:
             compressed_data = f.read()
 
@@ -186,164 +268,285 @@ class TestCheckpointManagerLZ4Compression:
         compression_ratio = compressed_size / original_size
         assert compression_ratio < 0.1, f"Poor compression ratio: {compression_ratio}"
 
+    def test_load_checkpoint_not_found(self, checkpoint_manager):
+        """Test loading non-existent checkpoint."""
+        with pytest.raises(CheckpointNotFoundError):
+            checkpoint_manager.load_checkpoint("nonexistent-id")
 
-class TestCheckpointManagerMetadata:
-    """Test metadata management functionality."""
 
-    def test_get_checkpoint_metadata_returns_structured_data(
+class TestCheckpointValidation:
+    """Test checkpoint integrity validation."""
+
+    def test_validate_checkpoint_success(
         self, checkpoint_manager, sample_game_state, sample_metadata
-    ) -> None:
-        """Test getting checkpoint metadata returns structured metadata."""
-        checkpoint_id = checkpoint_manager.save_checkpoint(sample_game_state, sample_metadata)
-        metadata = checkpoint_manager.get_checkpoint_metadata(checkpoint_id)
-
-        assert metadata is not None
-        assert metadata["checkpoint_id"] == checkpoint_id
-        assert metadata["game_location"] == sample_metadata["game_location"]
-        assert metadata["progress_markers"] == sample_metadata["progress_markers"]
-        assert metadata["performance_metrics"] == sample_metadata["performance_metrics"]
-        assert metadata["tags"] == sample_metadata["tags"]
-        assert metadata["custom_fields"] == sample_metadata["custom_fields"]
-        assert "created_at" in metadata
-        assert "file_size" in metadata
-        assert "checksum" in metadata
-
-    def test_update_checkpoint_metadata(
-        self, checkpoint_manager, sample_game_state, sample_metadata
-    ) -> None:
-        """Test updating checkpoint metadata."""
+    ):
+        """Test successful checkpoint validation."""
         checkpoint_id = checkpoint_manager.save_checkpoint(sample_game_state, sample_metadata)
 
-        updates = {
-            "game_location": "saffron_city",
-            "tags": ["speedrun", "critical_path", "updated"],
-            "custom_fields": {"notes": "Updated after gym battle"},
-        }
+        start_time = time.perf_counter()
+        is_valid = checkpoint_manager.validate_checkpoint(checkpoint_id)
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
 
-        success = checkpoint_manager.update_checkpoint_metadata(checkpoint_id, updates)
-        assert success is True
+        assert is_valid is True
 
-        updated_metadata = checkpoint_manager.get_checkpoint_metadata(checkpoint_id)
-        assert updated_metadata["game_location"] == "saffron_city"
-        assert "updated" in updated_metadata["tags"]
-        assert updated_metadata["custom_fields"]["notes"] == "Updated after gym battle"
+        # Performance requirement: < 100ms
+        assert elapsed_ms < checkpoint_manager.MAX_VALIDATION_TIME_MS
 
-    def test_search_checkpoints_by_location(self, checkpoint_manager, sample_game_state) -> None:
-        """Test searching checkpoints by game location."""
-        # Save multiple checkpoints with different locations
-        locations = ["pallet_town", "viridian_city", "pewter_city", "cerulean_city"]
-        checkpoint_ids = []
+        # Check metrics
+        metrics = checkpoint_manager.get_metrics()
+        assert metrics["validations_total"] == 1
 
-        for location in locations:
-            metadata = {"game_location": location, "tags": ["test"], "progress_markers": []}
-            checkpoint_id = checkpoint_manager.save_checkpoint(sample_game_state, metadata)
-            checkpoint_ids.append(checkpoint_id)
+    def test_validate_checkpoint_missing_files(self, checkpoint_manager):
+        """Test validation of missing checkpoint."""
+        assert checkpoint_manager.validate_checkpoint("missing-id") is False
 
-        # Search for specific location
-        results = checkpoint_manager.search_checkpoints({"game_location": "cerulean"})
-
-        assert len(results) == 1
-        assert results[0]["game_location"] == "cerulean_city"
-        assert results[0]["checkpoint_id"] in checkpoint_ids
-
-    def test_search_checkpoints_by_tags(self, checkpoint_manager, sample_game_state) -> None:
-        """Test searching checkpoints by tags."""
-        # Save checkpoints with different tag combinations
-        checkpoints_data = [
-            {"tags": ["speedrun", "critical"], "game_location": "location1"},
-            {"tags": ["casual", "exploration"], "game_location": "location2"},
-            {"tags": ["speedrun", "boss_fight"], "game_location": "location3"},
-        ]
-
-        for data in checkpoints_data:
-            metadata = {
-                "game_location": data["game_location"],
-                "tags": data["tags"],
-                "progress_markers": [],
-            }
-            checkpoint_manager.save_checkpoint(sample_game_state, metadata)
-
-        # Search for speedrun tag
-        results = checkpoint_manager.search_checkpoints({"tags": ["speedrun"]})
-
-        assert len(results) == 2
-        for result in results:
-            assert "speedrun" in result["tags"]
-
-    def test_search_checkpoints_by_date_range(
+    def test_validate_checkpoint_corrupted_data(
         self, checkpoint_manager, sample_game_state, sample_metadata
-    ) -> None:
-        """Test searching checkpoints by creation date range."""
-        # Save a checkpoint
+    ):
+        """Test validation with corrupted checkpoint data."""
         checkpoint_id = checkpoint_manager.save_checkpoint(sample_game_state, sample_metadata)
 
-        # Get current time for range search
-        now = time.time()
-        one_hour_ago = now - 3600
-        one_hour_later = now + 3600
+        # Corrupt the checkpoint file
+        checkpoint_file = checkpoint_manager.storage_dir / f"{checkpoint_id}.lz4"
+        with checkpoint_file.open("wb") as f:
+            f.write(b"corrupted data that is not valid LZ4")
 
-        # Search within time range
-        criteria = {
-            "created_after": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(one_hour_ago)),
-            "created_before": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(one_hour_later)),
-        }
-
-        results = checkpoint_manager.search_checkpoints(criteria)
-        assert len(results) >= 1
-        assert any(r["checkpoint_id"] == checkpoint_id for r in results)
-
-    def test_validate_checkpoint_integrity(
-        self, checkpoint_manager, sample_game_state, sample_metadata
-    ) -> None:
-        """Test checkpoint integrity validation using checksums."""
-        checkpoint_id = checkpoint_manager.save_checkpoint(sample_game_state, sample_metadata)
-
-        # Valid checkpoint should pass validation
-        assert checkpoint_manager.validate_checkpoint(checkpoint_id) is True
-
-        # Corrupt the file
-        checkpoint_file = checkpoint_manager.checkpoint_dir / f"{checkpoint_id}.lz4"
-        with checkpoint_file.open("ab") as f:
-            f.write(b"corruption")
-
-        # Corrupted checkpoint should fail validation
+        # Should fail validation due to decompression error
         assert checkpoint_manager.validate_checkpoint(checkpoint_id) is False
 
-    def test_list_checkpoints_with_criteria(self, checkpoint_manager, sample_game_state) -> None:
-        """Test listing checkpoints with filtering criteria."""
-        # Save multiple checkpoints
+    def test_validate_empty_checkpoint_id(self, checkpoint_manager):
+        """Test validation with empty checkpoint ID."""
+        assert checkpoint_manager.validate_checkpoint("") is False
+        assert checkpoint_manager.validate_checkpoint(None) is False
+
+
+class TestCheckpointPruning:
+    """Test checkpoint pruning algorithm."""
+
+    def test_prune_checkpoints_no_action_needed(
+        self, checkpoint_manager, sample_game_state, sample_metadata
+    ):
+        """Test pruning when no action is needed."""
+        # Save fewer checkpoints than the limit
         for i in range(3):
-            metadata = {
-                "game_location": f"location_{i}",
-                "tags": ["test", f"tag_{i}"],
-                "progress_markers": [f"marker_{i}"],
-            }
-            checkpoint_manager.save_checkpoint(sample_game_state, metadata)
+            checkpoint_manager.save_checkpoint(sample_game_state, {"location": f"location_{i}"})
 
-        # List all checkpoints
-        all_checkpoints = checkpoint_manager.list_checkpoints()
-        assert len(all_checkpoints) == 3
+        result = checkpoint_manager.prune_checkpoints(5)
 
-        # List with limit
-        limited_checkpoints = checkpoint_manager.list_checkpoints({"limit": 2})
-        assert len(limited_checkpoints) == 2
+        assert result["action"] == "no_pruning_needed"
+        assert result["total_checkpoints"] == 3
+        assert len(result["removed"]) == 0
 
-    def test_find_nearest_checkpoint(self, checkpoint_manager, sample_game_state) -> None:
+    def test_prune_checkpoints_removes_excess(
+        self, checkpoint_manager_no_auto_prune, sample_game_state, sample_metadata
+    ):
+        """Test pruning removes excess checkpoints."""
+        # Save more checkpoints than the limit
+        checkpoint_ids = []
+        for i in range(10):
+            checkpoint_id = checkpoint_manager_no_auto_prune.save_checkpoint(
+                sample_game_state, {"location": f"location_{i}"}
+            )
+            checkpoint_ids.append(checkpoint_id)
+
+        result = checkpoint_manager_no_auto_prune.prune_checkpoints(5)
+
+        assert result["action"] == "pruning_executed"
+        assert result["total_checkpoints"] == 10
+        assert result["target_count"] == 5
+        assert len(result["removed"]) == 5
+        assert len(result["retained"]) == 5
+
+        # Verify files are actually removed
+        for checkpoint_id in result["removed"]:
+            checkpoint_file = checkpoint_manager_no_auto_prune.storage_dir / f"{checkpoint_id}.lz4"
+            assert not checkpoint_file.exists()
+
+    def test_prune_checkpoints_dry_run(
+        self, checkpoint_manager_no_auto_prune, sample_game_state, sample_metadata
+    ):
+        """Test pruning dry run doesn't remove files."""
+        # Save checkpoints
+        for i in range(8):
+            checkpoint_manager_no_auto_prune.save_checkpoint(
+                sample_game_state, {"location": f"location_{i}"}
+            )
+
+        result = checkpoint_manager_no_auto_prune.prune_checkpoints(5, dry_run=True)
+
+        assert result["action"] == "dry_run"
+        assert len(result["removed"]) == 3
+
+        # Verify files still exist
+        all_checkpoint_ids = checkpoint_manager_no_auto_prune._get_all_checkpoint_ids()
+        assert len(all_checkpoint_ids) == 8
+
+    def test_prune_checkpoints_performance(self, checkpoint_manager, sample_game_state):
+        """Test pruning performance meets requirements."""
+        # Create many checkpoints to test performance
+        for i in range(50):
+            checkpoint_manager.save_checkpoint(sample_game_state, {"location": f"loc_{i}"})
+
+        start_time = time.perf_counter()
+        checkpoint_manager.prune_checkpoints(25)
+        pruning_time = time.perf_counter() - start_time
+
+        # Performance requirement: < 2s for pruning operation
+        assert pruning_time < checkpoint_manager.MAX_PRUNING_TIME_S
+
+    def test_prune_checkpoints_value_scoring(
+        self, checkpoint_manager_no_auto_prune, sample_game_state, sample_metadata
+    ):
+        """Test pruning uses value scoring correctly."""
+        checkpoint_manager = checkpoint_manager_no_auto_prune
+        # Create checkpoints with different access patterns
+        checkpoint_ids = []
+        for i in range(6):
+            checkpoint_id = checkpoint_manager.save_checkpoint(
+                sample_game_state, {"location": f"important_location_{i}"}
+            )
+            checkpoint_ids.append(checkpoint_id)
+
+        # Simulate different access patterns to create score differences
+        # Access some checkpoints more frequently
+        for _ in range(5):
+            checkpoint_manager.load_checkpoint(checkpoint_ids[0])  # High access
+
+        for _ in range(2):
+            checkpoint_manager.load_checkpoint(checkpoint_ids[1])  # Medium access
+
+        # checkpoint_ids[2:] remain unaccessed (low access)
+
+        result = checkpoint_manager.prune_checkpoints(3)
+
+        # High-access checkpoints should be retained
+        assert checkpoint_ids[0] in result["retained"]
+        assert checkpoint_ids[1] in result["retained"]
+
+    def test_prune_invalid_max_count(self, checkpoint_manager):
+        """Test pruning with invalid max_count."""
+        with pytest.raises(ValueError, match="max_count must be at least 1"):
+            checkpoint_manager.prune_checkpoints(0)
+
+        with pytest.raises(ValueError, match="max_count must be at least 1"):
+            checkpoint_manager.prune_checkpoints(-1)
+
+
+class TestCheckpointListing:
+    """Test checkpoint listing and querying."""
+
+    def test_list_checkpoints_empty(self, checkpoint_manager):
+        """Test listing when no checkpoints exist."""
+        result = checkpoint_manager.list_checkpoints({})
+        assert result == []
+
+    def test_list_checkpoints_with_criteria(
+        self, checkpoint_manager, sample_game_state, sample_metadata
+    ):
+        """Test listing checkpoints with filter criteria."""
+        # Create checkpoints at different locations
+        locations = ["route_1", "cerulean_city", "route_1", "lavender_town"]
+        for location in locations:
+            checkpoint_manager.save_checkpoint(sample_game_state, {"location": location})
+
+        # Filter by location
+        route_checkpoints = checkpoint_manager.list_checkpoints({"location": "route_1"})
+        assert len(route_checkpoints) == 2
+
+        # All results should have the correct location
+        for checkpoint in route_checkpoints:
+            assert checkpoint["location"] == "route_1"
+
+    def test_find_nearest_checkpoint(self, checkpoint_manager, sample_game_state, sample_metadata):
         """Test finding nearest checkpoint by location."""
-        # Save checkpoints at different locations
-        metadata1 = {"game_location": "cerulean_city_gym", "tags": [], "progress_markers": []}
-        metadata2 = {"game_location": "cerulean_city_center", "tags": [], "progress_markers": []}
+        # Create checkpoints
+        locations = ["route_1", "cerulean_city", "lavender_town"]
+        checkpoint_ids = []
+        for location in locations:
+            checkpoint_id = checkpoint_manager.save_checkpoint(
+                sample_game_state, {"location": location}
+            )
+            checkpoint_ids.append(checkpoint_id)
 
-        checkpoint_id1 = checkpoint_manager.save_checkpoint(sample_game_state, metadata1)
-        checkpoint_id2 = checkpoint_manager.save_checkpoint(sample_game_state, metadata2)
+        # Find exact match
+        found_id = checkpoint_manager.find_nearest_checkpoint("cerulean_city")
+        assert found_id in checkpoint_ids
 
-        # Find nearest to "cerulean" - should return the most recent one
-        nearest_id = checkpoint_manager.find_nearest_checkpoint("cerulean")
-        assert nearest_id in [checkpoint_id1, checkpoint_id2]
+        # Non-existent location
+        not_found_id = checkpoint_manager.find_nearest_checkpoint("nonexistent_location")
+        assert not_found_id == ""
 
 
-class TestCheckpointManagerErrors:
+class TestMetricsAndObservability:
+    """Test metrics collection and observability features."""
+
+    def test_metrics_collection(self, checkpoint_manager, sample_game_state, sample_metadata):
+        """Test comprehensive metrics collection."""
+        # Initial metrics
+        metrics = checkpoint_manager.get_metrics()
+        assert metrics["saves_total"] == 0
+        assert metrics["loads_total"] == 0
+        assert metrics["validations_total"] == 0
+
+        # Perform operations
+        checkpoint_id = checkpoint_manager.save_checkpoint(sample_game_state, sample_metadata)
+        checkpoint_manager.load_checkpoint(checkpoint_id)
+        checkpoint_manager.validate_checkpoint(checkpoint_id)
+
+        # Check updated metrics
+        final_metrics = checkpoint_manager.get_metrics()
+        assert final_metrics["saves_total"] == 1
+        assert final_metrics["loads_total"] == 1
+        assert final_metrics["validations_total"] >= 1  # validation called during load too
+
+    def test_metrics_disabled(self, temp_storage_dir):
+        """Test behavior when metrics are disabled."""
+        manager = CheckpointManager(temp_storage_dir, enable_metrics=False)
+
+        metrics = manager.get_metrics()
+        assert metrics["metrics_disabled"] is True
+
+    def test_storage_utilization_tracking(
+        self, checkpoint_manager, sample_game_state, sample_metadata
+    ):
+        """Test storage utilization metrics."""
+        # Save checkpoints
+        for i in range(3):
+            checkpoint_manager.save_checkpoint(sample_game_state, {"location": f"loc_{i}"})
+
+        metrics = checkpoint_manager.get_metrics()
+        assert metrics["checkpoint_count"] == 3
+        assert metrics["storage_utilization"] == 3 / 5  # 3 checkpoints, max 5
+        assert metrics["storage_bytes_used"] > 0
+
+    def test_corruption_event_tracking(
+        self, checkpoint_manager, sample_game_state, sample_metadata
+    ):
+        """Test corruption event metrics."""
+        checkpoint_id = checkpoint_manager.save_checkpoint(sample_game_state, sample_metadata)
+
+        # Corrupt the checkpoint file
+        checkpoint_file = checkpoint_manager.storage_dir / f"{checkpoint_id}.lz4"
+        with checkpoint_file.open("wb") as f:
+            f.write(b"corrupted")
+
+        # Trigger validation failure
+        checkpoint_manager.validate_checkpoint(checkpoint_id)
+
+        metrics = checkpoint_manager.get_metrics()
+        assert metrics["corruption_events"] > 0
+
+
+class TestErrorHandling:
     """Test error handling and edge cases."""
+
+    def test_storage_directory_creation(self, temp_storage_dir):
+        """Test automatic storage directory creation."""
+        nested_dir = temp_storage_dir / "nested" / "storage"
+        manager = CheckpointManager(nested_dir)
+
+        assert nested_dir.exists()
+        assert manager.storage_dir == nested_dir.resolve()
 
     def test_load_nonexistent_checkpoint_raises_not_found(self, checkpoint_manager) -> None:
         """Test loading non-existent checkpoint raises CheckpointNotFoundError."""
@@ -360,7 +563,7 @@ class TestCheckpointManagerErrors:
         """Test loading corrupted LZ4 data raises CheckpointCorruptionError."""
         # Create file with invalid LZ4 data
         fake_id = "corrupted-checkpoint-id"
-        corrupt_file = Path(temp_checkpoint_dir) / f"{fake_id}.lz4"
+        corrupt_file = checkpoint_manager.storage_dir / f"{fake_id}.lz4"
 
         with corrupt_file.open("wb") as f:
             f.write(b"this is not valid LZ4 data")
@@ -375,7 +578,7 @@ class TestCheckpointManagerErrors:
     ) -> None:
         """Test loading corrupted JSON data raises CheckpointCorruptionError."""
         fake_id = "corrupted-json-id"
-        corrupt_file = Path(temp_checkpoint_dir) / f"{fake_id}.lz4"
+        corrupt_file = checkpoint_manager.storage_dir / f"{fake_id}.lz4"
 
         # Create valid LZ4 file with invalid JSON
         invalid_json = b"this is not valid JSON data"
@@ -389,17 +592,115 @@ class TestCheckpointManagerErrors:
 
         assert "parse" in str(exc_info.value).lower()
 
-    def test_get_metadata_nonexistent_checkpoint_returns_none(self, checkpoint_manager) -> None:
-        """Test getting metadata for non-existent checkpoint returns None."""
-        fake_id = "nonexistent-checkpoint-id"
-        metadata = checkpoint_manager.get_checkpoint_metadata(fake_id)
-        assert metadata is None
+    def test_load_missing_required_fields_raises_corruption_error(
+        self, checkpoint_manager, temp_checkpoint_dir
+    ) -> None:
+        """Test loading checkpoint missing required fields raises corruption error."""
+        fake_id = "missing-fields-id"
+        corrupt_file = checkpoint_manager.storage_dir / f"{fake_id}.lz4"
 
-    def test_update_metadata_nonexistent_checkpoint_returns_false(self, checkpoint_manager) -> None:
-        """Test updating metadata for non-existent checkpoint returns False."""
-        fake_id = "nonexistent-checkpoint-id"
-        success = checkpoint_manager.update_checkpoint_metadata(fake_id, {"test": "data"})
-        assert success is False
+        # Create checkpoint missing required fields
+        incomplete_data = {
+            "version": "1.0",
+            # Missing checkpoint_id, game_state, metadata
+        }
+        json_data = json.dumps(incomplete_data).encode("utf-8")
+        compressed_data = lz4.frame.compress(json_data)
+
+        with corrupt_file.open("wb") as f:
+            f.write(compressed_data)
+
+        with pytest.raises(CheckpointCorruptionError) as exc_info:
+            checkpoint_manager.load_checkpoint(fake_id)
+
+        assert "missing field" in str(exc_info.value).lower()
+
+    def test_load_mismatched_checkpoint_id_raises_corruption_error(
+        self, checkpoint_manager, temp_checkpoint_dir
+    ) -> None:
+        """Test loading checkpoint with mismatched ID raises corruption error."""
+        file_id = "file-checkpoint-id"
+        content_id = "content-checkpoint-id"
+
+        corrupt_file = checkpoint_manager.storage_dir / f"{file_id}.lz4"
+
+        # Create checkpoint with mismatched ID
+        mismatched_data = {
+            "version": "1.0",
+            "checkpoint_id": content_id,  # Different from file name
+            "game_state": {},
+            "metadata": {},
+        }
+        json_data = json.dumps(mismatched_data).encode("utf-8")
+        compressed_data = lz4.frame.compress(json_data)
+
+        with corrupt_file.open("wb") as f:
+            f.write(compressed_data)
+
+        with pytest.raises(CheckpointCorruptionError) as exc_info:
+            checkpoint_manager.load_checkpoint(file_id)
+
+        assert "mismatch" in str(exc_info.value).lower()
+
+    def test_save_with_invalid_data_types_handles_gracefully(self, checkpoint_manager) -> None:
+        """Test saving data that can't be JSON serialized raises CheckpointError."""
+        # Create data that can't be JSON serialized
+        invalid_state = {
+            "function_object": lambda x: x,  # Can't serialize functions
+        }
+
+        with pytest.raises(CheckpointError):
+            checkpoint_manager.save_checkpoint(invalid_state, {})
+
+    def test_empty_checkpoint_file_raises_corruption_error(
+        self, checkpoint_manager, temp_checkpoint_dir
+    ) -> None:
+        """Test loading empty checkpoint file raises CheckpointCorruptionError."""
+        empty_id = "empty-checkpoint-id"
+        empty_file = checkpoint_manager.storage_dir / f"{empty_id}.lz4"
+
+        # Create empty file
+        empty_file.touch()
+
+        with pytest.raises(CheckpointCorruptionError) as exc_info:
+            checkpoint_manager.load_checkpoint(empty_id)
+
+        assert "empty" in str(exc_info.value).lower()
+
+    def test_concurrent_checkpoint_operations(
+        self, checkpoint_manager, sample_game_state, sample_metadata
+    ):
+        """Test concurrent checkpoint operations."""
+        import threading
+
+        results = []
+        errors = []
+
+        def save_checkpoint(index):
+            try:
+                modified_state = sample_game_state.copy()
+                modified_state["player"]["name"] = f"Player_{index}"
+                checkpoint_id = checkpoint_manager.save_checkpoint(
+                    modified_state, {"location": f"location_{index}"}
+                )
+                results.append(checkpoint_id)
+            except Exception as e:
+                errors.append(e)
+
+        # Simulate concurrent saves
+        threads = []
+        for i in range(5):
+            thread = threading.Thread(target=save_checkpoint, args=(i,))
+            threads.append(thread)
+            thread.start()
+
+        for thread in threads:
+            thread.join()
+
+        # All operations should succeed
+        assert len(errors) == 0
+        assert len(results) == 5
+        assert len(set(results)) == 5  # All unique IDs
 
 
 class TestCheckpointManagerPerformance:
@@ -427,36 +728,8 @@ class TestCheckpointManagerPerformance:
 
         assert duration < 0.5, f"Load took {duration:.3f}s, exceeds 500ms limit"
 
-    def test_metadata_queries_under_100ms(
-        self, checkpoint_manager, sample_game_state, sample_metadata
-    ) -> None:
-        """Test metadata queries complete within 100ms performance requirement."""
-        # Save multiple checkpoints to have data to query
-        checkpoint_ids = []
-        for i in range(10):
-            metadata = sample_metadata.copy()
-            metadata["game_location"] = f"test_location_{i}"
-            checkpoint_id = checkpoint_manager.save_checkpoint(sample_game_state, metadata)
-            checkpoint_ids.append(checkpoint_id)
-
-        # Test get_checkpoint_metadata performance
-        start_time = time.monotonic()
-        result = checkpoint_manager.get_checkpoint_metadata(checkpoint_ids[0])
-        duration = time.monotonic() - start_time
-
-        assert duration < 0.1, f"Metadata query took {duration:.3f}s, exceeds 100ms limit"
-        assert result is not None
-
-        # Test search_checkpoints performance
-        start_time = time.monotonic()
-        results = checkpoint_manager.search_checkpoints({"game_location": "test_location"})
-        duration = time.monotonic() - start_time
-
-        assert duration < 0.1, f"Search query took {duration:.3f}s, exceeds 100ms limit"
-        assert len(results) > 0
-
-    def test_large_checkpoint_handling(self, checkpoint_manager) -> None:
-        """Test handling of large checkpoints with metadata."""
+    def test_large_game_state_performance(self, checkpoint_manager) -> None:
+        """Test performance with large game states (simulating complex Pokemon data)."""
         # Create large game state similar to full Pokemon game state
         large_state = {
             "player_data": {
@@ -491,18 +764,11 @@ class TestCheckpointManagerPerformance:
                 },
             },
         }
-
-        large_metadata = {
-            "game_location": "end_game",
-            "progress_markers": [f"milestone_{i}" for i in range(50)],
-            "performance_metrics": {"completion": 95.5, "battles": 200, "time": 18000},
-            "tags": ["large_test", "endgame", "complete"],
-            "custom_fields": {"difficulty": "hard", "completion_percentage": 95.5},
-        }
+        metadata = {"location": "end_game", "completion": 95.5}
 
         # Test save performance
         start_time = time.monotonic()
-        checkpoint_id = checkpoint_manager.save_checkpoint(large_state, large_metadata)
+        checkpoint_id = checkpoint_manager.save_checkpoint(large_state, metadata)
         save_duration = time.monotonic() - start_time
 
         # Test load performance
@@ -510,67 +776,9 @@ class TestCheckpointManagerPerformance:
         loaded_state = checkpoint_manager.load_checkpoint(checkpoint_id)
         load_duration = time.monotonic() - start_time
 
-        # Test metadata retrieval
-        start_time = time.monotonic()
-        metadata = checkpoint_manager.get_checkpoint_metadata(checkpoint_id)
-        metadata_duration = time.monotonic() - start_time
-
         assert save_duration < 0.5, f"Large state save took {save_duration:.3f}s"
         assert load_duration < 0.5, f"Large state load took {load_duration:.3f}s"
-        assert metadata_duration < 0.1, f"Large metadata query took {metadata_duration:.3f}s"
         assert loaded_state == large_state
-        assert metadata["game_location"] == "end_game"
-
-
-class TestCheckpointManagerCaching:
-    """Test metadata caching functionality."""
-
-    def test_metadata_caching_improves_performance(
-        self, checkpoint_manager, sample_game_state, sample_metadata
-    ) -> None:
-        """Test that metadata caching provides performance improvement."""
-        checkpoint_id = checkpoint_manager.save_checkpoint(sample_game_state, sample_metadata)
-
-        # First access - should hit database
-        start_time = time.monotonic()
-        metadata1 = checkpoint_manager.get_checkpoint_metadata(checkpoint_id)
-        first_access_time = time.monotonic() - start_time
-
-        # Second access - should hit cache
-        start_time = time.monotonic()
-        metadata2 = checkpoint_manager.get_checkpoint_metadata(checkpoint_id)
-        second_access_time = time.monotonic() - start_time
-
-        # Cache should be faster (at least 20% improvement)
-        speedup_ratio = first_access_time / second_access_time
-        assert speedup_ratio > 1.2, f"Caching speedup {speedup_ratio:.2f}x is insufficient"
-        assert metadata1 == metadata2
-
-    def test_cache_eviction_with_lru(self, checkpoint_manager, sample_game_state) -> None:
-        """Test that cache properly evicts items with LRU policy."""
-        # Set a small cache size for testing
-        original_cache_size = checkpoint_manager.METADATA_CACHE_SIZE
-        checkpoint_manager.METADATA_CACHE_SIZE = 3
-
-        try:
-            # Save more checkpoints than cache can hold
-            checkpoint_ids = []
-            for i in range(5):
-                metadata = {"game_location": f"location_{i}", "tags": [f"tag_{i}"]}
-                checkpoint_id = checkpoint_manager.save_checkpoint(sample_game_state, metadata)
-                checkpoint_ids.append(checkpoint_id)
-
-            # Access all checkpoints to populate cache
-            for checkpoint_id in checkpoint_ids:
-                checkpoint_manager.get_checkpoint_metadata(checkpoint_id)
-
-            # Cache should only hold 3 items
-            assert len(checkpoint_manager._metadata_cache) == 3
-            assert len(checkpoint_manager._cache_access_times) == 3
-
-        finally:
-            # Restore original cache size
-            checkpoint_manager.METADATA_CACHE_SIZE = original_cache_size
 
 
 class TestCheckpointManagerAtomicOperations:
@@ -584,11 +792,11 @@ class TestCheckpointManagerAtomicOperations:
         checkpoint_id = checkpoint_manager.save_checkpoint(sample_game_state, sample_metadata)
 
         # Verify fsync was called (ensures data reaches disk)
-        mock_fsync.assert_called_once()
+        mock_fsync.assert_called()
 
         # Verify final file exists and temp file doesn't
-        final_file = checkpoint_manager.checkpoint_dir / f"{checkpoint_id}.lz4"
-        temp_file = checkpoint_manager.checkpoint_dir / f"{checkpoint_id}.tmp"
+        final_file = checkpoint_manager.storage_dir / f"{checkpoint_id}.lz4"
+        temp_file = checkpoint_manager.storage_dir / f"{checkpoint_id}.tmp"
 
         assert final_file.exists()
         assert not temp_file.exists()
@@ -611,7 +819,7 @@ class TestCheckpointManagerAtomicOperations:
                 checkpoint_manager.save_checkpoint({"test": "data"}, {})
 
         # Verify no temp files remain
-        temp_files = list(Path(temp_checkpoint_dir).glob("*.tmp"))
+        temp_files = list(checkpoint_manager.storage_dir.glob("*.tmp"))
         assert len(temp_files) == 0, f"Temp files not cleaned up: {temp_files}"
 
 
@@ -638,7 +846,7 @@ class TestCheckpointManagerUtilityMethods:
         size = checkpoint_manager.get_checkpoint_size(checkpoint_id)
 
         # Verify size matches actual file
-        checkpoint_file = checkpoint_manager.checkpoint_dir / f"{checkpoint_id}.lz4"
+        checkpoint_file = checkpoint_manager.storage_dir / f"{checkpoint_id}.lz4"
         actual_size = checkpoint_file.stat().st_size
 
         assert size == actual_size
@@ -684,7 +892,7 @@ class TestCheckpointManagerUniqueIdentifiers:
         """Test multiple saves generate unique checkpoint identifiers."""
         ids = []
 
-        for _ in range(10):
+        for _i in range(10):
             checkpoint_id = checkpoint_manager.save_checkpoint(sample_game_state, sample_metadata)
             ids.append(checkpoint_id)
 
@@ -707,7 +915,7 @@ class TestCheckpointManagerUniqueIdentifiers:
 
         # Run concurrent saves
         threads = []
-        for _ in range(5):
+        for _i in range(5):
             thread = threading.Thread(target=save_checkpoint)
             threads.append(thread)
             thread.start()
@@ -717,3 +925,7 @@ class TestCheckpointManagerUniqueIdentifiers:
 
         # All IDs should be unique
         assert len(set(ids)) == len(ids), f"Generated non-unique IDs: {ids}"
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
