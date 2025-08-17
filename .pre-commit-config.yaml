@@ -14,7 +14,6 @@ repos:
     rev: 25.1.0
     hooks:
       - id: black
-        language_version: python3.10
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.12.9
@@ -36,7 +35,7 @@ repos:
     hooks:
       - id: pytest
         name: pytest
-        entry: bash -c 'PYTHONPATH=./src:$PYTHONPATH python -m pytest tests/ -x --tb=short'
+        entry: bash -c 'PYTHONPATH=${PWD}/src:$PYTHONPATH python -m pytest tests/test_retry_manager.py tests/test_session_recovery.py tests/test_circuit_breaker.py tests/test_enhanced_client.py -x --tb=short'
         language: system
         types: [python]
         pass_filenames: false

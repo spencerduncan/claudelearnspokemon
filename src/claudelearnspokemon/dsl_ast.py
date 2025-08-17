@@ -57,7 +57,7 @@ class ASTNode:
     children: tuple[ASTNode, ...] = ()
     metadata: dict[str, Any] | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """Ensure metadata is never None for consistent access patterns."""
         if self.metadata is None:
             object.__setattr__(self, "metadata", {})
@@ -107,9 +107,9 @@ class NodeFactory:
     - Fast node creation without redundant allocations
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._string_cache: dict[str, str] = {}
-        self._common_nodes: dict[tuple, ASTNode] = {}
+        self._common_nodes: dict[tuple[Any, ...], ASTNode] = {}
 
     def create_input_node(self, input_name: str) -> ASTNode:
         """Create optimized input node with string interning."""
@@ -262,7 +262,7 @@ class ASTVisitor:
     Subclasses override visit_* methods for custom behavior.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         # Build dispatch table for O(1) method lookup
         self._dispatch_table = {
             NodeType.INPUT: self.visit_input,
