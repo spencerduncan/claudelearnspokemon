@@ -17,6 +17,15 @@ import docker
 import requests
 from docker.errors import APIError, DockerException, ImageNotFound
 
+# Import compatibility layer factory for transparent adapter selection
+try:
+    from .pokemon_gym_factory import create_pokemon_client
+
+    COMPATIBILITY_LAYER_AVAILABLE = True
+except ImportError:
+    # Graceful degradation if compatibility layer not available
+    COMPATIBILITY_LAYER_AVAILABLE = False
+
 if TYPE_CHECKING:
     from .checkpoint_manager import CheckpointError, CheckpointManager
     from .dsl_ast import CompiledScript
@@ -247,6 +256,9 @@ class EmulatorPool:
         startup_timeout: int = 30,
         checkpoint_manager: "CheckpointManager | None" = None,
         default_timeout: float | None = None,
+        adapter_type: str = "auto",
+        input_delay: float = 0.05,
+        detection_timeout: float = 3.0,
     ):
         """
         Initialize EmulatorPool with workstation configuration.
@@ -258,6 +270,9 @@ class EmulatorPool:
             startup_timeout: Max seconds to wait for container startup (default: 30)
             checkpoint_manager: CheckpointManager for state loading (optional)
             default_timeout: Default timeout for acquire operations (optional)
+            adapter_type: Client adapter type - "auto", "benchflow", "direct", "fallback" (default: "auto")
+            input_delay: Delay between sequential inputs for benchflow adapter (default: 50ms)
+            detection_timeout: Timeout for server type auto-detection (default: 3s)
         """
         self.pool_size = pool_size
         self.base_port = base_port
@@ -265,13 +280,20 @@ class EmulatorPool:
         self.startup_timeout = startup_timeout
         self.default_timeout = default_timeout
 
+        # Compatibility layer configuration
+        self.adapter_type = adapter_type
+        self.input_delay = input_delay
+        self.detection_timeout = detection_timeout
+
         # Container management state
         self.containers: list[docker.models.containers.Container] = []
         self.client: docker.DockerClient | None = None
 
         # Simplified resource pool state - workstation-appropriate
         self.available_clients: queue.Queue = queue.Queue()
-        self.clients_by_port: dict[int, PokemonGymClient] = {}  # All clients by port
+        self.clients_by_port: dict[int, Any] = (
+            {}
+        )  # All clients by port (PokemonGymClient or PokemonGymAdapter)
 
         # Core Pokemon functionality components (with graceful degradation)
         if POKEMON_COMPONENTS_AVAILABLE:
@@ -286,7 +308,7 @@ class EmulatorPool:
 
         logger.info(
             f"EmulatorPool configured: size={pool_size}, base_port={base_port}, "
-            f"image={image_name}, timeout={startup_timeout}s"
+            f"image={image_name}, timeout={startup_timeout}s, adapter_type={adapter_type}"
         )
 
     def initialize(self, pool_size: int | None = None) -> None:
@@ -328,9 +350,26 @@ class EmulatorPool:
                     started_containers.append(container)
                     self.containers.append(container)
 
-                    # Create PokemonGymClient and add to available pool
+                    # Create Pokemon client using compatibility layer factory
                     container_id = container.id or f"unknown-{port}"
-                    client = PokemonGymClient(port, container_id)
+                    if COMPATIBILITY_LAYER_AVAILABLE:
+                        # Use factory for transparent adapter selection
+                        client = create_pokemon_client(
+                            port=port,
+                            container_id=container_id,
+                            adapter_type=self.adapter_type,
+                            input_delay=self.input_delay,
+                            detection_timeout=self.detection_timeout,
+                        )
+                        logger.info(
+                            f"Created Pokemon client via compatibility layer for port {port}"
+                        )
+                    else:
+                        # Fallback to direct client if compatibility layer not available
+                        client = PokemonGymClient(port, container_id)
+                        logger.info(
+                            f"Created direct PokemonGymClient for port {port} (compatibility layer unavailable)"
+                        )
                     self.clients_by_port[port] = client
                     self.available_clients.put(client)
 
@@ -448,24 +487,26 @@ class EmulatorPool:
         effective_timeout = timeout if timeout is not None else self.default_timeout
         return EmulatorContext(self, effective_timeout)
 
-    def release(self, client: PokemonGymClient) -> None:
+    def release(self, client: Any) -> None:
         """
         Release emulator client back to available pool.
 
         Simple operation that makes emulator available for other tasks.
 
         Args:
-            client: PokemonGymClient to return to pool
+            client: Pokemon client (PokemonGymClient or PokemonGymAdapter) to return to pool
 
         Raises:
             EmulatorPoolError: If client was not acquired from this pool
         """
-        # Check client validity - handle both real clients and mocked clients
+        # Check client validity - handle both client types and mocked clients
         if hasattr(client, "port") and hasattr(client, "container_id"):
-            # Valid client (either real or properly mocked)
+            # Valid client (direct client, adapter, or properly mocked)
             pass
         else:
-            raise EmulatorPoolError("Invalid client type - must be PokemonGymClient")
+            raise EmulatorPoolError(
+                "Invalid client type - must be a valid Pokemon client with port and container_id attributes"
+            )
 
         # Return client to available pool - queue handles thread safety
         self.available_clients.put(client)

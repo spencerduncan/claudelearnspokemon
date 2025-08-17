@@ -516,7 +516,10 @@ class TestEmulatorPoolResourcePool:
         with pytest.raises(EmulatorPoolError) as exc_info:
             self.pool.release("not_a_client")
 
-        assert "Invalid client type - must be PokemonGymClient" in str(exc_info.value)
+        assert (
+            "Invalid client type - must be a valid Pokemon client with port and container_id attributes"
+            in str(exc_info.value)
+        )
 
     @pytest.mark.unit
     @patch("claudelearnspokemon.emulator_pool.docker.from_env")
