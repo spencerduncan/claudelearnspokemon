@@ -1,0 +1,96 @@
+{
+  "timestamp": "2025-08-17 05:25:00",
+  "summary": {
+    "fast": 7,
+    "medium": 7,
+    "slow": 3,
+    "total": 17
+  },
+  "results": {
+    "tests/test_health_monitor_integration_simple.py": {
+      "duration": 0.4899731570039876,
+      "status": "passed",
+      "category": "fast"
+    },
+    "tests/test_ssh_compatibility.py": {
+      "duration": 0.4094050480052829,
+      "status": "failed",
+      "category": "fast"
+    },
+    "tests/test_script_compiler.py": {
+      "duration": 0.6077422780217603,
+      "status": "passed",
+      "category": "fast"
+    },
+    "tests/test_tile_observer.py": {
+      "duration": 0.6121774989878759,
+      "status": "passed",
+      "category": "fast"
+    },
+    "tests/test_session_recovery.py": {
+      "duration": 0.592992863006657,
+      "status": "passed",
+      "category": "fast"
+    },
+    "tests/test_checkpoint_manager_concurrent.py": {
+      "duration": 0.5434592709934805,
+      "status": "passed",
+      "category": "fast"
+    },
+    "tests/test_setup.py": {
+      "duration": 0.9233084340230562,
+      "status": "passed",
+      "category": "fast"
+    },
+    "tests/test_enhanced_client.py": {
+      "duration": 3.566634257993428,
+      "status": "passed",
+      "category": "medium"
+    },
+    "tests/test_health_monitor.py": {
+      "duration": 1.1551612159819342,
+      "status": "passed",
+      "category": "medium"
+    },
+    "tests/test_checkpoint_manager.py": {
+      "duration": 2.2513377770083025,
+      "status": "passed",
+      "category": "medium"
+    },
+    "tests/test_pokemon_gym_adapter_contracts.py": {
+      "duration": 3.1261173370003235,
+      "status": "passed",
+      "category": "medium"
+    },
+    "tests/test_emulator_pool.py": {
+      "duration": 1.7572978230018634,
+      "status": "passed",
+      "category": "medium"
+    },
+    "tests/test_retry_manager.py": {
+      "duration": 1.9719725830073003,
+      "status": "passed",
+      "category": "medium"
+    },
+    "tests/test_pokemon_gym_adapter.py": {
+      "duration": 0.7415633530181367,
+      "status": "passed",
+      "category": "medium"
+    },
+    "tests/test_session_manager.py": {
+      "duration": ">5.0",
+      "status": "timeout",
+      "category": "slow"
+    },
+    "tests/test_circuit_breaker.py": {
+      "duration": ">5.0",
+      "status": "timeout",
+      "category": "slow"
+    },
+    "tests/test_emulator_pool_concurrent.py": {
+      "duration": ">5.0",
+      "status": "timeout",
+      "category": "slow"
+    }
+  }
+}

@@ -25,6 +25,7 @@ from claudelearnspokemon.circuit_breaker import (
 )
 
 
+@pytest.mark.slow
 class TestCircuitBreaker:
     """Test suite for CircuitBreaker functionality."""
 

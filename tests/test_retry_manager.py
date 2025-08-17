@@ -13,6 +13,7 @@ Author: Linus Torbot - Kernel Quality Standards Applied
 import time
 from unittest.mock import Mock, patch
 
+import pytest
 from requests.exceptions import ConnectionError, HTTPError, ReadTimeout, Timeout
 
 from claudelearnspokemon.retry_manager import (
@@ -24,6 +25,7 @@ from claudelearnspokemon.retry_manager import (
 )
 
 
+@pytest.mark.medium
 class TestRetryManager:
     """Test suite for RetryManager functionality."""
 
