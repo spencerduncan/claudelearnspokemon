@@ -1,525 +1,773 @@
 """
-PokemonGymAdapter: Production-ready HTTP client for benchflow-ai endpoints.
-# mypy: disable-error-code=no-any-return
+Pokemon Gym Adapter - Bridges EmulatorPool with benchflow-ai/pokemon-gym API.
 
-This adapter extends PokemonGymClient to support the benchflow-ai API specification
-while maintaining full backward compatibility. Built with Google-scale engineering
-principles for <100ms response times and production reliability.
+Implements the Adapter Pattern to translate between our expected interface
+and the actual benchflow-ai API, following SOLID principles and clean code practices.
 
-Author: Bot Dean - Production Systems Engineering
+Key Components:
+- PokemonGymAdapter: Main adapter implementing PokemonGymClient interface
+- SessionManager: Handles benchflow-ai session lifecycle
+- Error handling with proper exception hierarchy
+- Performance optimization for <100ms batch operations
+
+Author: Uncle Bot - Clean Code Implementation
 """
 
+import json
 import logging
+import threading
+import time
 from typing import Any
 
-try:
-    import httpx
-except ImportError:
-    # Graceful fallback if httpx not available
-    class httpx:  # type: ignore[misc]
-        class Client:
-            def __init__(self, **kwargs):
-                pass
+import requests
 
-            def post(self, *args, **kwargs):
-                pass
-
-            def get(self, *args, **kwargs):
-                pass
-
-            def close(self):
-                pass
-
-            @property
-            def is_closed(self):
-                return True
-
-        class Limits:
-            def __init__(self, **kwargs):
-                pass
-
-        class TimeoutException(Exception):
-            pass
-
-        class HTTPStatusError(Exception):
-            def __init__(self, message, request=None, response=None):
-                super().__init__(message)
-                self.response = response
-
-
-from .emulator_pool import EmulatorPoolError, PokemonGymClient
-
-# Configure production-grade logging
+# Configure logging for production observability
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class PokemonGymAdapterError(EmulatorPoolError):
-    """
-    Custom exception for PokemonGymAdapter operations.
-
-    Extends EmulatorPoolError to maintain error hierarchy while providing
-    adapter-specific error context for production debugging.
-    """
+class PokemonGymAdapterError(Exception):
+    """Custom exception for Pokemon Gym Adapter operations."""
 
     pass
 
 
-class PokemonGymAdapter(PokemonGymClient):
+class SessionManager:
     """
-    Production-ready adapter for benchflow-ai Pokemon gym environments.
+    Manages benchflow-ai session lifecycle with automatic recovery.
 
-    Extends PokemonGymClient with benchflow-ai specific endpoints while maintaining
-    full backward compatibility. Uses httpx with connection pooling for optimal
-    performance (<100ms target processing time).
-
-    Supports both pokemon-gym and benchflow-ai API endpoints:
-    - Legacy: /input, /state, /reset, /health
-    - New: /initialize, /action, /status, /stop
+    Implements Single Responsibility Principle - only handles session state.
+    Thread-safe implementation for production use.
     """
 
-    def __init__(
-        self,
-        port: int,
-        container_id: str,
-        server_url: str | None = None,
-        timeout_config: dict[str, float] | None = None,
-        connection_limits: dict[str, int | float] | None = None,
-    ):
+    def __init__(self, base_url: str, config: dict[str, Any] | None = None):
+        self.base_url = base_url
+        self.config = config or {}
+        self.session_id: str | None = None
+        self.is_initialized: bool = False
+        self._session = requests.Session()
+
+        # Thread safety for concurrent operations
+        self._lock = threading.RLock()
+
+        # Reset operation tracking for concurrency safety
+        self._reset_in_progress: bool = False
+
+    def initialize_session(self) -> dict[str, Any]:
+        """Initialize new session with benchflow-ai server."""
+        try:
+            response = self._session.post(
+                f"{self.base_url}/initialize", json={"config": self.config}, timeout=10
+            )
+            response.raise_for_status()
+
+            data = response.json()
+            self.session_id = data.get("session_id")
+            self.is_initialized = True
+
+            logger.info(f"Session initialized: {self.session_id}")
+            return dict(data)
+
+        except requests.RequestException as e:
+            raise PokemonGymAdapterError(f"Session initialization failed: {e}") from e
+
+    def stop_session(self) -> dict[str, Any]:
+        """Stop current session."""
+        if not self.is_initialized:
+            return {"status": "not_initialized"}
+
+        try:
+            response = self._session.post(
+                f"{self.base_url}/stop", json={"session_id": self.session_id}, timeout=5
+            )
+            response.raise_for_status()
+
+            data = response.json()
+            self.is_initialized = False
+            self.session_id = None
+
+            logger.info("Session stopped successfully")
+            return dict(data)
+
+        except requests.RequestException as e:
+            logger.warning(f"Session stop failed: {e}")
+            # Reset state even if stop failed
+            self.is_initialized = False
+            self.session_id = None
+            return {"status": "error", "error": str(e)}
+
+    def reset_session(self) -> dict[str, Any]:
         """
-        Initialize adapter with production configuration.
+        Reset session by stopping and reinitializing.
+
+        Production-grade implementation with:
+        - Thread safety for concurrent operations
+        - Comprehensive error handling
+        - Performance optimization (<500ms target)
+        - Robust state cleanup
+
+        Returns:
+            Reset result with timing and status information
+
+        Raises:
+            PokemonGymAdapterError: On unrecoverable reset failure
+        """
+        start_time = time.time()
+
+        with self._lock:
+            # Prevent concurrent reset operations
+            if self._reset_in_progress:
+                logger.warning("Reset already in progress, waiting for completion")
+                # Wait for concurrent reset to complete (with timeout)
+                timeout_start = time.time()
+                while self._reset_in_progress and (time.time() - timeout_start) < 10.0:
+                    time.sleep(0.1)
+
+                if self._reset_in_progress:
+                    raise PokemonGymAdapterError(
+                        "Reset operation timed out waiting for concurrent reset"
+                    )
+
+                # Return current session status if already reset
+                return {
+                    "status": "initialized" if self.is_initialized else "stopped",
+                    "session_id": self.session_id,
+                    "message": "Reset completed by concurrent operation",
+                    "reset_time_ms": int((time.time() - start_time) * 1000),
+                }
+
+            self._reset_in_progress = True
+
+            try:
+                logger.info("Starting session reset...")
+
+                # Phase 1: Stop current session (allow failures - session might be dead)
+                stop_result = self._safe_stop_session()
+
+                # Phase 2: Initialize new session (must succeed)
+                init_result = self.initialize_session()
+
+                reset_time_ms = int((time.time() - start_time) * 1000)
+                logger.info(f"Session reset completed in {reset_time_ms}ms")
+
+                # Validate performance requirement
+                if reset_time_ms > 500:
+                    logger.warning(f"Reset took {reset_time_ms}ms - exceeds 500ms target")
+
+                return {
+                    "status": "initialized",
+                    "session_id": self.session_id,
+                    "message": f"Session reset successful in {reset_time_ms}ms",
+                    "reset_time_ms": reset_time_ms,
+                    "stop_result": stop_result,
+                    "init_result": init_result,
+                }
+
+            except Exception as e:
+                logger.error(
+                    f"Session reset failed after {int((time.time() - start_time) * 1000)}ms: {e}"
+                )
+                # Ensure clean state even on failure
+                self.is_initialized = False
+                self.session_id = None
+                raise PokemonGymAdapterError(f"Session reset failed: {e}") from e
+
+            finally:
+                self._reset_in_progress = False
+
+    def _safe_stop_session(self) -> dict[str, Any]:
+        """
+        Safely stop session - allows failures since session might be dead.
+
+        Returns:
+            Stop result dictionary
+        """
+        if not self.is_initialized:
+            return {"status": "not_initialized", "message": "No active session to stop"}
+
+        try:
+            # Use shorter timeout for stop operation to meet performance target
+            response = self._session.post(
+                f"{self.base_url}/stop",
+                json={"session_id": self.session_id},
+                timeout=2.0,  # Reduced from 5s for performance
+            )
+            response.raise_for_status()
+
+            data = response.json()
+            logger.info("Session stopped successfully")
+            return dict(data)
+
+        except Exception as e:
+            logger.warning(f"Session stop failed (continuing with reset): {e}")
+            # Don't raise - session might already be dead
+            return {"status": "stop_failed", "error": str(e)}
+
+        finally:
+            # Always clean up state after stop attempt
+            self.is_initialized = False
+            self.session_id = None
+
+    def close(self) -> None:
+        """Close HTTP session resources."""
+        if self.is_initialized:
+            self.stop_session()
+        self._session.close()
+
+
+class PokemonGymAdapter:
+    """
+    Adapter implementing PokemonGymClient interface for benchflow-ai/pokemon-gym API.
+
+    Translates batch input sequences to sequential API calls while maintaining
+    the same interface as the original PokemonGymClient.
+
+    Follows Clean Code principles:
+    - Single Responsibility: Only handles API translation
+    - Open/Closed: Extensible for new input types
+    - Interface Segregation: Clean, focused interface
+    - Dependency Inversion: Depends on abstractions (HTTP client)
+    """
+
+    def __init__(self, port: int, container_id: str, config: dict[str, Any] | None = None):
+        """
+        Initialize adapter for specific emulator instance.
 
         Args:
             port: HTTP port for emulator communication
             container_id: Docker container ID for this emulator
-            server_url: Override base server URL (default: localhost)
-            timeout_config: Custom timeout settings for different operations
-            connection_limits: HTTP connection pool configuration
+            config: Optional configuration for benchflow-ai session
         """
-        # Initialize parent class with existing functionality
-        super().__init__(port, container_id)
+        self.port = port
+        self.container_id = container_id
+        self.base_url = f"http://localhost:{port}"
+        self.config = config or {}
 
-        # Production-grade timeout configuration (<100ms target)
-        self.timeout_config = timeout_config or {
-            "initialize": 5.0,  # Environment setup can take longer
-            "action": 0.1,  # Critical path - must be fast
-            "status": 0.05,  # Health checks should be instant
-            "stop": 2.0,  # Cleanup operations
-            "default": 0.1,  # Default for all operations
-        }
+        # Performance configuration
+        self.input_timeout = 10.0
+        self.state_timeout = 5.0
 
-        # HTTP connection pool configuration for production scale
-        connection_limits = connection_limits or {
-            "max_keepalive_connections": 10,
-            "max_connections": 20,
-            "keepalive_expiry": 30.0,
-        }
+        # Session management (Dependency Injection)
+        self.session_manager = SessionManager(self.base_url, self.config)
 
-        # Override base URL if custom server specified
-        if server_url:
-            self.base_url = server_url.rstrip("/")
+        # HTTP client for direct requests
+        self.session = requests.Session()
 
-        # Initialize high-performance HTTP client with connection pooling
-        limits = httpx.Limits(
-            max_keepalive_connections=int(connection_limits.get("max_keepalive_connections", 10)),
-            max_connections=int(connection_limits.get("max_connections", 20)),
-            keepalive_expiry=float(connection_limits.get("keepalive_expiry", 30.0)),
-        )
+        logger.info(f"PokemonGymAdapter initialized for port {port}, container {container_id[:12]}")
 
-        self.http_client = httpx.Client(
-            base_url=self.base_url,
-            limits=limits,
-            timeout=None,  # We set timeouts per-request for fine control
-            headers={
-                "User-Agent": f"PokemonGymAdapter/1.0 (container-{container_id[:12]})",
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
-        )
-
-        # Track adapter state for production observability
-        self._session_initialized = False
-        self._last_action_time: float | None = None
-
-        logger.info(
-            f"PokemonGymAdapter initialized: port={port}, "
-            f"container={container_id[:12]}, base_url={self.base_url}"
-        )
-
-    def initialize_session(self, config: dict[str, Any] | None = None) -> dict[str, Any]:  # type: ignore[misc]
+    def send_input(self, input_sequence: str) -> dict[str, Any]:
         """
-        Initialize a new benchflow-ai session.
+        Send input sequence to the emulator.
 
-        This is the entry point for benchflow-ai environments, equivalent to
-        starting a new game or resetting to a specific state.
+        Translates batch input string to sequential benchflow-ai action calls.
 
         Args:
-            config: Session configuration (game state, difficulty, etc.)
+            input_sequence: Button inputs (e.g., "A B START")
 
         Returns:
-            Session initialization response with initial state
+            Response data from emulator
 
         Raises:
-            PokemonGymAdapterError: On initialization failure
+            PokemonGymAdapterError: On communication failure
         """
+        if not input_sequence.strip():
+            return self._create_empty_input_response()
+
         try:
-            start_time = self._get_current_time()
+            self._ensure_session_initialized()
+            buttons = self._parse_input_sequence(input_sequence)
+            results = self._execute_button_sequence(buttons)
+            return self._create_success_response(results)
 
-            payload = config or {}
-
-            response = self.http_client.post(
-                "/initialize", json=payload, timeout=self.timeout_config["initialize"]
-            )
-            response.raise_for_status()
-
-            result: dict[str, Any] = response.json()
-            self._session_initialized = True
-
-            execution_time = self._get_current_time() - start_time
-            logger.info(
-                f"Session initialized on {self}: config={len(payload)} keys, "
-                f"time={execution_time:.3f}s"
-            )
-
-            return result  # type: ignore[no-any-return]
-
-        except httpx.TimeoutException as e:
-            raise PokemonGymAdapterError(
-                f"Session initialization timeout on {self}: {e}. "
-                f"Consider increasing timeout or checking server performance."
-            ) from e
-        except httpx.HTTPStatusError as e:
-            raise PokemonGymAdapterError(
-                f"Session initialization failed on {self}: {e.response.status_code} "
-                f"{e.response.text}. Check server status and configuration."
-            ) from e
         except Exception as e:
             raise PokemonGymAdapterError(
-                f"Unexpected error during session initialization on {self}: {e}"
+                f"Failed to send input to emulator on port {self.port}: {e}"
             ) from e
 
-    def execute_action(self, action: str | dict[str, Any]) -> dict[str, Any]:  # type: ignore[misc]
+    def get_state(self) -> dict[str, Any]:
         """
-        Execute action on benchflow-ai environment.
+        Get current game state from emulator.
 
-        This is the critical path method for game interaction. Optimized for
-        <100ms response time with comprehensive error handling.
-
-        Args:
-            action: Action to execute (input sequence or structured action)
+        Maps benchflow-ai status response to our expected format.
 
         Returns:
-            Action execution response with new state and rewards
+            Current game state data
 
         Raises:
-            PokemonGymAdapterError: On execution failure or timeout
+            PokemonGymAdapterError: On communication failure
         """
-        import time
+        try:
+            # Ensure session is initialized for auto-initialization test
+            self._ensure_session_initialized()
 
-        start_time = time.perf_counter()
+            response = self.session.get(f"{self.base_url}/status", timeout=self.state_timeout)
+            response.raise_for_status()
+
+            benchflow_data = response.json()
+            return self._map_state_response(benchflow_data)
+
+        except json.JSONDecodeError as e:
+            raise PokemonGymAdapterError(
+                f"Invalid response from emulator on port {self.port}: {e}"
+            ) from e
+        except Exception as e:
+            # Handle timeout and other exceptions
+            if "timeout" in str(e).lower():
+                raise PokemonGymAdapterError(
+                    f"Timeout accessing emulator on port {self.port}: {e}"
+                ) from e
+            raise PokemonGymAdapterError(
+                f"Failed to get state from emulator on port {self.port}: {e}"
+            ) from e
+
+    def reset_game(self) -> dict[str, Any]:
+        """
+        Reset the game to initial state.
+
+        Production-grade implementation with:
+        - Thread-safe concurrent operation handling
+        - Comprehensive error recovery and fallback strategies
+        - Performance monitoring (<500ms target)
+        - Configuration preservation across resets
+        - Detailed operational metrics for debugging
+
+        Maps reset_game() to benchflow-ai stop/initialize sequence as required.
+
+        Returns:
+            Reset confirmation with performance metrics and status details
+
+        Raises:
+            PokemonGymAdapterError: On unrecoverable reset failure
+        """
+        operation_start = time.time()
 
         try:
-            # Ensure session is initialized before actions
-            if not self._session_initialized:
-                logger.warning(f"Action attempted on uninitialized session {self}")
+            logger.info(f"Initiating game reset for emulator on port {self.port}")
 
-            # Normalize action format for API
-            if isinstance(action, str):
-                payload = {"action": action}
+            # Preserve original configuration for post-reset validation
+            original_config = dict(self.config) if self.config else {}
+
+            # Execute thread-safe reset with comprehensive error handling
+            reset_result = self.session_manager.reset_session()
+
+            # Validate session state after reset
+            self._validate_reset_state()
+
+            # Verify configuration preservation
+            if self.config != original_config:
+                logger.warning("Configuration changed during reset - this should not happen")
+
+            operation_time_ms = int((time.time() - operation_start) * 1000)
+
+            # Construct production-grade response
+            response = {
+                "status": "initialized",
+                "session_id": self.session_manager.session_id,
+                "message": f"Game reset successfully in {operation_time_ms}ms",
+                "emulator_port": self.port,
+                "container_id": self.container_id,
+                "operation_time_ms": operation_time_ms,
+                "configuration_preserved": self.config == original_config,
+                "reset_details": reset_result,
+            }
+
+            # Performance validation
+            if operation_time_ms > 500:
+                logger.warning(f"Reset operation took {operation_time_ms}ms - exceeds 500ms SLA")
+                response["performance_warning"] = True
+                response["sla_exceeded"] = True
+
+            logger.info(f"Game reset completed successfully in {operation_time_ms}ms")
+            return response
+
+        except PokemonGymAdapterError as adapter_error:
+            # Try emergency recovery for adapter errors too
+            operation_time_ms = int((time.time() - operation_start) * 1000)
+            logger.error(
+                f"Game reset failed with adapter error after {operation_time_ms}ms: {adapter_error}"
+            )
+
+            # Try emergency recovery
+            try:
+                self._emergency_session_recovery()
+                logger.info("Emergency session recovery successful after adapter error")
+
+                return {
+                    "status": "recovered",
+                    "session_id": self.session_manager.session_id,
+                    "message": f"Reset failed but emergency recovery successful after {operation_time_ms}ms",
+                    "operation_time_ms": operation_time_ms,
+                    "recovery_applied": True,
+                    "original_error": str(adapter_error),
+                }
+
+            except Exception as recovery_error:
+                logger.error(f"Emergency recovery also failed: {recovery_error}")
+
+                # Final attempt: Clean state and raise comprehensive error
+                self._force_clean_state()
+
+                raise PokemonGymAdapterError(
+                    f"Failed to reset emulator on port {self.port} after {operation_time_ms}ms. "
+                    f"Original error: {adapter_error}. Recovery error: {recovery_error}. "
+                    f"Session state has been reset to clean state."
+                ) from adapter_error
+
+        except Exception as e:
+            operation_time_ms = int((time.time() - operation_start) * 1000)
+            logger.error(f"Game reset failed after {operation_time_ms}ms: {e}")
+
+            # Try emergency recovery
+            try:
+                self._emergency_session_recovery()
+                logger.info("Emergency session recovery successful")
+
+                return {
+                    "status": "recovered",
+                    "session_id": self.session_manager.session_id,
+                    "message": f"Reset failed but emergency recovery successful after {operation_time_ms}ms",
+                    "operation_time_ms": operation_time_ms,
+                    "recovery_applied": True,
+                    "original_error": str(e),
+                }
+
+            except Exception as recovery_error:
+                logger.error(f"Emergency recovery also failed: {recovery_error}")
+
+                # Final attempt: Clean state and raise comprehensive error
+                self._force_clean_state()
+
+                raise PokemonGymAdapterError(
+                    f"Failed to reset emulator on port {self.port} after {operation_time_ms}ms. "
+                    f"Original error: {e}. Recovery error: {recovery_error}. "
+                    f"Session state has been reset to clean state."
+                ) from e
+
+    def _validate_reset_state(self) -> None:
+        """
+        Validate session state after reset operation.
+
+        Raises:
+            PokemonGymAdapterError: If state validation fails
+        """
+        if not self.session_manager.is_initialized:
+            raise PokemonGymAdapterError("Session not properly initialized after reset")
+
+        if not self.session_manager.session_id:
+            raise PokemonGymAdapterError("Session ID missing after reset")
+
+        # Quick health check to ensure emulator is responsive
+        try:
+            health_check_start = time.time()
+            is_healthy = self.is_healthy()
+            health_check_time = int((time.time() - health_check_start) * 1000)
+
+            if not is_healthy:
+                logger.warning(f"Health check failed after reset (took {health_check_time}ms)")
+                # Don't raise - let the session attempt to recover naturally
             else:
-                payload = action
+                logger.info(f"Post-reset health check passed in {health_check_time}ms")
 
-            response = self.http_client.post(
-                "/action", json=payload, timeout=self.timeout_config["action"]
+        except Exception as e:
+            logger.warning(f"Post-reset health check encountered error: {e}")
+            # Don't raise - health check is advisory only
+
+    def _emergency_session_recovery(self) -> None:
+        """
+        Emergency session recovery for catastrophic reset failures.
+
+        Attempts to restore minimal session functionality.
+
+        Raises:
+            PokemonGymAdapterError: If recovery is impossible
+        """
+        logger.warning("Attempting emergency session recovery...")
+
+        try:
+            # Force clean state
+            self._force_clean_state()
+
+            # Attempt basic session initialization with minimal config
+            recovery_config = {"headless": True, "sound": False}  # Minimal config for recovery
+
+            response = self.session.post(
+                f"{self.base_url}/initialize", json={"config": recovery_config}, timeout=5.0
             )
             response.raise_for_status()
 
-            result: dict[str, Any] = response.json()
+            data = response.json()
+            self.session_manager.session_id = data.get("session_id")
+            self.session_manager.is_initialized = True
 
-            execution_time = time.perf_counter() - start_time
-            self._last_action_time = execution_time
+            logger.info("Emergency session recovery completed")
 
-            # Log performance warning if approaching timeout
-            if execution_time > 0.08:  # 80% of 100ms target
-                logger.warning(
-                    f"Action execution approaching timeout on {self}: "
-                    f"{execution_time:.3f}s (target: <0.1s)"
-                )
-            else:
-                logger.debug(f"Action executed on {self}: time={execution_time:.3f}s")
-
-            return result  # type: ignore[no-any-return]
-
-        except httpx.TimeoutException as e:
-            execution_time = time.perf_counter() - start_time
-            raise PokemonGymAdapterError(
-                f"Action execution timeout on {self} after {execution_time:.3f}s: {e}. "
-                f"This violates <100ms performance requirement."
-            ) from e
-        except httpx.HTTPStatusError as e:
-            raise PokemonGymAdapterError(
-                f"Action execution failed on {self}: {e.response.status_code} "
-                f"{e.response.text}. Action: {action}"
-            ) from e
         except Exception as e:
-            raise PokemonGymAdapterError(
-                f"Unexpected error during action execution on {self}: {e}"
-            ) from e
+            raise PokemonGymAdapterError(f"Emergency recovery failed: {e}") from e
 
-    def get_session_status(self) -> dict[str, Any]:  # type: ignore[misc]
+    def _force_clean_state(self) -> None:
+        """Force adapter to clean state - last resort cleanup."""
+        logger.warning("Forcing clean state - resetting all session tracking")
+        self.session_manager.is_initialized = False
+        self.session_manager.session_id = None
+        if hasattr(self.session_manager, "_reset_in_progress"):
+            self.session_manager._reset_in_progress = False
+
+    def is_healthy(self) -> bool:
         """
-        Get current session status from benchflow-ai environment.
-
-        Provides detailed state information for monitoring and debugging.
-        Optimized for minimal latency as this is called frequently.
+        Check if emulator is responding and session is valid.
 
         Returns:
-            Current session status with state, metrics, and diagnostics
-
-        Raises:
-            PokemonGymAdapterError: On status retrieval failure
-        """
-        import time
-
-        start_time = time.perf_counter()
-
-        try:
-            response = self.http_client.get("/status", timeout=self.timeout_config["status"])
-            response.raise_for_status()
-
-            result: dict[str, Any] = response.json()
-
-            execution_time = time.perf_counter() - start_time
-            logger.debug(f"Status retrieved from {self}: time={execution_time:.3f}s")
-
-            return result  # type: ignore[no-any-return]
-
-        except httpx.TimeoutException as e:
-            raise PokemonGymAdapterError(
-                f"Status retrieval timeout on {self}: {e}. " f"Expected <50ms response time."
-            ) from e
-        except httpx.HTTPStatusError as e:
-            raise PokemonGymAdapterError(
-                f"Status retrieval failed on {self}: {e.response.status_code} " f"{e.response.text}"
-            ) from e
-        except Exception as e:
-            raise PokemonGymAdapterError(
-                f"Unexpected error during status retrieval on {self}: {e}"
-            ) from e
-
-    def stop_session(self, save_state: bool = False) -> dict[str, Any]:  # type: ignore[misc]
-        """
-        Stop current benchflow-ai session.
-
-        Gracefully terminates the session with optional state saving.
-        Handles cleanup and resource deallocation.
-
-        Args:
-            save_state: Whether to save current state for future restoration
-
-        Returns:
-            Session termination response with final metrics
-
-        Raises:
-            PokemonGymAdapterError: On session termination failure
+            True if emulator is healthy, False otherwise
         """
         try:
-            payload = {"save_state": save_state}
+            response = self.session.get(f"{self.base_url}/status", timeout=3)
 
-            response = self.http_client.post(
-                "/stop", json=payload, timeout=self.timeout_config["stop"]
-            )
-            response.raise_for_status()
-
-            result: dict[str, Any] = response.json()
-            self._session_initialized = False
-
-            logger.info(f"Session stopped on {self}: save_state={save_state}")
-
-            return result  # type: ignore[no-any-return]
-
-        except httpx.TimeoutException as e:
-            raise PokemonGymAdapterError(
-                f"Session stop timeout on {self}: {e}. " f"Server may be unresponsive."
-            ) from e
-        except httpx.HTTPStatusError as e:
-            raise PokemonGymAdapterError(
-                f"Session stop failed on {self}: {e.response.status_code} " f"{e.response.text}"
-            ) from e
-        except Exception as e:
-            raise PokemonGymAdapterError(
-                f"Unexpected error during session stop on {self}: {e}"
-            ) from e
-
-    def is_session_active(self) -> bool:
-        """
-        Check if benchflow-ai session is currently active.
-
-        Fast health check that combines local state with server verification.
-
-        Returns:
-            True if session is active and responsive, False otherwise
-        """
-        try:
-            # Quick local check first
-            if not self._session_initialized:
+            if response.status_code != 200:
                 return False
 
-            # Verify with server (fast status check)
-            status = self.get_session_status()
-            return bool(status.get("active", False))
+            data = response.json()
+            # Check for session errors in response
+            if "error" in data and "session" in data["error"].lower():
+                return False
 
-        except Exception as e:
-            logger.debug(f"Session activity check failed on {self}: {e}")
+            return True
+
+        except Exception:
             return False
 
-    def get_performance_metrics(self) -> dict[str, Any]:
-        """
-        Get adapter performance metrics for monitoring.
-
-        Provides production telemetry for performance analysis and optimization.
-
-        Returns:
-            Performance metrics including timing and resource usage
-        """
-        return {
-            "session_initialized": self._session_initialized,
-            "last_action_time": self._last_action_time,
-            "timeout_config": self.timeout_config,
-            "connection_pool_info": {"is_closed": self.http_client.is_closed},
-        }
-
     def close(self) -> None:
-        """
-        Close adapter and release resources.
+        """Close HTTP session and cleanup resources."""
+        self.session_manager.close()
+        self.session.close()
 
-        Extends parent close() method to handle httpx client cleanup.
-        Production pattern: always clean up resources explicitly.
-        """
-        try:
-            # Close httpx client first
-            if hasattr(self, "http_client") and not self.http_client.is_closed:
-                self.http_client.close()
-                logger.debug(f"HTTP client closed for {self}")
-        except Exception as e:
-            logger.error(f"Error closing HTTP client for {self}: {e}")
-        finally:
-            # Always call parent cleanup
-            super().close()
+    def _ensure_session_initialized(self) -> None:
+        """Ensure session is initialized, initialize if needed."""
+        if not self.session_manager.is_initialized:
+            self.session_manager.initialize_session()
 
-    @staticmethod
-    def create_adapter(
-        port: int, container_id: str, adapter_type: str = "benchflow", **kwargs
-    ) -> "PokemonGymAdapter":
+    def _parse_input_sequence(self, input_sequence: str) -> list[str]:
         """
-        Factory method for creating adapters with different configurations.
-
-        Provides a clean API for adapter creation with preset configurations
-        for different use cases and performance requirements.
+        Parse input sequence string into list of individual buttons.
 
         Args:
-            port: HTTP port for emulator communication
-            container_id: Docker container ID
-            adapter_type: Preset configuration type
-            **kwargs: Override any configuration parameters
+            input_sequence: Space-separated button sequence
 
         Returns:
-            Configured PokemonGymAdapter instance
+            List of individual button names
 
         Raises:
-            ValueError: For unknown adapter types
+            PokemonGymAdapterError: On invalid button names
         """
-        presets = {
-            "benchflow": {
-                "timeout_config": {
-                    "initialize": 5.0,
-                    "action": 0.1,
-                    "status": 0.05,
-                    "stop": 2.0,
-                    "default": 0.1,
-                },
-                "connection_limits": {
-                    "max_keepalive_connections": 10,
-                    "max_connections": 20,
-                    "keepalive_expiry": 30.0,
-                },
-            },
-            "high_performance": {
-                "timeout_config": {
-                    "initialize": 3.0,
-                    "action": 0.05,
-                    "status": 0.025,
-                    "stop": 1.0,
-                    "default": 0.05,
-                },
-                "connection_limits": {
-                    "max_keepalive_connections": 20,
-                    "max_connections": 50,
-                    "keepalive_expiry": 60.0,
-                },
-            },
-            "development": {
-                "timeout_config": {
-                    "initialize": 10.0,
-                    "action": 1.0,
-                    "status": 0.5,
-                    "stop": 5.0,
-                    "default": 1.0,
-                },
-                "connection_limits": {
-                    "max_keepalive_connections": 5,
-                    "max_connections": 10,
-                    "keepalive_expiry": 10.0,
-                },
-            },
+        # Normalize whitespace and split
+        buttons = input_sequence.strip().upper().split()
+
+        # Validate button names
+        valid_buttons = {
+            "A",
+            "B",
+            "START",
+            "SELECT",
+            "UP",
+            "DOWN",
+            "LEFT",
+            "RIGHT",
+            "L",
+            "R",  # Shoulder buttons for later Pokemon games
         }
 
-        if adapter_type not in presets:
-            raise ValueError(
-                f"Unknown adapter type: {adapter_type}. " f"Available: {list(presets.keys())}"
-            )
+        for button in buttons:
+            if button not in valid_buttons:
+                raise PokemonGymAdapterError(f"Invalid button name: {button}")
 
-        # Merge preset with overrides
-        config = presets[adapter_type].copy()
-        config.update(kwargs)
+        return buttons
 
-        logger.info(
-            f"Creating {adapter_type} adapter: port={port}, " f"container={container_id[:12]}"
+    def _send_single_action(self, button: str) -> dict[str, Any]:
+        """
+        Send single button press action to benchflow-ai API.
+
+        Args:
+            button: Single button name
+
+        Returns:
+            Action response data
+        """
+        response = self.session.post(
+            f"{self.base_url}/action",
+            json={"action_type": "press_key", "keys": [button]},
+            timeout=self.input_timeout,
         )
+        response.raise_for_status()
+        return dict(response.json())
 
-        # Extract properly typed parameters with explicit type casting
-        server_url: str | None = None
-        timeout_config: dict[str, float] | None = None
-        connection_limits: dict[str, int | float] | None = None
+    def _map_state_response(self, benchflow_data: dict[str, Any]) -> dict[str, Any]:
+        """
+        Map benchflow-ai status response to our expected format.
 
-        if "server_url" in config:
-            server_url = config["server_url"]
-        if "timeout_config" in config:
-            timeout_config = config["timeout_config"]
-        if "connection_limits" in config:
-            connection_limits = config["connection_limits"]
+        Implements defensive programming - handles missing/malformed data gracefully.
 
-        return PokemonGymAdapter(
-            port,
-            container_id,
-            server_url=server_url,
-            timeout_config=timeout_config,
-            connection_limits=connection_limits,
-        )
+        Args:
+            benchflow_data: Raw response from benchflow-ai /status
 
-    def _get_current_time(self) -> float:
-        """Get high-precision current time for performance measurement."""
-        import time
+        Returns:
+            Mapped state data in our expected format
+        """
+        # Defensive parsing with sensible defaults
+        game_status = benchflow_data.get("game_status", "unknown")
 
-        return time.perf_counter()
+        # Map player position data - return empty dict if no player data
+        player_data = benchflow_data.get("player")
+        if isinstance(player_data, dict) and player_data:
+            player_position = {
+                "x": player_data.get("x", 0),
+                "y": player_data.get("y", 0),
+                "map_id": player_data.get("map_id", "unknown"),
+            }
+        else:
+            player_position = {}
+
+        # Map screen data - return empty dict if no screen data
+        screen_data = benchflow_data.get("screen")
+        if isinstance(screen_data, dict) and screen_data:
+            screen_info = {
+                "tiles": screen_data.get("tiles", []),
+                "width": screen_data.get("width", 20),
+                "height": screen_data.get("height", 18),
+            }
+        else:
+            screen_info = {}
+
+        # Map frame count
+        frame_count = benchflow_data.get("frame_count", 0)
+        if not isinstance(frame_count, int):
+            frame_count = 0
+
+        return {
+            "game_status": game_status,
+            "player_position": player_position,
+            "screen_data": screen_info,
+            "frame_count": frame_count,
+        }
+
+    def _is_session_error(self, exception: Exception) -> bool:
+        """
+        Check if exception indicates session expiration.
+
+        Args:
+            exception: Exception to analyze
+
+        Returns:
+            True if this is a session-related error
+        """
+        error_str = str(exception).lower()
+        session_indicators = ["session_expired", "session", "unauthorized", "401"]
+
+        # Also check if it's a 400 error with session_expired in the response
+        if hasattr(exception, "response") and exception.response is not None:
+            try:
+                response_data = exception.response.json()
+                if isinstance(response_data, dict) and "session_expired" in response_data.get(
+                    "error", ""
+                ):
+                    return True
+            except (json.JSONDecodeError, AttributeError):
+                pass
+
+        return any(indicator in error_str for indicator in session_indicators)
+
+    def _calculate_retry_delays(self, max_retries: int = 3) -> list[float]:
+        """
+        Calculate exponential backoff delays for retries.
+
+        Args:
+            max_retries: Maximum number of retries
+
+        Returns:
+            List of delay times in seconds
+        """
+        delays = []
+        for i in range(max_retries):
+            # Exponential backoff: 0.1, 0.2, 0.4 seconds
+            delay = 0.1 * (2**i)
+            delays.append(delay)
+        return delays
+
+    def _create_empty_input_response(self) -> dict[str, Any]:
+        """Create response for empty input sequence."""
+        return {"status": "no_input"}
+
+    def _execute_button_sequence(self, buttons: list[str]) -> list[dict[str, Any]]:
+        """
+        Execute sequence of button actions with error recovery.
+
+        Implements automatic session recovery when session expires.
+
+        Args:
+            buttons: List of button names to execute
+
+        Returns:
+            List of action results
+        """
+        results = []
+        for button in buttons:
+            result = self._execute_single_button_with_recovery(button)
+            results.append(result)
+        return results
+
+    def _execute_single_button_with_recovery(self, button: str) -> dict[str, Any]:
+        """
+        Execute single button action with automatic session recovery.
+
+        Args:
+            button: Button name to execute
+
+        Returns:
+            Action result
+        """
+        try:
+            return self._send_single_action(button)
+        except requests.RequestException as e:
+            if self._is_session_error(e):
+                logger.info("Session expired, reinitializing...")
+                self.session_manager.reset_session()
+                return self._send_single_action(button)
+            else:
+                raise
+
+    def _create_success_response(self, results: list[dict[str, Any]]) -> dict[str, Any]:
+        """Create formatted success response for input sequence."""
+        return {"status": "success", "actions_completed": len(results), "results": results}
 
     def __str__(self) -> str:
         """String representation for logging and debugging."""
-        session_status = "active" if self._session_initialized else "inactive"
-        return f"PokemonGymAdapter(port={self.port}, container={self.container_id[:12]}, session={session_status})"
+        return f"PokemonGymAdapter(port={self.port}, container={self.container_id})"
 
-    def __repr__(self) -> str:
-        """Detailed representation for debugging."""
-        return (
-            f"PokemonGymAdapter(port={self.port}, container_id='{self.container_id}', "
-            f"base_url='{self.base_url}', session_initialized={self._session_initialized})"
-        )
+
+# Factory function for creating appropriate client types
+def create_pokemon_gym_client(
+    port: int,
+    container_id: str,
+    api_type: str = "benchflow",
+    config: dict[str, Any] | None = None,
+) -> Any:
+    """
+    Factory function to create appropriate Pokemon Gym client.
+
+    Implements Factory Pattern to choose between adapter and direct client.
+
+    Args:
+        port: HTTP port for communication
+        container_id: Docker container ID
+        api_type: "benchflow" for adapter, "legacy" for direct client
+        config: Optional configuration
+
+    Returns:
+        PokemonGymAdapter or PokemonGymClient instance
+    """
+    if api_type == "benchflow":
+        return PokemonGymAdapter(port, container_id, config)
+    elif api_type == "legacy":
+        # Would return PokemonGymClient in real implementation
+        # For now, return adapter as fallback
+        return PokemonGymAdapter(port, container_id, config)
+    else:
+        raise ValueError(f"Unknown api_type: {api_type}")
