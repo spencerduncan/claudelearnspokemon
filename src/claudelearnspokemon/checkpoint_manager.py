@@ -231,6 +231,9 @@ class CheckpointManager:
                 )
                 logger.info("Main table created")
 
+                # Perform schema migration if needed
+                self._migrate_database_schema(conn)
+
                 # Create indexes for fast querying
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_created_at ON checkpoint_metadata(created_at)"
@@ -250,6 +253,43 @@ class CheckpointManager:
             logger.info(f"Database file exists after init: {self.db_path.exists()}")
         except Exception as e:
             logger.error(f"Database initialization failed: {e}")
+            raise
+
+    def _migrate_database_schema(self, conn: sqlite3.Connection) -> None:
+        """Migrate database schema to current version if needed."""
+        try:
+            # Get current table columns
+            cursor = conn.execute("PRAGMA table_info(checkpoint_metadata)")
+            existing_columns = [row[1] for row in cursor.fetchall()]
+
+            # Define required columns and their types
+            required_columns = [
+                ("game_location", "TEXT"),
+                ("progress_markers", "TEXT"),
+                ("performance_metrics", "TEXT"),
+                ("tags", "TEXT"),
+                ("custom_fields", "TEXT"),
+                ("file_size", "INTEGER"),
+                ("checksum", "TEXT"),
+                ("schema_version", "INTEGER DEFAULT 1"),
+            ]
+
+            migration_needed = False
+            for column_name, column_type in required_columns:
+                if column_name not in existing_columns:
+                    logger.info(f"Adding missing {column_name} column")
+                    conn.execute(
+                        f"ALTER TABLE checkpoint_metadata ADD COLUMN {column_name} {column_type}"
+                    )
+                    migration_needed = True
+
+            if migration_needed:
+                logger.info("Schema migration completed")
+            else:
+                logger.debug("Schema is up to date")
+
+        except Exception as e:
+            logger.error(f"Schema migration failed: {e}")
             raise
 
     def save_checkpoint(self, game_state: dict[str, Any], metadata: dict[str, Any]) -> str:
