@@ -887,7 +887,6 @@ class TestCheckpointManagerUtilityMethods:
 class TestCheckpointManagerUniqueIdentifiers:
     """Test UUID generation uniqueness."""
 
-    @pytest.mark.skip(reason="Test hangs - needs investigation")
     def test_save_checkpoint_generates_unique_identifiers(
         self, checkpoint_manager, sample_game_state, sample_metadata
     ) -> None:
