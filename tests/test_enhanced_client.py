@@ -22,6 +22,7 @@ from claudelearnspokemon.retry_manager import RetryConfig
 from claudelearnspokemon.session_recovery import SessionConfig, SessionState
 
 
+@pytest.mark.medium
 class TestEnhancedPokemonGymClient:
     """Test suite for EnhancedPokemonGymClient functionality."""
 

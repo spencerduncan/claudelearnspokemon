@@ -24,6 +24,7 @@ from claudelearnspokemon.session_recovery import (
 )
 
 
+@pytest.mark.fast
 class TestSessionRecovery:
     """Test suite for SessionRecovery functionality."""
 

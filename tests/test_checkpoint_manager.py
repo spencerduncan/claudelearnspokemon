@@ -103,6 +103,7 @@ def sample_metadata():
     }
 
 
+@pytest.mark.medium
 class TestCheckpointManagerCore:
     """Test core save/load functionality."""
 
@@ -274,6 +275,7 @@ class TestCheckpointManagerCore:
             checkpoint_manager.load_checkpoint("nonexistent-id")
 
 
+@pytest.mark.medium
 class TestCheckpointValidation:
     """Test checkpoint integrity validation."""
 
@@ -320,6 +322,7 @@ class TestCheckpointValidation:
         assert checkpoint_manager.validate_checkpoint(None) is False
 
 
+@pytest.mark.medium
 class TestCheckpointPruning:
     """Test checkpoint pruning algorithm."""
 
@@ -433,6 +436,7 @@ class TestCheckpointPruning:
             checkpoint_manager.prune_checkpoints(-1)
 
 
+@pytest.mark.medium
 class TestCheckpointListing:
     """Test checkpoint listing and querying."""
 
@@ -478,6 +482,7 @@ class TestCheckpointListing:
         assert not_found_id == ""
 
 
+@pytest.mark.medium
 class TestMetricsAndObservability:
     """Test metrics collection and observability features."""
 
@@ -538,6 +543,7 @@ class TestMetricsAndObservability:
         assert metrics["corruption_events"] > 0
 
 
+@pytest.mark.medium
 class TestErrorHandling:
     """Test error handling and edge cases."""
 
@@ -704,6 +710,7 @@ class TestErrorHandling:
         assert len(set(results)) == 5  # All unique IDs
 
 
+@pytest.mark.medium
 class TestCheckpointManagerPerformance:
     """Test performance requirements."""
 
@@ -782,6 +789,7 @@ class TestCheckpointManagerPerformance:
         assert loaded_state == large_state
 
 
+@pytest.mark.medium
 class TestCheckpointManagerAtomicOperations:
     """Test atomic write operations."""
 
@@ -824,6 +832,7 @@ class TestCheckpointManagerAtomicOperations:
         assert len(temp_files) == 0, f"Temp files not cleaned up: {temp_files}"
 
 
+@pytest.mark.medium
 class TestCheckpointManagerUtilityMethods:
     """Test utility methods."""
 
@@ -884,6 +893,7 @@ class TestCheckpointManagerUtilityMethods:
         assert "avg_load_time_ms" in stats
 
 
+@pytest.mark.medium
 class TestCheckpointManagerUniqueIdentifiers:
     """Test UUID generation uniqueness."""
 
