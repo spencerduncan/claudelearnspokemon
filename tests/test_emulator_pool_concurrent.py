@@ -8,11 +8,52 @@ import random
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 from unittest.mock import Mock, patch
 
 import pytest
 
-from claudelearnspokemon.emulator_pool import EmulatorPool
+from claudelearnspokemon.emulator_pool import EmulatorPool, EmulatorPoolError
+
+
+class FastTimeoutContext:
+    """High-performance timeout context that eliminates background threads"""
+
+    def __init__(self, timeout_seconds):
+        self.timeout_seconds = timeout_seconds
+        self.start_time = None
+
+    def __enter__(self):
+        self.start_time = time.time()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        elapsed = time.time() - self.start_time
+        if elapsed < self.timeout_seconds:
+            # Sleep for remaining time to simulate timeout without threads
+            remaining = self.timeout_seconds - elapsed
+            time.sleep(remaining)
+        return False
+
+    def check_timeout(self):
+        """Check if timeout has been reached"""
+        if self.start_time is None:
+            return False
+        return (time.time() - self.start_time) >= self.timeout_seconds
+
+
+@contextmanager
+def managed_thread(target, args=(), timeout=10.0):
+    """Context manager for thread lifecycle with timeout and cleanup"""
+    thread = threading.Thread(target=target, args=args)
+    thread.start()
+    try:
+        yield thread
+    finally:
+        thread.join(timeout=timeout)
+        if thread.is_alive():
+            # Thread didn't complete in time - this is a test failure
+            raise AssertionError(f"Thread {thread.name} failed to complete within {timeout}s")
 
 
 @pytest.mark.slow
@@ -62,8 +103,8 @@ class TestEmulatorPoolConcurrentAccess(unittest.TestCase):
             acquire_time = time.time()
 
             if client is not None:
-                # Hold the emulator briefly
-                time.sleep(0.1 + random.uniform(0, 0.1))
+                # Hold the emulator briefly - optimized timing
+                time.sleep(0.05 + random.uniform(0, 0.02))
 
                 self.pool.release(client)
                 release_time = time.time()
@@ -117,7 +158,7 @@ class TestEmulatorPoolConcurrentAccess(unittest.TestCase):
             self.assertLess(
                 result["acquire_time"], 2.0, "Acquisition should be fast with available emulators"
             )
-            self.assertGreater(result["hold_time"], 0.1, "Should hold emulator for expected time")
+            self.assertGreater(result["hold_time"], 0.05, "Should hold emulator for expected time")
 
     def test_blocks_acquisition_when_all_busy(self):
         """Test acquisition blocks when all emulators are in use"""
@@ -128,7 +169,7 @@ class TestEmulatorPoolConcurrentAccess(unittest.TestCase):
             client = self.pool.acquire(timeout=2.0)
             if client:
                 block_test_results.append(f"holder_{thread_id}_acquired")
-                time.sleep(1.0)  # Hold for 1 second
+                time.sleep(0.3)  # Optimized hold time
                 self.pool.release(client)
                 block_test_results.append(f"holder_{thread_id}_released")
 
@@ -161,9 +202,12 @@ class TestEmulatorPoolConcurrentAccess(unittest.TestCase):
             waiter_threads.append(thread)
             thread.start()
 
-        # Wait for all threads
-        for thread in holder_threads + waiter_threads:
-            thread.join(timeout=10.0)
+        # Wait for all threads with timeout management
+        all_threads = holder_threads + waiter_threads
+        for thread in all_threads:
+            thread.join(timeout=3.0)
+            if thread.is_alive():
+                self.fail(f"Thread {thread.name} did not complete within timeout")
 
         # Verify blocking behavior
         acquired_messages = [msg for msg in block_test_results if "acquired" in msg]
@@ -176,7 +220,7 @@ class TestEmulatorPoolConcurrentAccess(unittest.TestCase):
         waited_messages = [
             msg
             for msg in waiter_messages
-            if "after_" in msg and (float(msg.split("after_")[1].split("s")[0]) > 0.5)
+            if "after_" in msg and (float(msg.split("after_")[1].split("s")[0]) > 0.1)
         ]
         self.assertGreater(len(waited_messages), 0, "Some waiters should have been blocked")
 
@@ -192,8 +236,8 @@ class TestEmulatorPoolConcurrentAccess(unittest.TestCase):
                 if client:
                     clients.append(client)
 
-            # Hold for 3 seconds
-            time.sleep(3.0)
+            # Hold for optimized duration
+            time.sleep(1.5)
 
             # Release all
             for client in clients:
@@ -202,17 +246,22 @@ class TestEmulatorPoolConcurrentAccess(unittest.TestCase):
             return len(clients)
 
         def test_timeout(thread_id, timeout_seconds):
-            """Test acquisition with specific timeout"""
+            """Test acquisition with specific timeout - fixed exception handling"""
             start_time = time.time()
-            client = self.pool.acquire(timeout=timeout_seconds)
-            elapsed = time.time() - start_time
+            client = None
+            try:
+                client = self.pool.acquire(timeout=timeout_seconds)
+                success = True
+            except EmulatorPoolError:
+                success = False
 
+            elapsed = time.time() - start_time
             timeout_results.append(
                 {
                     "thread_id": thread_id,
                     "timeout_requested": timeout_seconds,
                     "elapsed_time": elapsed,
-                    "success": client is not None,
+                    "success": success,
                 }
             )
 
@@ -226,30 +275,35 @@ class TestEmulatorPoolConcurrentAccess(unittest.TestCase):
         # Give time for occupation
         time.sleep(0.2)
 
-        # Start timeout test threads
+        # Start timeout test threads with faster timeouts
         test_threads = []
-        timeout_values = [0.5, 1.0, 1.5, 2.0]
+        timeout_values = [0.2, 0.4, 0.6, 0.8]
 
         for i, timeout in enumerate(timeout_values):
             thread = threading.Thread(target=test_timeout, args=(i, timeout))
             test_threads.append(thread)
             thread.start()
 
-        # Wait for all threads
-        occupier.join(timeout=10.0)
-        for thread in test_threads:
-            thread.join(timeout=10.0)
+        # Wait for all threads with proper timeout management
+        occupier.join(timeout=5.0)
+        if occupier.is_alive():
+            self.fail("Occupier thread did not complete")
 
-        # Verify timeout behavior
+        for thread in test_threads:
+            thread.join(timeout=3.0)
+            if thread.is_alive():
+                self.fail("Test thread did not complete")
+
+        # Verify timeout behavior with optimized thresholds
         for result in timeout_results:
-            if result["timeout_requested"] < 2.5:  # Should timeout before release
+            if result["timeout_requested"] < 1.2:  # Should timeout before release
                 self.assertFalse(
                     result["success"], f"Thread {result['thread_id']} should have timed out"
                 )
                 self.assertAlmostEqual(
                     result["elapsed_time"],
                     result["timeout_requested"],
-                    delta=0.5,
+                    delta=0.3,
                     msg="Timeout should be respected",
                 )
 
@@ -265,31 +319,34 @@ class TestEmulatorPoolConcurrentAccess(unittest.TestCase):
                 if client:
                     clients.append(client)
 
-            # Hold for a bit to let waiters queue up
-            time.sleep(1.0)
+            # Hold for optimized time to let waiters queue up
+            time.sleep(0.4)
 
-            # Release one at a time with small delays
+            # Release one at a time with optimized delays
             for client in clients:
                 self.pool.release(client)
-                time.sleep(0.1)  # Small delay between releases
+                time.sleep(0.05)  # Optimized delay between releases
 
         def waiter_thread(thread_id):
             """Wait for emulator to become available"""
             start_time = time.time()
-            client = self.pool.acquire(timeout=8.0)
-            acquire_time = time.time()
-
-            if client:
-                acquisition_results.append(
-                    {
-                        "thread_id": thread_id,
-                        "acquire_time": acquire_time,
-                        "wait_time": acquire_time - start_time,
-                    }
-                )
-                # Hold briefly
-                time.sleep(0.05)
-                self.pool.release(client)
+            try:
+                client = self.pool.acquire(timeout=3.0)  # Reduced timeout
+                acquire_time = time.time()
+                if client:
+                    acquisition_results.append(
+                        {
+                            "thread_id": thread_id,
+                            "acquire_time": acquire_time,
+                            "wait_time": acquire_time - start_time,
+                        }
+                    )
+                    # Hold briefly
+                    time.sleep(0.02)  # Minimized hold time
+                    self.pool.release(client)
+            except EmulatorPoolError:
+                # Expected timeout - no action needed
+                pass
 
         # Start occupier
         occupier = threading.Thread(target=occupy_all_emulators)
@@ -303,19 +360,24 @@ class TestEmulatorPoolConcurrentAccess(unittest.TestCase):
             thread = threading.Thread(target=waiter_thread, args=(i,))
             waiter_threads.append(thread)
             thread.start()
-            time.sleep(0.1)  # Small delay between starts
+            time.sleep(0.02)  # Optimized delay between starts
 
-        # Wait for completion
-        occupier.join(timeout=15.0)
+        # Wait for completion with optimized timeouts
+        occupier.join(timeout=5.0)
+        if occupier.is_alive():
+            self.fail("Occupier thread did not complete")
+
         for thread in waiter_threads:
-            thread.join(timeout=15.0)
+            thread.join(timeout=3.0)
+            if thread.is_alive():
+                self.fail("Waiter thread did not complete")
 
         # Verify at least one waiter succeeded
         self.assertGreaterEqual(len(acquisition_results), 1, "At least one waiter should succeed")
 
-        # Verify reasonable wait times
+        # Verify reasonable wait times with optimized threshold
         for result in acquisition_results:
-            self.assertLess(result["wait_time"], 5.0, "Wait time should be reasonable")
+            self.assertLess(result["wait_time"], 2.0, "Wait time should be reasonable")
 
     def test_graceful_cleanup_on_timeout(self):
         """Test cleanup when acquisition times out"""
@@ -334,8 +396,8 @@ class TestEmulatorPoolConcurrentAccess(unittest.TestCase):
             status = self.pool.get_status()
             cleanup_results.append(f"occupied_count:{status['busy_count']}")
 
-            # Hold for longer than timeout tests
-            time.sleep(3.0)
+            # Hold for optimized duration longer than timeout tests
+            time.sleep(1.2)
 
             # Check queue status (should have been cleaned up)
             status = self.pool.get_status()
@@ -350,9 +412,14 @@ class TestEmulatorPoolConcurrentAccess(unittest.TestCase):
             cleanup_results.append(f"final_available:{status['available_count']}")
 
         def timeout_requester(thread_id):
-            """Make request that will timeout"""
-            client = self.pool.acquire(timeout=1.0)  # Will timeout
-            cleanup_results.append(f"requester_{thread_id}_result:{client is not None}")
+            """Make request that will timeout - fixed exception handling"""
+            try:
+                client = self.pool.acquire(timeout=0.5)  # Will timeout faster
+                cleanup_results.append(f"requester_{thread_id}_result:{client is not None}")
+                if client:
+                    self.pool.release(client)
+            except EmulatorPoolError:
+                cleanup_results.append(f"requester_{thread_id}_result:False")
 
         # Start occupier
         occupier = threading.Thread(target=occupy_and_check_cleanup)
@@ -367,10 +434,15 @@ class TestEmulatorPoolConcurrentAccess(unittest.TestCase):
             requesters.append(thread)
             thread.start()
 
-        # Wait for completion
+        # Wait for completion with proper thread management
         for thread in requesters:
-            thread.join(timeout=15.0)
-        occupier.join(timeout=15.0)
+            thread.join(timeout=3.0)
+            if thread.is_alive():
+                self.fail("Requester thread did not complete")
+
+        occupier.join(timeout=5.0)
+        if occupier.is_alive():
+            self.fail("Occupier thread did not complete")
 
         # Verify cleanup
         occupied_msg = [msg for msg in cleanup_results if "occupied_count:" in msg][0]
