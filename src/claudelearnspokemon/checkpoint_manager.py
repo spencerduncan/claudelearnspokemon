@@ -1,29 +1,26 @@
 """
-CheckpointManager - Manages saved game states with metadata.
+CheckpointManager - Manages saved game states with metadata management.
 
-Provides checkpoint save/load functionality with LZ4 compression,
-basic querying capabilities, and deterministic replay support.
-
-Features:
-- LZ4 compression for efficient storage
-- UUID-based checkpoint identifiers
-- Basic metadata querying
-- Atomic write operations
-- Performance target: <500ms for save/load operations
+Provides checkpoint save/load functionality with comprehensive metadata storage,
+validation, and fast querying capabilities for deterministic replay and experimentation.
+Uses LZ4 compression for optimal performance.
 """
 
+import hashlib
 import json
+import logging
 import os
+import sqlite3
 import time
 import uuid
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import lz4.frame
-import structlog
 
-logger = structlog.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class CheckpointError(Exception):
@@ -44,42 +41,107 @@ class CheckpointCorruptionError(CheckpointError):
     pass
 
 
+@dataclass
+class CheckpointMetadata:
+    """Structured metadata for checkpoints."""
+
+    checkpoint_id: str
+    created_at: str  # ISO format timestamp
+    game_location: str
+    progress_markers: list[str]
+    performance_metrics: dict[str, float]
+    tags: list[str]
+    custom_fields: dict[str, Any]
+    file_size: int = 0
+    checksum: str = ""
+    schema_version: int = 1
+
+
 class CheckpointManager:
     """
-    Manages Pokemon game state checkpoints with LZ4 compression.
+    Manages saved game states with metadata management and LZ4 compression.
 
-    Provides atomic save/load operations with UUID-based identifiers
-    and basic metadata querying functionality.
+    Provides compression, metadata management, indexing, and fast querying
+    for efficient checkpoint operations across parallel executions.
     """
 
-    def __init__(self, checkpoint_dir: str | None = None):
-        """
-        Initialize checkpoint manager.
+    SCHEMA_VERSION = 1
+    METADATA_CACHE_SIZE = 1000
 
+    def __init__(self, checkpoint_dir: str = "checkpoints"):
+        """
+        Initialize CheckpointManager with directory and metadata database.
         Args:
-            checkpoint_dir: Directory for checkpoint storage.
-                          Defaults to ~/.claudelearnspokemon/checkpoints
+            checkpoint_dir: Directory to store checkpoint files and database
         """
-        if checkpoint_dir is None:
-            self.checkpoint_dir = Path.home() / ".claudelearnspokemon" / "checkpoints"
-        else:
-            self.checkpoint_dir = Path(checkpoint_dir)
+        self.checkpoint_dir = Path(checkpoint_dir)
+        self.checkpoint_dir.mkdir(exist_ok=True)
 
-        # Ensure checkpoint directory exists
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        # Database for metadata indexing
+        self.db_path = self.checkpoint_dir / "metadata.db"
+        self._metadata_cache: dict[str, dict[str, Any]] = {}
+        self._cache_access_times: dict[str, float] = {}
 
         # Performance tracking
         self._save_times: list[float] = []
         self._load_times: list[float] = []
 
-        # Simple metadata cache for basic querying
-        self._metadata_cache: dict[str, dict[str, Any]] = {}
+        self._init_database()
 
-        logger.info("CheckpointManager initialized", checkpoint_dir=str(self.checkpoint_dir))
+        # Verify database was created successfully
+        if not self.db_path.exists():
+            raise RuntimeError(f"Failed to create database file at {self.db_path}")
+
+        logger.info(f"CheckpointManager initialized with directory: {self.checkpoint_dir}")
+
+    def _init_database(self) -> None:
+        """Initialize SQLite database for metadata indexing."""
+        try:
+            logger.info(f"Creating database at: {self.db_path}")
+            with sqlite3.connect(self.db_path) as conn:
+                logger.info("Database connection established")
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS checkpoint_metadata (
+                        checkpoint_id TEXT PRIMARY KEY,
+                        created_at TEXT NOT NULL,
+                        game_location TEXT,
+                        progress_markers TEXT,
+                        performance_metrics TEXT,
+                        tags TEXT,
+                        custom_fields TEXT,
+                        file_size INTEGER,
+                        checksum TEXT,
+                        schema_version INTEGER DEFAULT 1
+                    )
+                    """
+                )
+                logger.info("Main table created")
+
+                # Create indexes for fast querying
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_created_at ON checkpoint_metadata(created_at)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_game_location ON checkpoint_metadata(game_location)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_checksum ON checkpoint_metadata(checksum)"
+                )
+                logger.info("Indexes created")
+
+                # Explicit commit to ensure database file is created
+                conn.commit()
+                logger.info("Database committed")
+
+            logger.info(f"Database file exists after init: {self.db_path.exists()}")
+        except Exception as e:
+            logger.error(f"Database initialization failed: {e}")
+            raise
 
     def save_checkpoint(self, game_state: dict[str, Any], metadata: dict[str, Any]) -> str:
         """
-        Save game state with metadata to compressed checkpoint file.
+        Save game state with metadata to LZ4 compressed checkpoint file.
 
         Args:
             game_state: Complete game state dictionary
@@ -98,20 +160,13 @@ class CheckpointManager:
         checkpoint_file = self.checkpoint_dir / f"{checkpoint_id}.lz4"
 
         try:
-            # Add timestamps and ID to metadata
-            enhanced_metadata = {
-                **metadata,
-                "checkpoint_id": checkpoint_id,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
-
             # Prepare checkpoint data structure
             checkpoint_data = {
                 "version": "1.0",
                 "checkpoint_id": checkpoint_id,
                 "timestamp": time.time(),
                 "game_state": game_state,
-                "metadata": enhanced_metadata,
+                "metadata": metadata,
             }
 
             # Serialize to JSON
@@ -138,35 +193,45 @@ class CheckpointManager:
                     temp_file.unlink()
                 raise
 
-            # Cache metadata for querying
-            self._metadata_cache[checkpoint_id] = enhanced_metadata
+            # Create structured metadata
+            structured_metadata = CheckpointMetadata(
+                checkpoint_id=checkpoint_id,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                game_location=metadata.get("game_location", ""),
+                progress_markers=metadata.get("progress_markers", []),
+                performance_metrics=metadata.get("performance_metrics", {}),
+                tags=metadata.get("tags", []),
+                custom_fields=metadata.get("custom_fields", {}),
+                file_size=len(compressed_data),
+                checksum=self._calculate_checksum_from_data(compressed_data),
+                schema_version=self.SCHEMA_VERSION,
+            )
+
+            # Store metadata
+            self._store_metadata(structured_metadata)
 
             # Track performance
             duration = time.monotonic() - start_time
             self._save_times.append(duration)
 
             logger.info(
-                "Checkpoint saved",
-                checkpoint_id=checkpoint_id,
-                duration_ms=int(duration * 1000),
-                compressed_size=len(compressed_data),
-                original_size=len(json_bytes),
+                f"Checkpoint saved: {checkpoint_id} at {structured_metadata.game_location}, "
+                f"duration: {int(duration * 1000)}ms, compressed: {len(compressed_data)} bytes, "
+                f"original: {len(json_bytes)} bytes"
             )
 
             return checkpoint_id
 
         except Exception as e:
             logger.error(
-                "Failed to save checkpoint",
-                error=str(e),
-                checkpoint_id=checkpoint_id,
-                duration_ms=int((time.monotonic() - start_time) * 1000),
+                f"Failed to save checkpoint {checkpoint_id}: {e}, "
+                f"duration: {int((time.monotonic() - start_time) * 1000)}ms"
             )
             raise CheckpointError(f"Failed to save checkpoint: {e}") from e
 
     def load_checkpoint(self, checkpoint_id: str) -> dict[str, Any]:
         """
-        Load game state from compressed checkpoint file.
+        Load game state from LZ4 compressed checkpoint file.
 
         Args:
             checkpoint_id: Checkpoint identifier (UUID string)
@@ -175,8 +240,9 @@ class CheckpointManager:
             Game state dictionary
 
         Raises:
-            CheckpointNotFoundError: If checkpoint file doesn't exist
-            CheckpointCorruptionError: If checkpoint is corrupted or invalid
+            CheckpointNotFoundError: If checkpoint doesn't exist
+            CheckpointCorruptionError: If checkpoint is corrupted
+            CheckpointError: If load operation fails
         """
         start_time = time.monotonic()
 
@@ -231,19 +297,13 @@ class CheckpointManager:
             # Extract game state
             game_state: dict[str, Any] = checkpoint_data["game_state"]
 
-            # Cache metadata for future queries
-            self._metadata_cache[checkpoint_id] = checkpoint_data["metadata"]
-
             # Track performance
             duration = time.monotonic() - start_time
             self._load_times.append(duration)
 
             logger.info(
-                "Checkpoint loaded",
-                checkpoint_id=checkpoint_id,
-                duration_ms=int(duration * 1000),
-                compressed_size=len(compressed_data),
-                decompressed_size=len(json_bytes),
+                f"Checkpoint loaded: {checkpoint_id}, duration: {int(duration * 1000)}ms, "
+                f"compressed: {len(compressed_data)} bytes, decompressed: {len(json_bytes)} bytes"
             )
 
             return game_state
@@ -253,119 +313,262 @@ class CheckpointManager:
             raise
         except Exception as e:
             logger.error(
-                "Failed to load checkpoint",
-                error=str(e),
-                checkpoint_id=checkpoint_id,
-                duration_ms=int((time.monotonic() - start_time) * 1000),
+                f"Failed to load checkpoint {checkpoint_id}: {e}, "
+                f"duration: {int((time.monotonic() - start_time) * 1000)}ms"
             )
             raise CheckpointError(f"Failed to load checkpoint {checkpoint_id}: {e}") from e
 
     def get_checkpoint_metadata(self, checkpoint_id: str) -> dict[str, Any] | None:
         """
-        Get metadata for a specific checkpoint.
+        Get metadata for a checkpoint with caching support.
 
         Args:
             checkpoint_id: Unique identifier of checkpoint
 
         Returns:
-            Metadata dictionary or None if not found
+            Metadata dictionary or None if checkpoint not found
         """
         # Check cache first
+        current_time = time.time()
         if checkpoint_id in self._metadata_cache:
-            return self._metadata_cache[checkpoint_id]
-
-        # Load from file if not in cache
-        checkpoint_file = self.checkpoint_dir / f"{checkpoint_id}.lz4"
-        if not checkpoint_file.exists():
-            return None
+            self._cache_access_times[checkpoint_id] = current_time
+            return self._metadata_cache[checkpoint_id].copy()
 
         try:
-            # Load checkpoint to get metadata
-            with checkpoint_file.open("rb") as f:
-                compressed_data = f.read()
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute(
+                    "SELECT * FROM checkpoint_metadata WHERE checkpoint_id = ?", (checkpoint_id,)
+                )
+                row = cursor.fetchone()
 
-            json_bytes = lz4.frame.decompress(compressed_data)
-            json_data = json_bytes.decode("utf-8")
-            checkpoint_data = json.loads(json_data)
+                if row is None:
+                    return None
 
-            metadata: dict[str, Any] = checkpoint_data.get("metadata", {})
+                # Convert to dict and parse JSON fields
+                metadata = dict(row)
+                metadata["progress_markers"] = json.loads(metadata["progress_markers"] or "[]")
+                metadata["performance_metrics"] = json.loads(
+                    metadata["performance_metrics"] or "{}"
+                )
+                metadata["tags"] = json.loads(metadata["tags"] or "[]")
+                metadata["custom_fields"] = json.loads(metadata["custom_fields"] or "{}")
 
-            # Cache for future use
-            self._metadata_cache[checkpoint_id] = metadata
+                # Update cache
+                self._update_cache(checkpoint_id, metadata)
 
-            return metadata
+                return metadata
 
         except Exception as e:
-            logger.warning(f"Failed to load metadata for {checkpoint_id}: {e}")
+            logger.error(f"Failed to get metadata for {checkpoint_id}: {e}")
             return None
 
-    def list_checkpoints(
-        self,
-        criteria: dict[str, Any] | None = None,
-        limit: int | None = None,
-    ) -> list[dict[str, Any]]:
+    def update_checkpoint_metadata(self, checkpoint_id: str, updates: dict[str, Any]) -> bool:
         """
-        List checkpoints with basic filtering.
+        Update metadata for an existing checkpoint.
 
         Args:
-            criteria: Simple filter criteria:
-                - location: Substring match on game location
-                - tags: List of tags to match (any)
-                - created_after: ISO date string
-            limit: Maximum results to return
+            checkpoint_id: Unique identifier of checkpoint
+            updates: Dictionary of fields to update
 
         Returns:
-            List of checkpoint metadata dictionaries
+            True if update successful, False otherwise
         """
-        results = []
+        try:
+            # Get current metadata first
+            current_metadata = self.get_checkpoint_metadata(checkpoint_id)
+            if current_metadata is None:
+                logger.error(f"Cannot update metadata: checkpoint {checkpoint_id} not found")
+                return False
 
-        # Scan checkpoint files
-        for checkpoint_file in self.checkpoint_dir.glob("*.lz4"):
-            checkpoint_id = checkpoint_file.stem
+            # Apply updates
+            current_metadata.update(updates)
 
-            metadata = self.get_checkpoint_metadata(checkpoint_id)
-            if not metadata:
-                continue
+            # Update database
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    """
+                    UPDATE checkpoint_metadata
+                    SET game_location = ?, progress_markers = ?, performance_metrics = ?,
+                        tags = ?, custom_fields = ?
+                    WHERE checkpoint_id = ?
+                    """,
+                    (
+                        current_metadata.get("game_location"),
+                        json.dumps(current_metadata.get("progress_markers", [])),
+                        json.dumps(current_metadata.get("performance_metrics", {})),
+                        json.dumps(current_metadata.get("tags", [])),
+                        json.dumps(current_metadata.get("custom_fields", {})),
+                        checkpoint_id,
+                    ),
+                )
+                conn.commit()
 
-            # Apply simple filters
-            if criteria:
-                if "location" in criteria:
-                    location = metadata.get("game_location", "")
-                    if criteria["location"].lower() not in location.lower():
-                        continue
+            # Update cache
+            if checkpoint_id in self._metadata_cache:
+                self._metadata_cache[checkpoint_id] = current_metadata
 
-                if "tags" in criteria:
-                    metadata_tags = metadata.get("tags", [])
-                    if not any(tag in metadata_tags for tag in criteria["tags"]):
-                        continue
+            logger.info(f"Updated metadata for checkpoint {checkpoint_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to update metadata for {checkpoint_id}: {e}")
+            return False
+
+    def search_checkpoints(self, criteria: dict[str, Any]) -> list[dict[str, Any]]:
+        """
+        Search checkpoints based on metadata criteria.
+
+        Args:
+            criteria: Search criteria dictionary
+
+        Returns:
+            List of matching checkpoint metadata
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+
+                query = "SELECT * FROM checkpoint_metadata WHERE 1=1"
+                params = []
+
+                # Build dynamic query based on criteria
+                if "game_location" in criteria:
+                    query += " AND game_location LIKE ?"
+                    params.append(f"%{criteria['game_location']}%")
+
+                if "tags" in criteria and criteria["tags"]:
+                    for tag in criteria["tags"]:
+                        query += " AND tags LIKE ?"
+                        params.append(f'%"{tag}"%')
 
                 if "created_after" in criteria:
-                    created_at = metadata.get("created_at", "")
-                    if created_at < criteria["created_after"]:
-                        continue
+                    query += " AND created_at > ?"
+                    params.append(criteria["created_after"])
 
-            results.append(metadata)
+                if "created_before" in criteria:
+                    query += " AND created_at < ?"
+                    params.append(criteria["created_before"])
 
-        # Sort by creation time (newest first)
-        results.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+                query += " ORDER BY created_at DESC"
 
-        # Apply limit
-        if limit:
-            results = results[:limit]
+                # Apply limit if specified
+                if "limit" in criteria:
+                    query += " LIMIT ?"
+                    params.append(criteria["limit"])
 
-        return results
+                cursor = conn.execute(query, params)
+                rows = cursor.fetchall()
 
-    def count_checkpoints(self, criteria: dict[str, Any] | None = None) -> int:
+                results = []
+                for row in rows:
+                    metadata = dict(row)
+                    # Parse JSON fields
+                    metadata["progress_markers"] = json.loads(metadata["progress_markers"] or "[]")
+                    metadata["performance_metrics"] = json.loads(
+                        metadata["performance_metrics"] or "{}"
+                    )
+                    metadata["tags"] = json.loads(metadata["tags"] or "[]")
+                    metadata["custom_fields"] = json.loads(metadata["custom_fields"] or "{}")
+                    results.append(metadata)
+
+                return results
+
+        except Exception as e:
+            logger.error(f"Failed to search checkpoints: {e}")
+            return []
+
+    def validate_checkpoint(self, checkpoint_id: str) -> bool:
         """
-        Count checkpoints matching criteria.
+        Validate checkpoint integrity using checksum.
 
         Args:
-            criteria: Same filter criteria as list_checkpoints
+            checkpoint_id: Unique identifier of checkpoint
 
         Returns:
-            Total count of matching checkpoints
+            True if checkpoint is valid, False otherwise
         """
-        return len(self.list_checkpoints(criteria))
+        try:
+            checkpoint_file = self.checkpoint_dir / f"{checkpoint_id}.lz4"
+            if not checkpoint_file.exists():
+                return False
+
+            # Get stored checksum
+            metadata = self.get_checkpoint_metadata(checkpoint_id)
+            if not metadata or "checksum" not in metadata:
+                return False
+
+            stored_checksum: str = metadata["checksum"]
+
+            # Calculate current checksum
+            current_checksum = self._calculate_checksum(checkpoint_file)
+
+            return stored_checksum == current_checksum
+
+        except Exception as e:
+            logger.error(f"Failed to validate checkpoint {checkpoint_id}: {e}")
+            return False
+
+    def list_checkpoints(self, criteria: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """
+        List all checkpoints with optional filtering.
+
+        Args:
+            criteria: Optional filtering criteria
+
+        Returns:
+            List of checkpoint metadata
+        """
+        if criteria is None:
+            criteria = {}
+
+        return self.search_checkpoints(criteria)
+
+    def find_nearest_checkpoint(self, location: str) -> str | None:
+        """
+        Find the most recent checkpoint near a given location.
+
+        Args:
+            location: Game location to search near
+
+        Returns:
+            Checkpoint ID of nearest checkpoint, or None if none found
+        """
+        results = self.search_checkpoints({"game_location": location, "limit": 1})
+
+        return results[0]["checkpoint_id"] if results else None
+
+    def get_performance_stats(self) -> dict[str, Any]:
+        """
+        Get performance statistics for checkpoint operations.
+
+        Returns:
+            Dictionary with performance metrics
+        """
+        stats = {
+            "save_operations": len(self._save_times),
+            "load_operations": len(self._load_times),
+        }
+
+        if self._save_times:
+            stats.update(
+                {
+                    "avg_save_time_ms": int(sum(self._save_times) * 1000 / len(self._save_times)),
+                    "max_save_time_ms": int(max(self._save_times) * 1000),
+                    "min_save_time_ms": int(min(self._save_times) * 1000),
+                }
+            )
+
+        if self._load_times:
+            stats.update(
+                {
+                    "avg_load_time_ms": int(sum(self._load_times) * 1000 / len(self._load_times)),
+                    "max_load_time_ms": int(max(self._load_times) * 1000),
+                    "min_load_time_ms": int(min(self._load_times) * 1000),
+                }
+            )
+
+        return stats
 
     def checkpoint_exists(self, checkpoint_id: str) -> bool:
         """
@@ -400,34 +603,67 @@ class CheckpointManager:
 
         return checkpoint_file.stat().st_size
 
-    def get_performance_stats(self) -> dict[str, Any]:
-        """
-        Get performance statistics for checkpoint operations.
+    def _store_metadata(self, metadata: CheckpointMetadata) -> None:
+        """Store structured metadata in database."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO checkpoint_metadata
+                    (checkpoint_id, created_at, game_location, progress_markers,
+                     performance_metrics, tags, custom_fields, file_size, checksum, schema_version)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        metadata.checkpoint_id,
+                        metadata.created_at,
+                        metadata.game_location,
+                        json.dumps(metadata.progress_markers),
+                        json.dumps(metadata.performance_metrics),
+                        json.dumps(metadata.tags),
+                        json.dumps(metadata.custom_fields),
+                        metadata.file_size,
+                        metadata.checksum,
+                        metadata.schema_version,
+                    ),
+                )
+                conn.commit()
 
-        Returns:
-            Dictionary with performance metrics
-        """
-        stats = {
-            "save_operations": len(self._save_times),
-            "load_operations": len(self._load_times),
-        }
+            # Update cache
+            metadata_dict = asdict(metadata)
+            self._update_cache(metadata.checkpoint_id, metadata_dict)
 
-        if self._save_times:
-            stats.update(
-                {
-                    "avg_save_time_ms": int(sum(self._save_times) * 1000 / len(self._save_times)),
-                    "max_save_time_ms": int(max(self._save_times) * 1000),
-                    "min_save_time_ms": int(min(self._save_times) * 1000),
-                }
+        except Exception as e:
+            logger.error(f"Failed to store metadata for {metadata.checkpoint_id}: {e}")
+            raise
+
+    def _update_cache(self, checkpoint_id: str, metadata: dict[str, Any]) -> None:
+        """Update metadata cache with LRU eviction."""
+        current_time = time.time()
+
+        # Add to cache
+        self._metadata_cache[checkpoint_id] = metadata
+        self._cache_access_times[checkpoint_id] = current_time
+
+        # Evict if cache too large
+        if len(self._metadata_cache) > self.METADATA_CACHE_SIZE:
+            # Find least recently used item
+            oldest_id = min(
+                self._cache_access_times.keys(), key=lambda k: self._cache_access_times[k]
             )
+            del self._metadata_cache[oldest_id]
+            del self._cache_access_times[oldest_id]
 
-        if self._load_times:
-            stats.update(
-                {
-                    "avg_load_time_ms": int(sum(self._load_times) * 1000 / len(self._load_times)),
-                    "max_load_time_ms": int(max(self._load_times) * 1000),
-                    "min_load_time_ms": int(min(self._load_times) * 1000),
-                }
-            )
+    def _calculate_checksum(self, file_path: Path) -> str:
+        """Calculate SHA-256 checksum of file."""
+        hasher = hashlib.sha256()
+        with file_path.open("rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
 
-        return stats
+    def _calculate_checksum_from_data(self, data: bytes) -> str:
+        """Calculate SHA-256 checksum from data."""
+        hasher = hashlib.sha256()
+        hasher.update(data)
+        return hasher.hexdigest()
