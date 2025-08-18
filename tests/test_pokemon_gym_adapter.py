@@ -27,7 +27,6 @@ from claudelearnspokemon.pokemon_gym_adapter import (
 
 
 @pytest.mark.fast
-@pytest.mark.medium
 class TestPokemonGymAdapterInitialization:
     """Test adapter initialization and configuration."""
 
@@ -61,7 +60,6 @@ class TestPokemonGymAdapterInitialization:
         assert adapter.state_timeout <= 5.0  # Fast state queries
 
 
-@pytest.mark.fast
 @pytest.mark.medium
 class TestInputTranslation:
     """Test input sequence translation from batch to sequential actions."""
@@ -172,7 +170,6 @@ class TestInputTranslation:
         assert parsed == expected
 
 
-@pytest.mark.fast
 @pytest.mark.medium
 class TestStateMapping:
     """Test state mapping from benchflow-ai format to our expected format."""
@@ -263,7 +260,6 @@ class TestStateMapping:
         assert "screen_data" in result
 
 
-@pytest.mark.fast
 @pytest.mark.medium
 class TestSessionManagement:
     """Test session lifecycle management."""
@@ -377,7 +373,6 @@ class TestSessionManagement:
             assert session_manager.session_id == "test-session"
 
 
-@pytest.mark.fast
 @pytest.mark.medium
 class TestErrorConditionsAndRecovery:
     """Test error handling and recovery mechanisms."""
@@ -483,7 +478,6 @@ class TestErrorConditionsAndRecovery:
         assert adapter.is_healthy() is False
 
 
-@pytest.mark.fast
 @pytest.mark.medium
 class TestPerformanceBenchmarks:
     """Test performance requirements and benchmarks."""
@@ -559,7 +553,6 @@ class TestPerformanceBenchmarks:
 
 
 @pytest.mark.fast
-@pytest.mark.medium
 class TestCompatibilityLayer:
     """Test compatibility with existing EmulatorPool interface."""
 
@@ -602,7 +595,6 @@ class TestCompatibilityLayer:
 
 
 @pytest.mark.fast
-@pytest.mark.medium
 class TestFactoryPattern:
     """Test factory methods for adapter creation."""
 
@@ -648,7 +640,6 @@ def benchflow_response():
     }
 
 
-@pytest.mark.fast
 @pytest.mark.medium
 class TestEdgeCases:
     """Test edge cases and boundary conditions."""
