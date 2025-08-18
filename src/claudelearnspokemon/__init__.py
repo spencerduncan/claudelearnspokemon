@@ -10,6 +10,15 @@ from .enhanced_client import EnhancedPokemonGymClient
 from .retry_manager import FailureType, RetryConfig, RetryManager, RetryOutcome
 from .session_recovery import SessionConfig, SessionRecovery, SessionRecoveryError, SessionState
 
+# Import compatibility layer components
+try:
+    from .pokemon_gym_adapter import PokemonGymAdapter  # noqa: F401
+    from .pokemon_gym_factory import create_pokemon_client  # noqa: F401
+
+    COMPATIBILITY_LAYER_AVAILABLE = True
+except ImportError:
+    COMPATIBILITY_LAYER_AVAILABLE = False
+
 __all__ = [
     # Core components
     "EmulatorPool",
@@ -31,3 +40,7 @@ __all__ = [
     "SessionRecoveryError",
     "EnhancedPokemonGymClient",
 ]
+
+# Add compatibility layer to exports if available
+if COMPATIBILITY_LAYER_AVAILABLE:
+    __all__.extend(["PokemonGymAdapter", "create_pokemon_client"])
