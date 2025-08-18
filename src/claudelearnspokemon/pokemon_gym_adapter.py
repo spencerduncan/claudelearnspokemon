@@ -15,6 +15,8 @@ Author: Uncle Bot - Clean Code Implementation
 
 import json
 import logging
+import threading
+import time
 from typing import Any
 
 import requests
@@ -35,6 +37,7 @@ class SessionManager:
     Manages benchflow-ai session lifecycle with automatic recovery.
 
     Implements Single Responsibility Principle - only handles session state.
+    Thread-safe implementation for production use.
     """
 
     def __init__(self, base_url: str, config: dict[str, Any] | None = None):
@@ -43,6 +46,12 @@ class SessionManager:
         self.session_id: str | None = None
         self.is_initialized: bool = False
         self._session = requests.Session()
+
+        # Thread safety for concurrent operations
+        self._lock = threading.RLock()
+
+        # Reset operation tracking for concurrency safety
+        self._reset_in_progress: bool = False
 
     def initialize_session(self) -> dict[str, Any]:
         """Initialize new session with benchflow-ai server."""
@@ -88,9 +97,116 @@ class SessionManager:
             return {"status": "error", "error": str(e)}
 
     def reset_session(self) -> dict[str, Any]:
-        """Reset session by stopping and reinitializing."""
-        self.stop_session()
-        return self.initialize_session()
+        """
+        Reset session by stopping and reinitializing.
+
+        Production-grade implementation with:
+        - Thread safety for concurrent operations
+        - Comprehensive error handling
+        - Performance optimization (<500ms target)
+        - Robust state cleanup
+
+        Returns:
+            Reset result with timing and status information
+
+        Raises:
+            PokemonGymAdapterError: On unrecoverable reset failure
+        """
+        start_time = time.time()
+
+        with self._lock:
+            # Prevent concurrent reset operations
+            if self._reset_in_progress:
+                logger.warning("Reset already in progress, waiting for completion")
+                # Wait for concurrent reset to complete (with timeout)
+                timeout_start = time.time()
+                while self._reset_in_progress and (time.time() - timeout_start) < 10.0:
+                    time.sleep(0.1)
+
+                if self._reset_in_progress:
+                    raise PokemonGymAdapterError(
+                        "Reset operation timed out waiting for concurrent reset"
+                    )
+
+                # Return current session status if already reset
+                return {
+                    "status": "initialized" if self.is_initialized else "stopped",
+                    "session_id": self.session_id,
+                    "message": "Reset completed by concurrent operation",
+                    "reset_time_ms": int((time.time() - start_time) * 1000),
+                }
+
+            self._reset_in_progress = True
+
+            try:
+                logger.info("Starting session reset...")
+
+                # Phase 1: Stop current session (allow failures - session might be dead)
+                stop_result = self._safe_stop_session()
+
+                # Phase 2: Initialize new session (must succeed)
+                init_result = self.initialize_session()
+
+                reset_time_ms = int((time.time() - start_time) * 1000)
+                logger.info(f"Session reset completed in {reset_time_ms}ms")
+
+                # Validate performance requirement
+                if reset_time_ms > 500:
+                    logger.warning(f"Reset took {reset_time_ms}ms - exceeds 500ms target")
+
+                return {
+                    "status": "initialized",
+                    "session_id": self.session_id,
+                    "message": f"Session reset successful in {reset_time_ms}ms",
+                    "reset_time_ms": reset_time_ms,
+                    "stop_result": stop_result,
+                    "init_result": init_result,
+                }
+
+            except Exception as e:
+                logger.error(
+                    f"Session reset failed after {int((time.time() - start_time) * 1000)}ms: {e}"
+                )
+                # Ensure clean state even on failure
+                self.is_initialized = False
+                self.session_id = None
+                raise PokemonGymAdapterError(f"Session reset failed: {e}") from e
+
+            finally:
+                self._reset_in_progress = False
+
+    def _safe_stop_session(self) -> dict[str, Any]:
+        """
+        Safely stop session - allows failures since session might be dead.
+
+        Returns:
+            Stop result dictionary
+        """
+        if not self.is_initialized:
+            return {"status": "not_initialized", "message": "No active session to stop"}
+
+        try:
+            # Use shorter timeout for stop operation to meet performance target
+            response = self._session.post(
+                f"{self.base_url}/stop",
+                json={"session_id": self.session_id},
+                timeout=2.0,  # Reduced from 5s for performance
+            )
+            response.raise_for_status()
+
+            data = response.json()
+            logger.info("Session stopped successfully")
+            return dict(data)
+
+        except Exception as e:
+            logger.warning(f"Session stop failed (continuing with reset): {e}")
+            # Don't raise - session might already be dead
+            return {"status": "stop_failed", "error": str(e)}
+
+        finally:
+            # Always clean up state after stop attempt
+            self.is_initialized = False
+            self.session_id = None
 
     def close(self) -> None:
         """Close HTTP session resources."""
@@ -208,25 +324,193 @@ class PokemonGymAdapter:
         """
         Reset the game to initial state.
 
-        Implements reset via stop/initialize sequence as required by benchflow-ai.
+        Production-grade implementation with:
+        - Thread-safe concurrent operation handling
+        - Comprehensive error recovery and fallback strategies
+        - Performance monitoring (<500ms target)
+        - Configuration preservation across resets
+        - Detailed operational metrics for debugging
+
+        Maps reset_game() to benchflow-ai stop/initialize sequence as required.
 
         Returns:
-            Reset confirmation from emulator
+            Reset confirmation with performance metrics and status details
 
         Raises:
-            PokemonGymAdapterError: On communication failure
+            PokemonGymAdapterError: On unrecoverable reset failure
         """
+        operation_start = time.time()
+
         try:
-            self.session_manager.reset_session()
-            return {
+            logger.info(f"Initiating game reset for emulator on port {self.port}")
+
+            # Preserve original configuration for post-reset validation
+            original_config = dict(self.config) if self.config else {}
+
+            # Execute thread-safe reset with comprehensive error handling
+            reset_result = self.session_manager.reset_session()
+
+            # Validate session state after reset
+            self._validate_reset_state()
+
+            # Verify configuration preservation
+            if self.config != original_config:
+                logger.warning("Configuration changed during reset - this should not happen")
+
+            operation_time_ms = int((time.time() - operation_start) * 1000)
+
+            # Construct production-grade response
+            response = {
                 "status": "initialized",
                 "session_id": self.session_manager.session_id,
-                "message": "Game reset successfully",
+                "message": f"Game reset successfully in {operation_time_ms}ms",
+                "emulator_port": self.port,
+                "container_id": self.container_id,
+                "operation_time_ms": operation_time_ms,
+                "configuration_preserved": self.config == original_config,
+                "reset_details": reset_result,
             }
+
+            # Performance validation
+            if operation_time_ms > 500:
+                logger.warning(f"Reset operation took {operation_time_ms}ms - exceeds 500ms SLA")
+                response["performance_warning"] = True
+                response["sla_exceeded"] = True
+
+            logger.info(f"Game reset completed successfully in {operation_time_ms}ms")
+            return response
+
+        except PokemonGymAdapterError as adapter_error:
+            # Try emergency recovery for adapter errors too
+            operation_time_ms = int((time.time() - operation_start) * 1000)
+            logger.error(
+                f"Game reset failed with adapter error after {operation_time_ms}ms: {adapter_error}"
+            )
+
+            # Try emergency recovery
+            try:
+                self._emergency_session_recovery()
+                logger.info("Emergency session recovery successful after adapter error")
+
+                return {
+                    "status": "recovered",
+                    "session_id": self.session_manager.session_id,
+                    "message": f"Reset failed but emergency recovery successful after {operation_time_ms}ms",
+                    "operation_time_ms": operation_time_ms,
+                    "recovery_applied": True,
+                    "original_error": str(adapter_error),
+                }
+
+            except Exception as recovery_error:
+                logger.error(f"Emergency recovery also failed: {recovery_error}")
+
+                # Final attempt: Clean state and raise comprehensive error
+                self._force_clean_state()
+
+                raise PokemonGymAdapterError(
+                    f"Failed to reset emulator on port {self.port} after {operation_time_ms}ms. "
+                    f"Original error: {adapter_error}. Recovery error: {recovery_error}. "
+                    f"Session state has been reset to clean state."
+                ) from adapter_error
+
         except Exception as e:
-            raise PokemonGymAdapterError(
-                f"Failed to reset emulator on port {self.port}: {e}"
-            ) from e
+            operation_time_ms = int((time.time() - operation_start) * 1000)
+            logger.error(f"Game reset failed after {operation_time_ms}ms: {e}")
+
+            # Try emergency recovery
+            try:
+                self._emergency_session_recovery()
+                logger.info("Emergency session recovery successful")
+
+                return {
+                    "status": "recovered",
+                    "session_id": self.session_manager.session_id,
+                    "message": f"Reset failed but emergency recovery successful after {operation_time_ms}ms",
+                    "operation_time_ms": operation_time_ms,
+                    "recovery_applied": True,
+                    "original_error": str(e),
+                }
+
+            except Exception as recovery_error:
+                logger.error(f"Emergency recovery also failed: {recovery_error}")
+
+                # Final attempt: Clean state and raise comprehensive error
+                self._force_clean_state()
+
+                raise PokemonGymAdapterError(
+                    f"Failed to reset emulator on port {self.port} after {operation_time_ms}ms. "
+                    f"Original error: {e}. Recovery error: {recovery_error}. "
+                    f"Session state has been reset to clean state."
+                ) from e
+
+    def _validate_reset_state(self) -> None:
+        """
+        Validate session state after reset operation.
+
+        Raises:
+            PokemonGymAdapterError: If state validation fails
+        """
+        if not self.session_manager.is_initialized:
+            raise PokemonGymAdapterError("Session not properly initialized after reset")
+
+        if not self.session_manager.session_id:
+            raise PokemonGymAdapterError("Session ID missing after reset")
+
+        # Quick health check to ensure emulator is responsive
+        try:
+            health_check_start = time.time()
+            is_healthy = self.is_healthy()
+            health_check_time = int((time.time() - health_check_start) * 1000)
+
+            if not is_healthy:
+                logger.warning(f"Health check failed after reset (took {health_check_time}ms)")
+                # Don't raise - let the session attempt to recover naturally
+            else:
+                logger.info(f"Post-reset health check passed in {health_check_time}ms")
+
+        except Exception as e:
+            logger.warning(f"Post-reset health check encountered error: {e}")
+            # Don't raise - health check is advisory only
+
+    def _emergency_session_recovery(self) -> None:
+        """
+        Emergency session recovery for catastrophic reset failures.
+
+        Attempts to restore minimal session functionality.
+
+        Raises:
+            PokemonGymAdapterError: If recovery is impossible
+        """
+        logger.warning("Attempting emergency session recovery...")
+
+        try:
+            # Force clean state
+            self._force_clean_state()
+
+            # Attempt basic session initialization with minimal config
+            recovery_config = {"headless": True, "sound": False}  # Minimal config for recovery
+
+            response = self.session.post(
+                f"{self.base_url}/initialize", json={"config": recovery_config}, timeout=5.0
+            )
+            response.raise_for_status()
+
+            data = response.json()
+            self.session_manager.session_id = data.get("session_id")
+            self.session_manager.is_initialized = True
+
+            logger.info("Emergency session recovery completed")
+
+        except Exception as e:
+            raise PokemonGymAdapterError(f"Emergency recovery failed: {e}") from e
+
+    def _force_clean_state(self) -> None:
+        """Force adapter to clean state - last resort cleanup."""
+        logger.warning("Forcing clean state - resetting all session tracking")
+        self.session_manager.is_initialized = False
+        self.session_manager.session_id = None
+        if hasattr(self.session_manager, "_reset_in_progress"):
+            self.session_manager._reset_in_progress = False
 
     def is_healthy(self) -> bool:
         """

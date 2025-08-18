@@ -374,6 +374,313 @@ class TestSessionManagement:
 
 
 @pytest.mark.medium
+class TestResetFunctionalityEnhancements:
+    """Test enhanced reset functionality for Issue #143."""
+
+    @responses.activate
+    def test_reset_performance_under_500ms(self):
+        """Test reset operation completes within 500ms performance target."""
+        adapter = PokemonGymAdapter(8080, "test-container")
+
+        # Mock fast responses for performance test
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "perf-session-1", "status": "initialized"},
+        )
+        responses.add(responses.POST, "http://localhost:8080/stop", json={"status": "stopped"})
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "perf-session-2", "status": "initialized"},
+        )
+        responses.add(
+            responses.GET, "http://localhost:8080/status", json={"game_status": "running"}
+        )
+
+        # Initialize session first
+        adapter._ensure_session_initialized()
+
+        # Measure reset performance
+        start_time = time.time()
+        result = adapter.reset_game()
+        elapsed_ms = (time.time() - start_time) * 1000
+
+        # Should meet performance requirement
+        assert elapsed_ms < 500, f"Reset took {elapsed_ms}ms, exceeds 500ms target"
+        assert "operation_time_ms" in result
+        assert result["operation_time_ms"] < 500
+        assert "sla_exceeded" not in result or not result["sla_exceeded"]
+
+    @responses.activate
+    def test_reset_configuration_preservation(self):
+        """Test configuration is preserved across resets."""
+        original_config = {
+            "rom_path": "/test/pokemon.gb",
+            "save_state": "test.save",
+            "headless": True,
+        }
+        adapter = PokemonGymAdapter(8080, "test-container", config=original_config)
+
+        # Mock session lifecycle
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "config-session-1", "status": "initialized"},
+        )
+        responses.add(responses.POST, "http://localhost:8080/stop", json={"status": "stopped"})
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "config-session-2", "status": "initialized"},
+        )
+        responses.add(
+            responses.GET, "http://localhost:8080/status", json={"game_status": "running"}
+        )
+
+        # Initialize and reset
+        adapter._ensure_session_initialized()
+        result = adapter.reset_game()
+
+        # Verify configuration preservation
+        assert adapter.config == original_config
+        assert result["configuration_preserved"] is True
+        assert "reset_details" in result
+
+    @responses.activate
+    def test_concurrent_reset_handling(self):
+        """Test graceful handling of concurrent reset operations."""
+        adapter = PokemonGymAdapter(8080, "test-container")
+
+        # Mock session lifecycle with delays to simulate concurrent access
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "concurrent-session-1", "status": "initialized"},
+        )
+        responses.add(responses.POST, "http://localhost:8080/stop", json={"status": "stopped"})
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "concurrent-session-2", "status": "initialized"},
+        )
+        responses.add(
+            responses.GET, "http://localhost:8080/status", json={"game_status": "running"}
+        )
+
+        # Initialize session
+        adapter._ensure_session_initialized()
+
+        import threading
+
+        results = []
+        errors = []
+
+        def reset_worker():
+            try:
+                result = adapter.reset_game()
+                results.append(result)
+            except Exception as e:
+                errors.append(e)
+
+        # Start concurrent reset operations
+        threads = []
+        for _ in range(3):
+            thread = threading.Thread(target=reset_worker)
+            threads.append(thread)
+            thread.start()
+
+        # Wait for all threads
+        for thread in threads:
+            thread.join()
+
+        # Should handle concurrent resets gracefully
+        assert len(results) > 0, "At least one reset should succeed"
+        assert len(errors) == 0, f"No errors expected, got: {errors}"
+
+        # All successful results should have valid session IDs
+        for result in results:
+            assert result["status"] in [
+                "initialized",
+                "initialized",
+            ]  # May include concurrent message
+            assert "session_id" in result
+
+    @responses.activate
+    def test_reset_failure_recovery(self):
+        """Test emergency recovery when reset fails."""
+        adapter = PokemonGymAdapter(8080, "test-container")
+
+        # Mock initial session
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "failure-session-1", "status": "initialized"},
+        )
+
+        # Mock stop success but initialization failure in reset
+        responses.add(responses.POST, "http://localhost:8080/stop", json={"status": "stopped"})
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"error": "initialization_failed"},
+            status=500,
+        )
+
+        # Mock emergency recovery success
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "recovery-session", "status": "initialized"},
+        )
+
+        # Initialize session first
+        adapter._ensure_session_initialized()
+
+        # Reset should trigger emergency recovery
+        result = adapter.reset_game()
+
+        assert result["status"] == "recovered"
+        assert result["recovery_applied"] is True
+        assert "original_error" in result
+        assert adapter.session_manager.session_id == "recovery-session"
+
+    @responses.activate
+    def test_reset_complete_failure_cleanup(self):
+        """Test clean state after complete reset failure."""
+        adapter = PokemonGymAdapter(8080, "test-container")
+
+        # Mock initial session
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "cleanup-session", "status": "initialized"},
+        )
+
+        # Mock stop success but all subsequent initialization attempts fail
+        responses.add(responses.POST, "http://localhost:8080/stop", json={"status": "stopped"})
+
+        # Mock initialization failure in reset
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"error": "initialization_failed"},
+            status=500,
+        )
+
+        # Mock emergency recovery failure
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"error": "recovery_failed"},
+            status=500,
+        )
+
+        # Initialize session first
+        adapter._ensure_session_initialized()
+
+        # Reset should fail but clean up state
+        with pytest.raises(PokemonGymAdapterError) as exc_info:
+            adapter.reset_game()
+
+        # Should contain the final cleanup message
+        assert "Session state has been reset to clean state" in str(exc_info.value)
+        assert adapter.session_manager.is_initialized is False
+        assert adapter.session_manager.session_id is None
+
+    @responses.activate
+    def test_reset_detailed_response_format(self):
+        """Test reset response contains all required production details."""
+        adapter = PokemonGymAdapter(8080, "test-container", config={"test": "value"})
+
+        # Mock session lifecycle
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "detailed-session-1", "status": "initialized"},
+        )
+        responses.add(responses.POST, "http://localhost:8080/stop", json={"status": "stopped"})
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "detailed-session-2", "status": "initialized"},
+        )
+        responses.add(
+            responses.GET, "http://localhost:8080/status", json={"game_status": "running"}
+        )
+
+        # Initialize and reset
+        adapter._ensure_session_initialized()
+        result = adapter.reset_game()
+
+        # Verify comprehensive response format
+        required_fields = [
+            "status",
+            "session_id",
+            "message",
+            "emulator_port",
+            "container_id",
+            "operation_time_ms",
+            "configuration_preserved",
+            "reset_details",
+        ]
+
+        for field in required_fields:
+            assert field in result, f"Required field '{field}' missing from response"
+
+        assert result["status"] == "initialized"
+        assert result["emulator_port"] == 8080
+        assert result["container_id"] == "test-container"
+        assert result["configuration_preserved"] is True
+        assert isinstance(result["operation_time_ms"], int)
+        assert result["operation_time_ms"] >= 0
+
+    def test_session_manager_thread_safety(self):
+        """Test SessionManager thread safety with concurrent operations."""
+        session_manager = SessionManager("http://localhost:8080")
+
+        # Verify thread safety attributes exist
+        assert hasattr(session_manager, "_lock")
+        assert hasattr(session_manager, "_reset_in_progress")
+        assert session_manager._reset_in_progress is False
+
+        # Test that concurrent initialization is handled
+        with patch("requests.Session.post") as mock_post:
+            mock_post.return_value.json.return_value = {
+                "session_id": "thread-safety-test",
+                "status": "initialized",
+            }
+            mock_post.return_value.raise_for_status.return_value = None
+
+            import threading
+
+            results = []
+
+            def init_worker():
+                try:
+                    result = session_manager.initialize_session()
+                    results.append(result)
+                except Exception as e:
+                    results.append(e)
+
+            # Start concurrent initialization
+            threads = []
+            for _ in range(5):
+                thread = threading.Thread(target=init_worker)
+                threads.append(thread)
+                thread.start()
+
+            for thread in threads:
+                thread.join()
+
+            # All should succeed or be safely handled
+            assert len(results) == 5
+            # At least one should succeed
+            successful_results = [r for r in results if isinstance(r, dict)]
+            assert len(successful_results) > 0
+
+
+@pytest.mark.medium
 class TestErrorConditionsAndRecovery:
     """Test error handling and recovery mechanisms."""
 
@@ -481,6 +788,74 @@ class TestErrorConditionsAndRecovery:
 @pytest.mark.medium
 class TestPerformanceBenchmarks:
     """Test performance requirements and benchmarks."""
+
+    @responses.activate
+    def test_reset_performance_benchmark(self):
+        """Production benchmark test for reset performance - must be <500ms."""
+        adapter = PokemonGymAdapter(8080, "test-container")
+
+        # Mock fast responses to ensure we're testing adapter logic, not network
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "bench-session-1", "status": "initialized"},
+        )
+        responses.add(responses.POST, "http://localhost:8080/stop", json={"status": "stopped"})
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "bench-session-2", "status": "initialized"},
+        )
+        responses.add(
+            responses.GET, "http://localhost:8080/status", json={"game_status": "running"}
+        )
+
+        # Initialize session first
+        adapter._ensure_session_initialized()
+
+        # Run multiple reset operations to get reliable timing
+        reset_times = []
+        for i in range(5):
+            start_time = time.time()
+            result = adapter.reset_game()
+            elapsed_ms = (time.time() - start_time) * 1000
+            reset_times.append(elapsed_ms)
+
+            # Validate each reset
+            assert result["status"] == "initialized"
+            assert "operation_time_ms" in result
+
+            # Reset responses for next iteration
+            responses.reset()
+            responses.add(responses.POST, "http://localhost:8080/stop", json={"status": "stopped"})
+            responses.add(
+                responses.POST,
+                "http://localhost:8080/initialize",
+                json={"session_id": f"bench-session-{i+3}", "status": "initialized"},
+            )
+            responses.add(
+                responses.GET, "http://localhost:8080/status", json={"game_status": "running"}
+            )
+
+        # Performance validation
+        avg_reset_time = sum(reset_times) / len(reset_times)
+        max_reset_time = max(reset_times)
+        min_reset_time = min(reset_times)
+
+        print("\nReset Performance Benchmark Results:")
+        print(f"Average reset time: {avg_reset_time:.2f}ms")
+        print(f"Min reset time: {min_reset_time:.2f}ms")
+        print(f"Max reset time: {max_reset_time:.2f}ms")
+
+        # Production SLA requirement
+        assert avg_reset_time < 500, f"Average reset time {avg_reset_time:.2f}ms exceeds 500ms SLA"
+        assert (
+            max_reset_time < 1000
+        ), f"Max reset time {max_reset_time:.2f}ms exceeds reasonable upper bound"
+
+        # All individual operations should meet SLA
+        for i, reset_time in enumerate(reset_times):
+            assert reset_time < 500, f"Reset {i+1} took {reset_time:.2f}ms, exceeds 500ms SLA"
 
     @responses.activate
     def test_input_translation_performance(self):
@@ -640,7 +1015,7 @@ def benchflow_response():
     }
 
 
-@pytest.mark.medium
+@pytest.mark.fast
 class TestEdgeCases:
     """Test edge cases and boundary conditions."""
 

@@ -294,14 +294,17 @@ class CheckpointManager:
 
     def save_checkpoint(self, game_state: dict[str, Any], metadata: dict[str, Any]) -> str:
         """
-        Save game state with metadata and automatic pruning.
+        Save game state with metadata following Clean Code principles.
+
+        This method focuses solely on saving checkpoints (Single Responsibility Principle).
+        Storage management (pruning) is handled separately to avoid deadlock conditions.
 
         Production features:
         - Thread-safe operation using write lock
         - Atomic write operations to prevent corruption
         - LZ4 compression for storage efficiency
         - CRC32 checksum calculation for integrity
-        - Automatic pruning when limit exceeded
+        - UUID-based unique identifiers
 
         Args:
             game_state: Complete game state dictionary
@@ -314,19 +317,20 @@ class CheckpointManager:
             CheckpointError: Failed to save checkpoint
             ValueError: Invalid input data
         """
-        # Acquire write lock for database operations
-        with self._write_lock:
-            start_time = time.monotonic()
+        start_time = time.monotonic()
 
-            # Input validation - fail fast principle
-            if not isinstance(game_state, dict):
-                raise ValueError("game_state must be a dictionary")
-            if not isinstance(metadata, dict):
-                raise ValueError("metadata must be a dictionary")
-            if not game_state:
-                raise ValueError("game_state cannot be empty")
+        # Input validation - fail fast principle
+        if not isinstance(game_state, dict):
+            raise ValueError("game_state must be a dictionary")
+        if not isinstance(metadata, dict):
+            raise ValueError("metadata must be a dictionary")
+        if not game_state:
+            raise ValueError("game_state cannot be empty")
 
-            try:
+        try:
+            checkpoint_id = None
+            # Perform the save operation within the critical section
+            with self._write_lock:
                 # Generate unique checkpoint ID using UUID
                 checkpoint_id = str(uuid.uuid4())
 
@@ -343,36 +347,31 @@ class CheckpointManager:
                 # Write data atomically to prevent corruption
                 self._write_checkpoint_atomic(checkpoint_id, game_state, checkpoint_meta)
 
-                # Update metrics
+                # Update metrics within critical section
                 if self.enable_metrics:
                     self._metrics["saves_total"] += 1
                     self._update_storage_metrics()
 
-                # Track performance
-                duration = time.monotonic() - start_time
-                self._save_times.append(duration)
+            # Track performance outside critical section
+            duration = time.monotonic() - start_time
+            self._save_times.append(duration)
 
-                # Auto-prune if necessary
-                if len(self._get_all_checkpoint_ids()) > self.max_checkpoints:
-                    logger.info(
-                        "Checkpoint limit exceeded, triggering auto-prune",
-                        max_checkpoints=self.max_checkpoints,
-                        current_count=len(self._get_all_checkpoint_ids()),
-                    )
-                    self.prune_checkpoints(self.max_checkpoints)
+            # Check for pruning need outside the critical section to avoid deadlock
+            # This follows the Single Responsibility Principle - save focuses on saving
+            self._check_and_prune_if_needed()
 
-                logger.info(
-                    "Checkpoint saved",
-                    checkpoint_id=checkpoint_id,
-                    duration_ms=int(duration * 1000),
-                    location=checkpoint_meta.location,
-                )
+            logger.info(
+                "Checkpoint saved",
+                checkpoint_id=checkpoint_id,
+                duration_ms=int(duration * 1000),
+                location=checkpoint_meta.location,
+            )
 
-                return checkpoint_id
+            return checkpoint_id
 
-            except Exception as e:
-                logger.error("Failed to save checkpoint", error=str(e))
-                raise CheckpointError(f"Failed to save checkpoint: {e}") from e
+        except Exception as e:
+            logger.error("Failed to save checkpoint", error=str(e))
+            raise CheckpointError(f"Failed to save checkpoint: {e}") from e
 
     def load_checkpoint(self, checkpoint_id: str) -> dict[str, Any]:
         """
@@ -879,6 +878,48 @@ class CheckpointManager:
         return checkpoint_file.stat().st_size
 
     # Private implementation methods (following clean architecture)
+
+    def _check_and_prune_if_needed(self) -> None:
+        """
+        Check if pruning is needed and perform it if necessary.
+
+        This method implements the Single Responsibility Principle by separating
+        pruning concerns from the save operation. It checks storage limits
+        outside any critical sections to avoid deadlock conditions.
+
+        Design principles applied:
+        - Single Responsibility: Focus only on storage management
+        - Open/Closed: Configurable pruning behavior
+        - Fail-Safe: Graceful handling of pruning failures
+        """
+        try:
+            # Get checkpoint count outside any locks to avoid deadlock
+            current_count = len(self._get_all_checkpoint_ids())
+
+            if current_count > self.max_checkpoints:
+                logger.info(
+                    "Checkpoint limit exceeded, triggering auto-prune",
+                    max_checkpoints=self.max_checkpoints,
+                    current_count=current_count,
+                )
+
+                # Prune with its own locking strategy
+                pruning_result = self.prune_checkpoints(self.max_checkpoints)
+
+                logger.info(
+                    "Auto-pruning completed",
+                    removed_count=len(pruning_result.get("removed", [])),
+                    retained_count=len(pruning_result.get("retained", [])),
+                )
+
+        except Exception as e:
+            # Pruning failures should not prevent checkpoint saves from succeeding
+            # This follows the Fail-Safe principle - core functionality continues
+            logger.warning(
+                "Auto-pruning failed, continuing without pruning",
+                error=str(e),
+                current_count=current_count if "current_count" in locals() else "unknown",
+            )
 
     def _generate_checkpoint_id(self, game_state: dict) -> str:
         """Generate unique checkpoint ID from timestamp and state hash."""
