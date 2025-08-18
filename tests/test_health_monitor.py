@@ -122,10 +122,7 @@ class TestHealthMonitorBasics(unittest.TestCase):
         assert not monitor._running
 
 
-<<<<<<< HEAD
 @pytest.mark.medium
-=======
->>>>>>> 5835521 (feat: implement simple timer-based health monitoring (#151))
 class TestHealthCheckLogic(unittest.TestCase):
     """Test health check logic and HTTP validation."""
 
@@ -276,10 +273,7 @@ class TestHealthCheckLogic(unittest.TestCase):
         assert is_healthy is False
 
 
-<<<<<<< HEAD
 @pytest.mark.medium
-=======
->>>>>>> 5835521 (feat: implement simple timer-based health monitoring (#151))
 class TestPerformanceAndTiming(unittest.TestCase):
     """Test performance characteristics and timing behavior."""
 
@@ -376,10 +370,7 @@ class TestPerformanceAndTiming(unittest.TestCase):
         assert result["healthy_count"] == 1
 
 
-<<<<<<< HEAD
 @pytest.mark.medium
-=======
->>>>>>> 5835521 (feat: implement simple timer-based health monitoring (#151))
 class TestErrorHandlingAndRecovery(unittest.TestCase):
     """Test error handling and recovery scenarios."""
 
@@ -457,10 +448,7 @@ class TestErrorHandlingAndRecovery(unittest.TestCase):
             self.monitor.force_check()
 
 
-<<<<<<< HEAD
 @pytest.mark.medium
-=======
->>>>>>> 5835521 (feat: implement simple timer-based health monitoring (#151))
 class TestIntegrationScenarios(unittest.TestCase):
     """Test integration scenarios with real-world EmulatorPool behavior."""
 

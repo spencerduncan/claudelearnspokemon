@@ -12,13 +12,17 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, patch
 
+import pytest
+
 from claudelearnspokemon.emulator_pool import EmulatorPool
 from tests.test_emulator_pool_concurrent import ConcurrentResourceTracker
 
 
+@pytest.mark.fast
 class TestConcurrentPerformanceBenchmark(unittest.TestCase):
     """Benchmark concurrent performance with honest measurement of actual bottlenecks"""
 
+    @pytest.mark.fast
     def test_queue_efficiency_benchmark(self):
         """Benchmark Python queue.Queue efficiency - labeled honestly as queue operations"""
         with patch("claudelearnspokemon.emulator_pool.docker.from_env") as mock_docker:
@@ -82,6 +86,7 @@ class TestConcurrentPerformanceBenchmark(unittest.TestCase):
             finally:
                 pool.shutdown()
 
+    @pytest.mark.fast
     def test_concurrent_contention_benchmark(self):
         """Benchmark real concurrent contention with multiple threads competing"""
         with patch("claudelearnspokemon.emulator_pool.docker.from_env") as mock_docker:
@@ -187,6 +192,7 @@ class TestConcurrentPerformanceBenchmark(unittest.TestCase):
             finally:
                 pool.shutdown()
 
+    @pytest.mark.fast
     def test_system_integration_benchmark_documentation(self):
         """Document what a real system benchmark would measure"""
         print("\n=== Real System Integration Benchmark (Documentation Only) ===")
