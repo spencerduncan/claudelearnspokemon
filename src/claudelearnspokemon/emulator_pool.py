@@ -17,6 +17,15 @@ import docker
 import requests
 from docker.errors import APIError, DockerException, ImageNotFound
 
+# Import compatibility layer factory for transparent adapter selection
+try:
+    from .pokemon_gym_factory import create_pokemon_client
+
+    COMPATIBILITY_LAYER_AVAILABLE = True
+except ImportError:
+    # Graceful degradation if compatibility layer not available
+    COMPATIBILITY_LAYER_AVAILABLE = False
+
 if TYPE_CHECKING:
     from .checkpoint_manager import CheckpointError, CheckpointManager
     from .dsl_ast import CompiledScript
@@ -247,6 +256,9 @@ class EmulatorPool:
         startup_timeout: int = 30,
         checkpoint_manager: "CheckpointManager | None" = None,
         default_timeout: float | None = None,
+        adapter_type: str = "auto",
+        input_delay: float = 0.05,
+        detection_timeout: float = 3.0,
     ):
         """
         Initialize EmulatorPool with workstation configuration.
@@ -258,6 +270,9 @@ class EmulatorPool:
             startup_timeout: Max seconds to wait for container startup (default: 30)
             checkpoint_manager: CheckpointManager for state loading (optional)
             default_timeout: Default timeout for acquire operations (optional)
+            adapter_type: Client adapter type - "auto", "benchflow", "direct", "fallback" (default: "auto")
+            input_delay: Delay between sequential inputs for benchflow adapter (default: 50ms)
+            detection_timeout: Timeout for server type auto-detection (default: 3s)
         """
         self.pool_size = pool_size
         self.base_port = base_port
@@ -265,13 +280,20 @@ class EmulatorPool:
         self.startup_timeout = startup_timeout
         self.default_timeout = default_timeout
 
+        # Compatibility layer configuration
+        self.adapter_type = adapter_type
+        self.input_delay = input_delay
+        self.detection_timeout = detection_timeout
+
         # Container management state
         self.containers: list[docker.models.containers.Container] = []
         self.client: docker.DockerClient | None = None
 
         # Simplified resource pool state - workstation-appropriate
         self.available_clients: queue.Queue = queue.Queue()
-        self.clients_by_port: dict[int, PokemonGymClient] = {}  # All clients by port
+        self.clients_by_port: dict[int, Any] = (
+            {}
+        )  # All clients by port (PokemonGymClient or PokemonGymAdapter)
 
         # Core Pokemon functionality components (with graceful degradation)
         if POKEMON_COMPONENTS_AVAILABLE:
@@ -286,7 +308,7 @@ class EmulatorPool:
 
         logger.info(
             f"EmulatorPool configured: size={pool_size}, base_port={base_port}, "
-            f"image={image_name}, timeout={startup_timeout}s"
+            f"image={image_name}, timeout={startup_timeout}s, adapter_type={adapter_type}"
         )
 
     def initialize(self, pool_size: int | None = None) -> None:
@@ -328,9 +350,26 @@ class EmulatorPool:
                     started_containers.append(container)
                     self.containers.append(container)
 
-                    # Create PokemonGymClient and add to available pool
+                    # Create Pokemon client using compatibility layer factory
                     container_id = container.id or f"unknown-{port}"
-                    client = PokemonGymClient(port, container_id)
+                    if COMPATIBILITY_LAYER_AVAILABLE:
+                        # Use factory for transparent adapter selection
+                        client = create_pokemon_client(
+                            port=port,
+                            container_id=container_id,
+                            adapter_type=self.adapter_type,
+                            input_delay=self.input_delay,
+                            detection_timeout=self.detection_timeout,
+                        )
+                        logger.info(
+                            f"Created Pokemon client via compatibility layer for port {port}"
+                        )
+                    else:
+                        # Fallback to direct client if compatibility layer not available
+                        client = PokemonGymClient(port, container_id)
+                        logger.info(
+                            f"Created direct PokemonGymClient for port {port} (compatibility layer unavailable)"
+                        )
                     self.clients_by_port[port] = client
                     self.available_clients.put(client)
 
@@ -448,24 +487,26 @@ class EmulatorPool:
         effective_timeout = timeout if timeout is not None else self.default_timeout
         return EmulatorContext(self, effective_timeout)
 
-    def release(self, client: PokemonGymClient) -> None:
+    def release(self, client: Any) -> None:
         """
         Release emulator client back to available pool.
 
         Simple operation that makes emulator available for other tasks.
 
         Args:
-            client: PokemonGymClient to return to pool
+            client: Pokemon client (PokemonGymClient or PokemonGymAdapter) to return to pool
 
         Raises:
             EmulatorPoolError: If client was not acquired from this pool
         """
-        # Check client validity - handle both real clients and mocked clients
+        # Check client validity - handle both client types and mocked clients
         if hasattr(client, "port") and hasattr(client, "container_id"):
-            # Valid client (either real or properly mocked)
+            # Valid client (direct client, adapter, or properly mocked)
             pass
         else:
-            raise EmulatorPoolError("Invalid client type - must be PokemonGymClient")
+            raise EmulatorPoolError(
+                "Invalid client type - must be a valid Pokemon client with port and container_id attributes"
+            )
 
         # Return client to available pool - queue handles thread safety
         self.available_clients.put(client)
@@ -749,6 +790,151 @@ class EmulatorPool:
             "queue_size": 0,  # Simplified: not tracking waiting threads
             "status": "healthy" if available_count <= self.pool_size else "degraded",
         }
+
+    def replace_failed_container(self, port: int) -> bool:
+        """
+        Replace a failed container with a new one on the same port.
+
+        This method provides workstation-appropriate container replacement for auto-restart
+        functionality. It stops the failed container and creates a replacement while
+        maintaining the simplified EmulatorPool architecture.
+
+        Args:
+            port: Port of the container to replace
+
+        Returns:
+            True if replacement successful, False otherwise
+        """
+        if not self.containers or not self.client:
+            logger.error(f"Cannot replace container on port {port}: EmulatorPool not initialized")
+            return False
+
+        logger.info(f"Attempting to replace failed container on port {port}")
+
+        try:
+            # Find and remove the old client from tracking
+            old_client = self.clients_by_port.get(port)
+            if not old_client:
+                logger.error(f"No client found for port {port}")
+                return False
+
+            # Check if client was available in queue and remove it if found
+            was_available = self._is_client_available(old_client, remove_if_found=True)
+
+            # Close the old client session
+            try:
+                old_client.close()
+            except Exception as e:
+                logger.warning(f"Error closing old client on port {port}: {e}")
+
+            # Find and stop the old container
+            old_container = None
+            for i, container in enumerate(self.containers):
+                try:
+                    container.reload()
+                    # Check container name to match port
+                    if container.name == f"pokemon-emulator-{port}":
+                        old_container = container
+                        logger.info(
+                            f"Stopping old container {container.id[:12] if container.id else 'unknown'} on port {port}"
+                        )
+                        container.stop(timeout=10)
+                        # Remove from containers list
+                        self.containers.pop(i)
+                        break
+                except Exception as e:
+                    logger.warning(
+                        f"Error checking container {container.id[:12] if container.id else 'unknown'}: {e}"
+                    )
+
+            if not old_container:
+                logger.warning(
+                    f"Could not find old container for port {port}, proceeding with new container creation"
+                )
+
+            # Create new container on the same port
+            try:
+                new_container = self._start_single_container(port)
+                self.containers.append(new_container)
+
+                # Create new client and update mapping
+                container_id = new_container.id or f"unknown-{port}"
+                new_client = PokemonGymClient(port, container_id)
+                self.clients_by_port[port] = new_client
+
+                # If the old client was available, make the new one available too
+                if was_available:
+                    self.available_clients.put(new_client)
+
+                logger.info(
+                    f"Successfully replaced container on port {port} with {new_container.id[:12] if new_container.id else 'unknown'}"
+                )
+                return True
+
+            except Exception as e:
+                logger.error(f"Failed to create replacement container on port {port}: {e}")
+                # Clean up partial state - remove the client mapping since container failed
+                self.clients_by_port.pop(port, None)
+                return False
+
+        except Exception as e:
+            logger.error(f"Unexpected error replacing container on port {port}: {e}")
+            return False
+
+    def _is_client_available(
+        self, target_client: PokemonGymClient, remove_if_found: bool = False
+    ) -> bool:
+        """
+        Check if a client is currently in the available queue.
+
+        This is a workstation-appropriate way to check availability without
+        complex queue introspection. We temporarily drain and restore the queue.
+
+        Args:
+            target_client: Client to check for availability
+            remove_if_found: If True, don't restore the client if found (remove it from queue)
+
+        Returns:
+            True if client is available, False if busy
+        """
+        # Simple approach: temporarily drain queue to check for client
+        temp_clients = []
+        client_found = False
+
+        try:
+            # Drain queue and look for our client
+            while not self.available_clients.empty():
+                try:
+                    client = self.available_clients.get_nowait()
+                    temp_clients.append(client)
+
+                    # Check if this is our target client (match by port and container_id)
+                    if (
+                        hasattr(client, "port")
+                        and hasattr(client, "container_id")
+                        and client.port == target_client.port
+                        and client.container_id == target_client.container_id
+                    ):
+                        client_found = True
+                        # If we should remove it, don't add it to temp_clients
+                        if remove_if_found:
+                            temp_clients.pop()  # Remove the client we just added
+
+                except queue.Empty:
+                    break
+
+            # Restore clients back to the queue (excluding removed client if any)
+            for client in temp_clients:
+                self.available_clients.put(client)
+
+            return client_found
+
+        except Exception as e:
+            logger.error(f"Error checking client availability: {e}")
+            # Restore any clients we managed to get
+            for client in temp_clients:
+                self.available_clients.put(client)
+            return False
 
     # Removed restart_emulator() method - too complex for workstation use
     # For workstation development, if an emulator fails, shutdown and reinitialize the entire pool

@@ -20,6 +20,7 @@ from claudelearnspokemon.emulator_pool import (
 )
 
 
+@pytest.mark.medium
 class TestEmulatorPool:
     """Test EmulatorPool with production-grade failure scenarios."""
 
@@ -387,6 +388,7 @@ class TestEmulatorPool:
             container.stop.assert_called_once()
 
 
+@pytest.mark.medium
 class TestEmulatorPoolResourcePool:
     """Test resource pool functionality for EmulatorPool."""
 
@@ -516,7 +518,10 @@ class TestEmulatorPoolResourcePool:
         with pytest.raises(EmulatorPoolError) as exc_info:
             self.pool.release("not_a_client")
 
-        assert "Invalid client type - must be PokemonGymClient" in str(exc_info.value)
+        assert (
+            "Invalid client type - must be a valid Pokemon client with port and container_id attributes"
+            in str(exc_info.value)
+        )
 
     @pytest.mark.unit
     @patch("claudelearnspokemon.emulator_pool.docker.from_env")
@@ -683,6 +688,7 @@ class TestEmulatorPoolResourcePool:
         assert result == "A DOWN START"
 
 
+@pytest.mark.medium
 class TestPokemonGymClient:
     """Test PokemonGymClient functionality."""
 
@@ -755,6 +761,7 @@ class TestPokemonGymClient:
         assert client.is_healthy() is False
 
 
+@pytest.mark.medium
 class TestExecutionResult:
     """Test ExecutionResult functionality."""
 
@@ -777,6 +784,7 @@ class TestExecutionResult:
         assert "FAILURE" in str(result)
 
 
+@pytest.mark.medium
 class TestEmulatorPoolError:
     """Test custom exception class."""
 

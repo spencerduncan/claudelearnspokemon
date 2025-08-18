@@ -17,6 +17,7 @@ import pytest
 from claudelearnspokemon.checkpoint_manager import CheckpointManager
 
 
+@pytest.mark.fast
 class TestCheckpointManagerConcurrency:
     """Test suite for CheckpointManager thread safety and concurrent access."""
 
