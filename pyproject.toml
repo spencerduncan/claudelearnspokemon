@@ -28,6 +28,7 @@ dependencies = [
     "psutil>=5.9.0",
     "typing-extensions>=4.5.0",
     "types-psutil>=5.9.0",
+    "python-Levenshtein>=0.21.1",
 ]
 
 [project.optional-dependencies]
@@ -106,6 +107,15 @@ ignore_missing_imports = true
 # psutil has type stubs but they might not be installed in all environments
 [[tool.mypy.overrides]]
 module = "psutil.*"
+ignore_missing_imports = true
+
+# Memgraph and Levenshtein libraries for checkpoint discovery
+[[tool.mypy.overrides]]
+module = "mgclient.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "Levenshtein.*"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

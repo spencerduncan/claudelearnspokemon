@@ -33,6 +33,7 @@ from src.claudelearnspokemon.pokemon_gym_factory import (
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestPokemonGymFactoryBasics:
     """Test basic factory functionality and parameter validation."""
 
@@ -99,6 +100,7 @@ class TestPokemonGymFactoryBasics:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestServerTypeDetection:
     """Test server type auto-detection logic."""
 
@@ -196,6 +198,7 @@ class TestServerTypeDetection:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestDetectionCaching:
     """Test detection result caching functionality."""
 
@@ -302,6 +305,7 @@ class TestDetectionCaching:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestAutoDetectionWithFactory:
     """Test auto-detection integration with factory pattern."""
 
@@ -361,6 +365,7 @@ class TestAutoDetectionWithFactory:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestClientCompatibilityValidation:
     """Test client compatibility validation functionality."""
 
@@ -418,6 +423,7 @@ class TestClientCompatibilityValidation:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestFactoryErrorHandling:
     """Test factory error handling and edge cases."""
 
@@ -454,6 +460,7 @@ class TestFactoryErrorHandling:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestFactoryMetrics:
     """Test factory metrics and monitoring functionality."""
 
@@ -484,6 +491,7 @@ class TestFactoryMetrics:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestFactoryProductionScenarios:
     """Test factory behavior in production-like scenarios."""
 

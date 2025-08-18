@@ -36,13 +36,154 @@ import uuid
 import zlib
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import lz4.frame
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+
+class CircuitBreakerState(Enum):
+    """Circuit breaker states for production fault tolerance."""
+
+    CLOSED = "closed"  # Normal operation
+    OPEN = "open"  # Failing, using fallback
+    HALF_OPEN = "half_open"  # Testing recovery
+
+
+class DiscoveryBackend(Protocol):
+    """Protocol for checkpoint discovery backends."""
+
+    def find_nearest_checkpoint(self, location: str) -> str:
+        """Find nearest checkpoint to location."""
+        ...
+
+    def save_checkpoint_with_scoring(
+        self, checkpoint_id: str, location: str, metadata: dict[str, Any]
+    ) -> None:
+        """Save checkpoint with scoring data."""
+        ...
+
+    def get_performance_metrics(self) -> dict[str, Any]:
+        """Get performance metrics."""
+        ...
+
+
+class CircuitBreaker:
+    """
+    Production-grade circuit breaker for discovery backend fault tolerance.
+
+    Implements Google SRE patterns:
+    - Fail fast when backend is down
+    - Automatic recovery testing
+    - Prevents cascade failures
+    - Maintains system availability
+    """
+
+    def __init__(
+        self,
+        failure_threshold: int = 3,
+        recovery_timeout_seconds: float = 30.0,
+        name: str = "discovery_backend",
+    ):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout_seconds = recovery_timeout_seconds
+        self.name = name
+
+        # State tracking
+        self._state = CircuitBreakerState.CLOSED
+        self._failure_count = 0
+        self._last_failure_time: float | None = None
+        self._lock = threading.Lock()
+
+        # Metrics
+        self._state_changes = 0
+        self._total_calls = 0
+        self._failed_calls = 0
+
+    @property
+    def state(self) -> CircuitBreakerState:
+        """Get current circuit breaker state."""
+        return self._state
+
+    def is_available(self) -> bool:
+        """Check if the backend should be called."""
+        with self._lock:
+            if self._state == CircuitBreakerState.CLOSED:
+                return True
+            elif self._state == CircuitBreakerState.OPEN:
+                # Check if recovery timeout has elapsed
+                if (
+                    self._last_failure_time
+                    and time.time() - self._last_failure_time >= self.recovery_timeout_seconds
+                ):
+                    self._state = CircuitBreakerState.HALF_OPEN
+                    logger.info(
+                        f"Circuit breaker {self.name} transitioning to HALF_OPEN for recovery test"
+                    )
+                    return True
+                return False
+            else:  # HALF_OPEN
+                return True
+
+    def record_success(self) -> None:
+        """Record successful backend call."""
+        with self._lock:
+            self._total_calls += 1
+
+            if self._state == CircuitBreakerState.HALF_OPEN:
+                # Recovery successful, close circuit
+                self._state = CircuitBreakerState.CLOSED
+                self._failure_count = 0
+                self._state_changes += 1
+                logger.info(f"Circuit breaker {self.name} recovered - transitioning to CLOSED")
+            elif self._state == CircuitBreakerState.CLOSED:
+                # Normal operation - reset failure count on success
+                self._failure_count = 0
+
+    def record_failure(self) -> None:
+        """Record failed backend call."""
+        with self._lock:
+            self._total_calls += 1
+            self._failed_calls += 1
+            self._failure_count += 1
+            self._last_failure_time = time.time()
+
+            if (
+                self._state == CircuitBreakerState.CLOSED
+                and self._failure_count >= self.failure_threshold
+            ):
+                # Open circuit due to failure threshold
+                self._state = CircuitBreakerState.OPEN
+                self._state_changes += 1
+                logger.warning(
+                    f"Circuit breaker {self.name} OPENED due to {self._failure_count} consecutive failures"
+                )
+            elif self._state == CircuitBreakerState.HALF_OPEN:
+                # Recovery test failed, back to open
+                self._state = CircuitBreakerState.OPEN
+                self._state_changes += 1
+                logger.warning(f"Circuit breaker {self.name} recovery test failed - back to OPEN")
+
+    def get_metrics(self) -> dict[str, Any]:
+        """Get circuit breaker metrics."""
+        with self._lock:
+            failure_rate = (
+                (self._failed_calls / self._total_calls) if self._total_calls > 0 else 0.0
+            )
+
+            return {
+                "state": self._state.value,
+                "failure_count": self._failure_count,
+                "total_calls": self._total_calls,
+                "failed_calls": self._failed_calls,
+                "failure_rate": failure_rate,
+                "state_changes": self._state_changes,
+                "last_failure_time": self._last_failure_time,
+            }
 
 
 class CheckpointError(Exception):
@@ -138,6 +279,8 @@ class CheckpointManager:
         storage_dir: str | Path | None = None,
         max_checkpoints: int = DEFAULT_MAX_CHECKPOINTS,
         enable_metrics: bool = True,
+        discovery_backend: DiscoveryBackend | None = None,
+        enable_discovery_backend: bool | None = None,
     ) -> None:
         """
         Initialize CheckpointManager with production-ready configuration.
@@ -147,6 +290,9 @@ class CheckpointManager:
                         Defaults to ~/.claudelearnspokemon/checkpoints
             max_checkpoints: Maximum checkpoints before pruning (default: 100)
             enable_metrics: Enable performance and health metrics
+            discovery_backend: Optional graph-based discovery backend for enhanced performance
+            enable_discovery_backend: Override to enable/disable discovery backend
+                                    If None, uses ENABLE_MEMGRAPH_DISCOVERY environment variable
         """
         if storage_dir is None:
             self.storage_dir = Path.home() / ".claudelearnspokemon" / "checkpoints"
@@ -155,6 +301,19 @@ class CheckpointManager:
 
         self.max_checkpoints = max_checkpoints
         self.enable_metrics = enable_metrics
+
+        # Discovery backend configuration with environment variable support
+        self._discovery_backend_enabled = self._determine_discovery_backend_enabled(
+            enable_discovery_backend
+        )
+        self.discovery_backend = discovery_backend if self._discovery_backend_enabled else None
+        self._circuit_breaker = (
+            CircuitBreaker(
+                failure_threshold=3, recovery_timeout_seconds=30.0, name="memgraph_discovery"
+            )
+            if self.discovery_backend
+            else None
+        )
 
         # Thread safety locks
         self._write_lock = threading.Lock()  # Single writer for database operations
@@ -172,7 +331,7 @@ class CheckpointManager:
         self._metadata_cache_objects: dict[str, CheckpointMetadata] = {}
         self._cache_loaded = False
 
-        # Production metrics
+        # Production metrics (enhanced with discovery backend metrics)
         self._metrics = {
             "saves_total": 0,
             "loads_total": 0,
@@ -180,6 +339,12 @@ class CheckpointManager:
             "pruning_operations": 0,
             "corruption_events": 0,
             "storage_bytes_used": 0,
+            # Discovery backend metrics
+            "discovery_backend_enabled": bool(self.discovery_backend),
+            "discovery_calls_total": 0,
+            "discovery_success_total": 0,
+            "discovery_fallback_total": 0,
+            "discovery_avg_time_ms": 0.0,
         }
 
         # Performance tracking from simple implementation
@@ -197,6 +362,10 @@ class CheckpointManager:
             storage_dir=str(self.storage_dir),
             max_checkpoints=self.max_checkpoints,
             enable_metrics=self.enable_metrics,
+            discovery_backend_enabled=bool(self.discovery_backend),
+            discovery_backend_type=(
+                type(self.discovery_backend).__name__ if self.discovery_backend else None
+            ),
         )
 
     def _init_database(self) -> None:
@@ -351,6 +520,10 @@ class CheckpointManager:
                 if self.enable_metrics:
                     self._metrics["saves_total"] += 1
                     self._update_storage_metrics()
+
+            # Sync to discovery backend outside critical section (non-blocking)
+            # This follows the principle that discovery backend failures should not block saves
+            self._sync_checkpoint_to_discovery_backend(checkpoint_id, checkpoint_meta)
 
             # Track performance outside critical section
             duration = time.monotonic() - start_time
@@ -761,7 +934,82 @@ class CheckpointManager:
 
     def find_nearest_checkpoint(self, location: str) -> str:
         """
-        Find checkpoint closest to specified location.
+        Find checkpoint closest to specified location with enhanced discovery backend.
+
+        Production strategy:
+        1. Try discovery backend first (if available and circuit breaker allows)
+        2. Fallback to SQLite-based search on failure
+        3. Track metrics for both approaches
+        4. Maintain circuit breaker state for reliability
+
+        Args:
+            location: Target location identifier
+
+        Returns:
+            str: Checkpoint ID of nearest checkpoint, empty if none found
+        """
+        start_time = time.perf_counter()
+
+        try:
+            # Try enhanced discovery backend first (if available)
+            if (
+                self.discovery_backend
+                and self._circuit_breaker
+                and self._circuit_breaker.is_available()
+            ):
+                try:
+                    discovery_start = time.perf_counter()
+                    checkpoint_id = self.discovery_backend.find_nearest_checkpoint(location)
+                    discovery_time_ms = (time.perf_counter() - discovery_start) * 1000
+
+                    # Record success in circuit breaker and metrics
+                    self._circuit_breaker.record_success()
+                    if self.enable_metrics:
+                        self._metrics["discovery_calls_total"] += 1
+                        self._metrics["discovery_success_total"] += 1
+                        self._update_discovery_avg_time(discovery_time_ms)
+
+                    logger.debug(
+                        "Discovery backend found checkpoint",
+                        location=location,
+                        checkpoint_id=checkpoint_id,
+                        discovery_time_ms=discovery_time_ms,
+                        backend_type=type(self.discovery_backend).__name__,
+                    )
+
+                    # Return result if found (could be empty string)
+                    return checkpoint_id
+
+                except Exception as e:
+                    # Discovery backend failed - record failure and fallback
+                    self._circuit_breaker.record_failure()
+                    if self.enable_metrics:
+                        self._metrics["discovery_calls_total"] += 1
+                        self._metrics["discovery_fallback_total"] += 1
+
+                    logger.warning(
+                        "Discovery backend failed, falling back to SQLite",
+                        location=location,
+                        error=str(e),
+                        circuit_breaker_state=self._circuit_breaker.state.value,
+                    )
+                    # Continue to SQLite fallback below
+
+            # SQLite-based fallback (original implementation)
+            return self._find_nearest_checkpoint_sqlite(location)
+
+        except Exception as e:
+            logger.error("Failed to find nearest checkpoint", location=location, error=str(e))
+            return ""
+        finally:
+            total_time_ms = (time.perf_counter() - start_time) * 1000
+            logger.debug("Checkpoint discovery completed", total_time_ms=total_time_ms)
+
+    def _find_nearest_checkpoint_sqlite(self, location: str) -> str:
+        """
+        SQLite-based checkpoint discovery (original implementation).
+
+        This serves as the reliable fallback when discovery backend is unavailable.
 
         Args:
             location: Target location identifier
@@ -772,23 +1020,30 @@ class CheckpointManager:
         try:
             all_checkpoints = self._get_all_checkpoint_metadata()
 
-            # Simple implementation - in production could use spatial indexing
+            # Simple implementation - exact location matching
             exact_matches = [cp for cp in all_checkpoints if cp.location == location]
             if exact_matches:
                 # Return highest-scored exact match
                 best = max(exact_matches, key=self._calculate_value_score)
+                logger.debug(
+                    "SQLite found checkpoint",
+                    location=location,
+                    checkpoint_id=best.checkpoint_id,
+                    score=self._calculate_value_score(best),
+                )
                 return best.checkpoint_id
 
             # No exact matches found
+            logger.debug("No matching checkpoints found", location=location)
             return ""
 
         except Exception as e:
-            logger.error("Failed to find nearest checkpoint", error=str(e))
+            logger.error("SQLite checkpoint discovery failed", location=location, error=str(e))
             return ""
 
     def get_metrics(self) -> dict[str, Any]:
         """
-        Get comprehensive production metrics.
+        Get comprehensive production metrics including discovery backend performance.
 
         Returns:
             dict: Current system metrics and health status
@@ -799,6 +1054,7 @@ class CheckpointManager:
         metrics = self._metrics.copy()
         checkpoint_count = len(self._get_all_checkpoint_ids())
 
+        # Core CheckpointManager metrics
         additional_metrics: dict[str, Any] = {
             "checkpoint_count": checkpoint_count,
             "storage_dir": str(self.storage_dir),
@@ -808,8 +1064,48 @@ class CheckpointManager:
                 float(checkpoint_count / self.max_checkpoints) if self.max_checkpoints > 0 else 0.0
             ),
         }
-        metrics.update(additional_metrics)
 
+        # Discovery backend metrics
+        if self.discovery_backend:
+            additional_metrics["discovery_backend"] = {
+                "enabled": True,
+                "backend_type": type(self.discovery_backend).__name__,
+            }
+
+            # Circuit breaker metrics
+            if self._circuit_breaker:
+                cb_metrics = self._circuit_breaker.get_metrics()
+                additional_metrics["discovery_backend"]["circuit_breaker"] = cb_metrics
+
+            # Discovery backend performance metrics
+            try:
+                backend_metrics = self.discovery_backend.get_performance_metrics()
+                additional_metrics["discovery_backend"]["performance"] = backend_metrics
+            except Exception as e:
+                logger.warning("Failed to get discovery backend metrics", error=str(e))
+                additional_metrics["discovery_backend"]["performance"] = {"error": str(e)}
+
+            # Calculate discovery success rate
+            total_calls = metrics.get("discovery_calls_total", 0)
+            success_calls = metrics.get("discovery_success_total", 0)
+            if total_calls > 0:
+                additional_metrics["discovery_backend"]["success_rate"] = (
+                    success_calls / total_calls
+                )
+            else:
+                additional_metrics["discovery_backend"]["success_rate"] = 0.0
+
+        else:
+            additional_metrics["discovery_backend"] = {
+                "enabled": False,
+                "reason": (
+                    "no_backend_configured"
+                    if not self._discovery_backend_enabled
+                    else "backend_disabled"
+                ),
+            }
+
+        metrics.update(additional_metrics)
         return metrics
 
     def get_performance_stats(self) -> dict[str, Any]:
@@ -878,6 +1174,122 @@ class CheckpointManager:
         return checkpoint_file.stat().st_size
 
     # Private implementation methods (following clean architecture)
+
+    def _determine_discovery_backend_enabled(self, enable_discovery_backend: bool | None) -> bool:
+        """
+        Determine whether discovery backend should be enabled.
+
+        Production configuration precedence:
+        1. Explicit parameter (enable_discovery_backend)
+        2. Environment variable ENABLE_MEMGRAPH_DISCOVERY
+        3. Default: False (conservative default for production safety)
+
+        Args:
+            enable_discovery_backend: Explicit override parameter
+
+        Returns:
+            bool: True if discovery backend should be enabled
+        """
+        # Explicit parameter takes precedence
+        if enable_discovery_backend is not None:
+            logger.debug(
+                "Discovery backend configuration from parameter",
+                enabled=enable_discovery_backend,
+                source="parameter",
+            )
+            return enable_discovery_backend
+
+        # Check environment variable
+        env_value = os.environ.get("ENABLE_MEMGRAPH_DISCOVERY", "false").lower()
+        enabled = env_value in ("true", "1", "yes", "on")
+
+        logger.debug(
+            "Discovery backend configuration from environment",
+            enabled=enabled,
+            env_value=env_value,
+            source="environment",
+        )
+
+        return enabled
+
+    def _update_discovery_avg_time(self, discovery_time_ms: float) -> None:
+        """Update rolling average of discovery backend response times."""
+        if not self.enable_metrics:
+            return
+
+        current_avg = self._metrics["discovery_avg_time_ms"]
+        success_count = self._metrics["discovery_success_total"]
+
+        if success_count <= 1:
+            self._metrics["discovery_avg_time_ms"] = discovery_time_ms
+        else:
+            # Exponential moving average with alpha = 0.1 for responsiveness
+            alpha = 0.1
+            self._metrics["discovery_avg_time_ms"] = (alpha * discovery_time_ms) + (
+                (1 - alpha) * current_avg
+            )
+
+    def _sync_checkpoint_to_discovery_backend(
+        self, checkpoint_id: str, metadata: CheckpointMetadata
+    ) -> None:
+        """
+        Sync checkpoint data to discovery backend (non-blocking operation).
+
+        This method implements the principle that discovery backend sync failures
+        should NOT fail the primary checkpoint save operation.
+
+        Args:
+            checkpoint_id: Checkpoint identifier
+            metadata: Checkpoint metadata with location and scoring data
+        """
+        if not self.discovery_backend or not self._circuit_breaker:
+            return
+
+        # Only sync if circuit breaker allows
+        if not self._circuit_breaker.is_available():
+            logger.debug(
+                "Skipping discovery backend sync - circuit breaker open",
+                checkpoint_id=checkpoint_id,
+                circuit_state=self._circuit_breaker.state.value,
+            )
+            return
+
+        try:
+            # Prepare metadata for discovery backend
+            discovery_metadata = {
+                "success_rate": metadata.success_rate,
+                "strategic_value": metadata.strategic_value,
+                "access_count": metadata.access_count,
+                "created_at": metadata.created_at.isoformat(),
+                "file_path": str(self._get_checkpoint_path(checkpoint_id)),
+                "file_size_bytes": metadata.file_size_bytes,
+            }
+
+            # Sync to discovery backend
+            self.discovery_backend.save_checkpoint_with_scoring(
+                checkpoint_id, metadata.location, discovery_metadata
+            )
+
+            # Record success
+            self._circuit_breaker.record_success()
+
+            logger.debug(
+                "Checkpoint synced to discovery backend",
+                checkpoint_id=checkpoint_id,
+                location=metadata.location,
+                backend_type=type(self.discovery_backend).__name__,
+            )
+
+        except Exception as e:
+            # Discovery backend sync failure should not fail the save operation
+            self._circuit_breaker.record_failure()
+            logger.warning(
+                "Failed to sync checkpoint to discovery backend",
+                checkpoint_id=checkpoint_id,
+                location=metadata.location,
+                error=str(e),
+                circuit_state=self._circuit_breaker.state.value,
+            )
 
     def _check_and_prune_if_needed(self) -> None:
         """
