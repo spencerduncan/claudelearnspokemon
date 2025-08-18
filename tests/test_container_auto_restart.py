@@ -25,6 +25,7 @@ from src.claudelearnspokemon.container_auto_restart import (
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestContainerAutoRestartBasics(unittest.TestCase):
     """Test basic ContainerAutoRestart functionality and lifecycle."""
 
@@ -105,6 +106,7 @@ class TestContainerAutoRestartBasics(unittest.TestCase):
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestHealthChangeIntegration(unittest.TestCase):
     """Test integration with HealthMonitor health change callbacks."""
 
@@ -177,6 +179,7 @@ class TestHealthChangeIntegration(unittest.TestCase):
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestRestartLogic(unittest.TestCase):
     """Test restart attempt logic and policy enforcement."""
 
@@ -271,6 +274,7 @@ class TestRestartLogic(unittest.TestCase):
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestManualRestart(unittest.TestCase):
     """Test manual restart functionality."""
 
@@ -345,6 +349,7 @@ class TestManualRestart(unittest.TestCase):
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestCounterManagement(unittest.TestCase):
     """Test restart counter management and reset functionality."""
 
@@ -387,6 +392,7 @@ class TestCounterManagement(unittest.TestCase):
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestStatisticsAndMonitoring(unittest.TestCase):
     """Test statistics collection and monitoring functionality."""
 
@@ -525,6 +531,7 @@ class TestStatisticsAndMonitoring(unittest.TestCase):
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestErrorHandling(unittest.TestCase):
     """Test error handling and edge cases."""
 

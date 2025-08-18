@@ -27,6 +27,7 @@ from claudelearnspokemon.script_compiler import (
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestHighPerformanceLexer:
     """Test lexical analysis performance and correctness."""
 
@@ -136,6 +137,7 @@ class TestHighPerformanceLexer:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestMacroRegistry:
     """Test macro storage and expansion with cycle detection."""
 
@@ -194,6 +196,7 @@ class TestMacroRegistry:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestScriptParser:
     """Test parsing DSL syntax into AST."""
 
@@ -270,6 +273,7 @@ class TestScriptParser:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestCodeGenerator:
     """Test code generation and instruction flattening."""
 
@@ -342,6 +346,7 @@ class TestCodeGenerator:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestScriptCompiler:
     """Test complete compiler functionality and performance."""
 
@@ -464,6 +469,7 @@ class TestScriptCompiler:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestPerformanceRequirements:
     """Test performance requirements and benchmarks."""
 
@@ -590,6 +596,7 @@ class TestPerformanceRequirements:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestErrorHandling:
     """Test error handling and edge cases."""
 

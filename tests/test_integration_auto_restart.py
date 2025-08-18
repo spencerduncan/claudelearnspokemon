@@ -18,6 +18,7 @@ from src.claudelearnspokemon.health_monitor import HealthMonitor
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestAutoRestartIntegration:
     """Test complete auto-restart integration scenarios."""
 

@@ -17,6 +17,7 @@ from src.claudelearnspokemon.pokemon_gym_adapter import PokemonGymAdapter
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestEmulatorPoolCompatibilityLayerIntegration:
     """Test EmulatorPool integration with compatibility layer."""
 
@@ -154,6 +155,7 @@ class TestEmulatorPoolCompatibilityLayerIntegration:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestEmulatorPoolBackwardCompatibility:
     """Test that EmulatorPool maintains backward compatibility."""
 
@@ -253,6 +255,7 @@ class TestEmulatorPoolBackwardCompatibility:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestEmulatorPoolWithDifferentAdapterTypes:
     """Test EmulatorPool behavior with different adapter types."""
 
@@ -356,6 +359,7 @@ class TestEmulatorPoolWithDifferentAdapterTypes:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestEmulatorPoolScriptExecution:
     """Test EmulatorPool script execution with compatibility layer."""
 
@@ -419,6 +423,7 @@ class TestEmulatorPoolScriptExecution:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestEmulatorPoolLogging:
     """Test EmulatorPool logging with compatibility layer."""
 
