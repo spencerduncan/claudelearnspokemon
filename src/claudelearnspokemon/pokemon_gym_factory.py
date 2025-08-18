@@ -107,7 +107,7 @@ def create_pokemon_client(
         if adapter_type == "benchflow":
             logger.info(f"Creating PokemonGymAdapter (benchflow) for port {port}")
             config = {"input_delay": input_delay}
-            return PokemonGymAdapter(port, container_id, config)
+            return PokemonGymAdapter(port, container_id, config=config)
         elif adapter_type == "direct":
             logger.info(f"Creating PokemonGymClient (direct) for port {port}")
             return PokemonGymClient(port, container_id)
@@ -123,7 +123,7 @@ def create_pokemon_client(
         if server_type == "benchflow":
             logger.info(f"Auto-detected benchflow-ai server on port {port}")
             config = {"input_delay": input_delay}
-            return PokemonGymAdapter(port, container_id, config)
+            return PokemonGymAdapter(port, container_id, config=config)
         else:
             logger.info(f"Auto-detected direct pokemon-gym server on port {port}")
             return PokemonGymClient(port, container_id)
