@@ -75,25 +75,26 @@ direnv allow  # After installing direnv
 
 The project uses git worktrees for parallel development on different issues. Each worktree is an independent checkout with its own virtual environment. This allows agents to work on multiple issues simultaneously without conflicts.
 
+**IMPORTANT: Always use the scripts in `/home/sd/claudelearnspokemon/scripts/` for worktree operations!**
+
 ### Working with Worktrees
 
-```bash
-# Navigate to an existing worktree (auto-approved, no confirmation needed)
-cd /home/sd/worktrees/issue-91
+**ALWAYS use the scripts for worktree operations:**
 
-# Set up environment in any worktree (auto-approved)
-./setup.sh
-# Or use the helper script from main repo:
+```bash
+# RECOMMENDED: Use the helper script to setup existing worktrees
 /home/sd/claudelearnspokemon/scripts/setup_worktree.sh issue-91
 
-# Create and setup a new worktree for a fresh issue
+# RECOMMENDED: Create and setup a new worktree for a fresh issue
 /home/sd/claudelearnspokemon/scripts/setup_worktree.sh issue-123 --fresh
 
-# Run tests in any worktree (auto-approved)
-python -m pytest tests/test_emulator_pool.py
-python -m pytest tests/test_checkpoint_manager.py::TestCheckpointManagerBasics
-# Or use the smart test runner:
+# RECOMMENDED: Use the smart test runner
 /home/sd/claudelearnspokemon/scripts/run_tests.sh tests/test_emulator_pool.py -v
+
+# Alternative manual approach (if needed):
+cd /home/sd/worktrees/issue-91  # Navigate to worktree
+./setup.sh                      # Set up environment
+python -m pytest tests/        # Run tests
 ```
 
 ### Available Worktrees
