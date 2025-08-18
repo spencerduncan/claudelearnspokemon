@@ -19,7 +19,6 @@ from tests.test_emulator_pool_concurrent import ConcurrentResourceTracker
 
 
 @pytest.mark.fast
-@pytest.mark.medium
 class TestConcurrentPerformanceBenchmark(unittest.TestCase):
     """Benchmark concurrent performance with honest measurement of actual bottlenecks"""
 

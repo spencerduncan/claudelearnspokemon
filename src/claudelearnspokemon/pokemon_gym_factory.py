@@ -15,6 +15,7 @@ import requests
 from requests.exceptions import RequestException, Timeout
 
 from .compatibility.cache_strategies import CacheStrategy, create_cache_strategy
+from .compatibility.validation import ValidationError, validate_client_creation_parameters
 from .pokemon_gym_adapter import PokemonGymAdapter
 
 if TYPE_CHECKING:
@@ -32,6 +33,7 @@ class FactoryError(Exception):
     Custom exception for factory operations.
 
     Provides actionable error messages for production debugging.
+    Wraps ValidationError to maintain API compatibility while using clean validation.
     """
 
     pass
@@ -85,13 +87,21 @@ def create_pokemon_client(
     from .emulator_pool import PokemonGymClient
 
     try:
-        # Validate input parameters
-        if not isinstance(port, int) or port <= 0:
-            raise FactoryError(f"Invalid port: {port}. Must be positive integer.")
-        if not container_id:
-            raise FactoryError("Container ID cannot be empty")
-        if adapter_type not in ("auto", "benchflow", "direct", "fallback"):
-            raise FactoryError(f"Invalid adapter_type: {adapter_type}")
+        # Validate all input parameters using clean validation module
+        validated_params = validate_client_creation_parameters(
+            port=port,
+            container_id=container_id,
+            adapter_type=adapter_type,
+            input_delay=input_delay,
+            detection_timeout=detection_timeout,
+        )
+
+        # Extract validated parameters for clean code readability
+        port = int(validated_params["port"])
+        container_id = str(validated_params["container_id"])
+        adapter_type = str(validated_params["adapter_type"])
+        input_delay = float(validated_params["input_delay"])
+        detection_timeout = float(validated_params["detection_timeout"])
 
         # Handle explicit type selection
         if adapter_type == "benchflow":
@@ -118,6 +128,10 @@ def create_pokemon_client(
             logger.info(f"Auto-detected direct pokemon-gym server on port {port}")
             return PokemonGymClient(port, container_id)
 
+    except ValidationError as e:
+        # Convert ValidationError to FactoryError for API compatibility
+        logger.error(f"Parameter validation failed for port {port}: {e}")
+        raise FactoryError(str(e)) from e
     except Exception as e:
         logger.error(f"Failed to create Pokemon client for port {port}: {e}")
         raise FactoryError(f"Client creation failed: {e}") from e
