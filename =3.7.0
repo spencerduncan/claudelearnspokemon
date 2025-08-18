@@ -1,0 +1,18 @@
+Defaulting to user installation because normal site-packages is not writeable
+Collecting testcontainers
+  Downloading testcontainers-4.12.0-py3-none-any.whl.metadata (8.3 kB)
+Requirement already satisfied: docker in /home/sd/.local/lib/python3.10/site-packages (from testcontainers) (7.1.0)
+Requirement already satisfied: python-dotenv in /home/sd/.local/lib/python3.10/site-packages (from testcontainers) (1.1.1)
+Requirement already satisfied: typing-extensions in /home/sd/.local/lib/python3.10/site-packages (from testcontainers) (4.14.1)
+Requirement already satisfied: urllib3 in /home/sd/.local/lib/python3.10/site-packages (from testcontainers) (2.5.0)
+Collecting wrapt (from testcontainers)
+  Downloading wrapt-1.17.3-cp310-cp310-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl.metadata (6.4 kB)
+Requirement already satisfied: requests>=2.26.0 in /home/sd/.local/lib/python3.10/site-packages (from docker->testcontainers) (2.32.4)
+Requirement already satisfied: charset_normalizer<4,>=2 in /home/sd/.local/lib/python3.10/site-packages (from requests>=2.26.0->docker->testcontainers) (3.4.3)
+Requirement already satisfied: idna<4,>=2.5 in /usr/lib/python3/dist-packages (from requests>=2.26.0->docker->testcontainers) (3.3)
+Requirement already satisfied: certifi>=2017.4.17 in /usr/lib/python3/dist-packages (from requests>=2.26.0->docker->testcontainers) (2020.6.20)
+Downloading testcontainers-4.12.0-py3-none-any.whl (111 kB)
+Downloading wrapt-1.17.3-cp310-cp310-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (81 kB)
+Installing collected packages: wrapt, testcontainers
+
+Successfully installed testcontainers-4.12.0 wrapt-1.17.3

@@ -14,7 +14,6 @@ repos:
     rev: 25.1.0
     hooks:
       - id: black
-        language_version: python3.10
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.12.9
@@ -30,13 +29,20 @@ repos:
         # Use pyproject.toml for mypy configuration
         files: ^src/
         args: [--config-file=pyproject.toml]
-        additional_dependencies: [types-docker, numpy, structlog]
+        additional_dependencies: [types-docker, types-requests, numpy, structlog]
 
   - repo: local
     hooks:
+      - id: check-test-markers
+        name: check test markers
+        entry: bash -c 'PYTHONPATH=${PWD}/src:$PYTHONPATH python scripts/check_test_markers.py'
+        language: system
+        types: [python]
+        pass_filenames: false
+        always_run: true
       - id: pytest
         name: pytest
-        entry: bash -c 'PYTHONPATH=/home/sd/worktrees/issue-36/src:$PYTHONPATH ./venv/bin/pytest tests/test_emulator_pool.py tests/test_emulator_pool_concurrent.py -x --tb=short'
+        entry: bash -c 'PYTHONPATH=${PWD}/src:$PYTHONPATH python -m pytest tests/ -m fast -x --tb=short'
         language: system
         types: [python]
         pass_filenames: false

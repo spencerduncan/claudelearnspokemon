@@ -1,0 +1,242 @@
+name: Docker Integration Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    # Run integration tests daily at 3 AM UTC for regression detection
+    - cron: '0 3 * * *'
+
+env:
+  # Enable integration tests in CI
+  RUN_INTEGRATION_TESTS: 1
+  DOCKER_TIMEOUT: 60
+  POKEMON_GYM_IMAGE: pokemon-gym:latest
+
+jobs:
+  integration-tests:
+    name: Integration Tests with Real Docker Servers
+    runs-on: ubuntu-latest
+
+    # Performance requirements - John Botmack standards
+    timeout-minutes: 30
+
+    services:
+      # Docker-in-Docker for testcontainers
+      docker:
+        image: docker:24-dind
+        options: --privileged
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11"]
+        test-suite: ["basic", "performance", "compatibility"]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/setup.py', '**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y docker.io
+
+      - name: Verify Docker daemon
+        run: |
+          docker --version
+          docker info
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest-cov pytest-timeout pytest-xdist
+
+      - name: Pull Pokemon-gym Docker images
+        run: |
+          # Pull required images for integration testing
+          docker pull pokemon-gym:latest || echo "Latest image not available, will use local build"
+          docker pull pokemon-gym:v1.2 || echo "v1.2 image not available"
+          docker pull pokemon-gym:v1.1 || echo "v1.1 image not available"
+          docker images
+
+      - name: Run Basic Integration Tests
+        if: matrix.test-suite == 'basic'
+        run: |
+          pytest tests/integration/test_server_integration.py \
+            -v --tb=short --timeout=300 \
+            --cov=src/claudelearnspokemon \
+            --cov-report=xml:coverage-basic-${{ matrix.python-version }}.xml \
+            --junit-xml=results-basic-${{ matrix.python-version }}.xml
+
+      - name: Run Performance Integration Tests
+        if: matrix.test-suite == 'performance'
+        run: |
+          pytest tests/integration/test_performance_integration.py \
+            -v --tb=short --timeout=600 \
+            --cov=src/claudelearnspokemon \
+            --cov-report=xml:coverage-perf-${{ matrix.python-version }}.xml \
+            --junit-xml=results-perf-${{ matrix.python-version }}.xml
+
+      - name: Run Compatibility Tests
+        if: matrix.test-suite == 'compatibility'
+        run: |
+          pytest tests/integration/test_compatibility_integration.py \
+            -v --tb=short --timeout=900 \
+            --cov=src/claudelearnspokemon \
+            --cov-report=xml:coverage-compat-${{ matrix.python-version }}.xml \
+            --junit-xml=results-compat-${{ matrix.python-version }}.xml
+
+      - name: Collect Performance Baselines
+        if: matrix.test-suite == 'performance' && github.ref == 'refs/heads/main'
+        run: |
+          # Store performance baselines from main branch
+          mkdir -p artifacts/baselines
+          find . -name "performance_baseline_*.json" -exec cp {} artifacts/baselines/ \;
+          find . -name "compatibility_matrix.json" -exec cp {} artifacts/baselines/ \;
+
+      - name: Upload Performance Baselines
+        if: matrix.test-suite == 'performance' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v3
+        with:
+          name: performance-baselines-${{ matrix.python-version }}
+          path: artifacts/baselines/
+          retention-days: 90
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-results-${{ matrix.test-suite }}-${{ matrix.python-version }}
+          path: |
+            results-*.xml
+            coverage-*.xml
+          retention-days: 30
+
+      - name: Upload Coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v3
+        with:
+          file: coverage-*.xml
+          flags: integration-tests
+          name: integration-${{ matrix.test-suite }}-${{ matrix.python-version }}
+
+      - name: Docker Container Cleanup
+        if: always()
+        run: |
+          # Clean up any orphaned test containers
+          docker ps -aq --filter "label=testcontainers=true" | xargs -r docker rm -f
+          docker system prune -f --volumes
+
+  performance-regression-check:
+    name: Performance Regression Detection
+    runs-on: ubuntu-latest
+    needs: integration-tests
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Download Current Performance Baselines
+        uses: actions/download-artifact@v3
+        with:
+          name: performance-baselines-3.10
+          path: current-baselines/
+
+      - name: Download Previous Performance Baselines
+        uses: actions/download-artifact@v3
+        with:
+          name: performance-baselines-3.10
+          path: previous-baselines/
+        continue-on-error: true
+
+      - name: Compare Performance Baselines
+        run: |
+          # Simple regression detection script
+          python - <<'EOF'
+          import json
+          import os
+          import sys
+
+          def compare_baselines(current_dir, previous_dir):
+              """Compare performance baselines for regression detection."""
+              regressions = []
+
+              for filename in os.listdir(current_dir):
+                  if filename.startswith('performance_baseline_'):
+                      current_file = os.path.join(current_dir, filename)
+                      previous_file = os.path.join(previous_dir, filename)
+
+                      if os.path.exists(previous_file):
+                          with open(current_file) as f:
+                              current = json.load(f)
+                          with open(previous_file) as f:
+                              previous = json.load(f)
+
+                          # Check for performance regressions (>20% slower)
+                          for metric, current_data in current.items():
+                              if metric in previous:
+                                  current_p95 = current_data.get('p95', 0)
+                                  previous_p95 = previous[metric].get('p95', 0)
+
+                                  if previous_p95 > 0:
+                                      regression_pct = ((current_p95 - previous_p95) / previous_p95) * 100
+                                      if regression_pct > 20:
+                                          regressions.append(f"{metric}: {regression_pct:.1f}% slower")
+
+              return regressions
+
+          if os.path.exists('previous-baselines'):
+              regressions = compare_baselines('current-baselines', 'previous-baselines')
+              if regressions:
+                  print("⚠️ Performance regressions detected:")
+                  for regression in regressions:
+                      print(f"  - {regression}")
+                  sys.exit(1)
+              else:
+                  print("✅ No significant performance regressions detected")
+          else:
+              print("ℹ️ No previous baseline found, skipping regression check")
+          EOF
+
+  integration-test-summary:
+    name: Integration Test Summary
+    runs-on: ubuntu-latest
+    needs: integration-tests
+    if: always()
+
+    steps:
+      - name: Summary
+        run: |
+          echo "## Integration Test Results 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Test Matrix Results" >> $GITHUB_STEP_SUMMARY
+          echo "- Python 3.10: ${{ needs.integration-tests.outputs.python-3-10-status || 'Unknown' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Python 3.11: ${{ needs.integration-tests.outputs.python-3-11-status || 'Unknown' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Test Suites" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Basic Integration Tests: Real Docker server communication" >> $GITHUB_STEP_SUMMARY
+          echo "- ⚡ Performance Tests: <100ms action execution validation" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔄 Compatibility Tests: Multi-version Pokemon-gym server support" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Performance Standards" >> $GITHUB_STEP_SUMMARY
+          echo "- Client creation: <100ms" >> $GITHUB_STEP_SUMMARY
+          echo "- Action execution: <100ms" >> $GITHUB_STEP_SUMMARY
+          echo "- Status checks: <50ms" >> $GITHUB_STEP_SUMMARY
+          echo "- Concurrent operations: 4+ parallel clients supported" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "_Generated by John Botmack Performance Engineering Standards_" >> $GITHUB_STEP_SUMMARY
