@@ -8,7 +8,7 @@ transparent server type selection.
 Author: Bot Dean - Production-First Engineering
 """
 
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 
@@ -17,6 +17,7 @@ from src.claudelearnspokemon.pokemon_gym_adapter import PokemonGymAdapter
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestEmulatorPoolCompatibilityLayerIntegration:
     """Test EmulatorPool integration with compatibility layer."""
 
@@ -154,6 +155,7 @@ class TestEmulatorPoolCompatibilityLayerIntegration:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestEmulatorPoolBackwardCompatibility:
     """Test that EmulatorPool maintains backward compatibility."""
 
@@ -253,6 +255,7 @@ class TestEmulatorPoolBackwardCompatibility:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestEmulatorPoolWithDifferentAdapterTypes:
     """Test EmulatorPool behavior with different adapter types."""
 
@@ -356,6 +359,7 @@ class TestEmulatorPoolWithDifferentAdapterTypes:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestEmulatorPoolScriptExecution:
     """Test EmulatorPool script execution with compatibility layer."""
 
@@ -382,8 +386,11 @@ class TestEmulatorPoolScriptExecution:
 
         # Verify script was executed
         assert result.success
-        mock_adapter.send_input.assert_called_once_with("A B START")
-        mock_adapter.get_state.assert_called_once()
+        # With new implementation, individual inputs are sent separately
+        expected_calls = [call("A"), call("B"), call("START")]
+        mock_adapter.send_input.assert_has_calls(expected_calls)
+        # get_state is called twice: once for initial state, once for final state
+        assert mock_adapter.get_state.call_count == 2
 
     @patch("src.claudelearnspokemon.emulator_pool.create_pokemon_client")
     def test_execute_script_works_with_direct_client(self, mock_create_client):
@@ -408,11 +415,15 @@ class TestEmulatorPoolScriptExecution:
 
         # Verify script was executed
         assert result.success
-        mock_client.send_input.assert_called_once_with("A B START")
-        mock_client.get_state.assert_called_once()
+        # With new implementation, individual inputs are sent separately
+        expected_calls = [call("A"), call("B"), call("START")]
+        mock_client.send_input.assert_has_calls(expected_calls)
+        # get_state is called twice: once for initial state, once for final state
+        assert mock_client.get_state.call_count == 2
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestEmulatorPoolLogging:
     """Test EmulatorPool logging with compatibility layer."""
 

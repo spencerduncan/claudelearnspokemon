@@ -15,6 +15,7 @@ import pytest
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestRefactoringVerification(unittest.TestCase):
     """Verify the Clean Code refactoring is complete and working."""
 
