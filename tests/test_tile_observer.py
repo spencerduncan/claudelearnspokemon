@@ -31,6 +31,7 @@ from claudelearnspokemon.tile_observer import TileObserver
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestTileObserverBasicStructure:
     """Test TileObserver class initialization and basic structure."""
 
@@ -59,6 +60,7 @@ class TestTileObserverBasicStructure:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestTileCapture:
     """Test tile grid capture functionality."""
 
@@ -111,6 +113,7 @@ class TestTileCapture:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestPositionDetection:
     """Test player and NPC position identification."""
 
@@ -168,6 +171,7 @@ class TestPositionDetection:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestCollisionLearning:
     """Test learning tile semantics through collision detection."""
 
@@ -217,6 +221,7 @@ class TestCollisionLearning:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestPatternDetection:
     """Test pattern detection in tile arrangements."""
 
@@ -280,6 +285,7 @@ class TestPatternDetection:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestMenuHandling:
     """Test handling of menu overlay tiles."""
 
@@ -313,6 +319,7 @@ class TestMenuHandling:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestPathfinding:
     """Test walkable path identification."""
 
@@ -368,6 +375,7 @@ class TestPathfinding:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestIntegrationScenarios:
     """Test integrated scenarios combining multiple TileObserver capabilities."""
 
@@ -433,6 +441,7 @@ class TestIntegrationScenarios:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestEdgeCasesAndErrorHandling:
     """Test edge cases and error handling scenarios."""
 
