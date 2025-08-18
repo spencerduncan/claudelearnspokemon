@@ -13,17 +13,21 @@ from unittest.mock import Mock, patch
 import pytest
 from requests.exceptions import RequestException
 
+from src.claudelearnspokemon.compatibility.cache_strategies import (
+    InMemoryCache,
+    NullCache,
+)
 from src.claudelearnspokemon.emulator_pool import PokemonGymClient
 from src.claudelearnspokemon.pokemon_gym_adapter import PokemonGymAdapter
 from src.claudelearnspokemon.pokemon_gym_factory import (
     FactoryError,
     _is_benchflow_server,
-    _server_type_cache,
     clear_detection_cache,
     create_pokemon_client,
     detect_server_type,
     get_detection_cache_stats,
     get_factory_metrics,
+    set_default_cache_strategy,
     validate_client_compatibility,
 )
 
@@ -33,7 +37,10 @@ class TestPokemonGymFactoryBasics:
     """Test basic factory functionality and parameter validation."""
 
     def setup_method(self):
-        """Clear cache before each test."""
+        """Set up clean cache strategy for each test."""
+        # Use NullCache for predictable test behavior
+        self.test_cache = NullCache()
+        set_default_cache_strategy(self.test_cache)
         clear_detection_cache()
 
     def test_factory_with_explicit_direct_type(self):
@@ -96,8 +103,10 @@ class TestServerTypeDetection:
     """Test server type auto-detection logic."""
 
     def setup_method(self):
-        """Clear cache before each test."""
-        clear_detection_cache()
+        """Set up cache strategy for testing."""
+        # Use InMemoryCache for testing actual caching behavior
+        self.test_cache = InMemoryCache(default_ttl_seconds=300)
+        clear_detection_cache(cache_strategy=self.test_cache)
 
     @patch("src.claudelearnspokemon.pokemon_gym_factory.requests.Session")
     def test_benchflow_server_detection_success(self, mock_session_class):
@@ -111,7 +120,7 @@ class TestServerTypeDetection:
         mock_response.json.return_value = {"session_active": True, "location": {"map": "town"}}
         mock_session.get.return_value = mock_response
 
-        result = detect_server_type(8081)
+        result = detect_server_type(8081, cache_strategy=self.test_cache)
 
         assert result == "benchflow"
         mock_session.get.assert_called_once_with("http://localhost:8081/status", timeout=3.0)
@@ -125,7 +134,7 @@ class TestServerTypeDetection:
         # Mock benchflow-ai status endpoint failure
         mock_session.get.side_effect = RequestException("Not found")
 
-        result = detect_server_type(8081)
+        result = detect_server_type(8081, cache_strategy=self.test_cache)
 
         assert result == "direct"
 
@@ -191,8 +200,10 @@ class TestDetectionCaching:
     """Test detection result caching functionality."""
 
     def setup_method(self):
-        """Clear cache before each test."""
-        clear_detection_cache()
+        """Set up cache strategy for testing."""
+        # Use InMemoryCache for testing actual caching behavior
+        self.test_cache = InMemoryCache(default_ttl_seconds=300)
+        clear_detection_cache(cache_strategy=self.test_cache)
 
     @patch("src.claudelearnspokemon.pokemon_gym_factory.requests.Session")
     def test_detection_caching_works(self, mock_session_class):
@@ -207,11 +218,11 @@ class TestDetectionCaching:
         mock_session.get.return_value = mock_response
 
         # First detection
-        result1 = detect_server_type(8081)
+        result1 = detect_server_type(8081, cache_strategy=self.test_cache)
         assert result1 == "benchflow"
 
         # Second detection should use cache
-        result2 = detect_server_type(8081)
+        result2 = detect_server_type(8081, cache_strategy=self.test_cache)
         assert result2 == "benchflow"
 
         # Should only make one HTTP call due to caching
@@ -219,12 +230,15 @@ class TestDetectionCaching:
 
     def test_cache_expiration(self):
         """Test cache entries expire correctly."""
-        # Manually add expired cache entry
+        # Use cache with very short TTL for testing expiration
+        short_ttl_cache = InMemoryCache(default_ttl_seconds=0.1)
+
+        # Add entry that will expire
         cache_key = "port_8081"
-        _server_type_cache[cache_key] = {
-            "type": "benchflow",
-            "timestamp": time.time() - 400,  # Expired (>300s ago)
-        }
+        short_ttl_cache.set(cache_key, {"type": "benchflow", "timestamp": time.time()})
+
+        # Wait for expiration
+        time.sleep(0.15)
 
         with patch(
             "src.claudelearnspokemon.pokemon_gym_factory.requests.Session"
@@ -239,7 +253,7 @@ class TestDetectionCaching:
             mock_session.get.return_value = mock_response
 
             # Should not use expired cache
-            _ = detect_server_type(8081)
+            _ = detect_server_type(8081, cache_strategy=short_ttl_cache)
 
             # Should make new HTTP call
             mock_session.get.assert_called_once()
@@ -247,44 +261,44 @@ class TestDetectionCaching:
     def test_clear_detection_cache_all(self):
         """Test clearing all cache entries."""
         # Add cache entries
-        _server_type_cache["port_8081"] = {"type": "benchflow", "timestamp": time.time()}
-        _server_type_cache["port_8082"] = {"type": "direct", "timestamp": time.time()}
+        self.test_cache.set("port_8081", {"type": "benchflow", "timestamp": time.time()})
+        self.test_cache.set("port_8082", {"type": "direct", "timestamp": time.time()})
 
-        clear_detection_cache()
+        clear_detection_cache(cache_strategy=self.test_cache)
 
-        assert len(_server_type_cache) == 0
+        # Verify cache is cleared
+        stats = self.test_cache.get_stats()
+        assert stats["total_entries"] == 0
 
     def test_clear_detection_cache_specific_port(self):
         """Test clearing cache for specific port."""
         # Add cache entries
-        _server_type_cache["port_8081"] = {"type": "benchflow", "timestamp": time.time()}
-        _server_type_cache["port_8082"] = {"type": "direct", "timestamp": time.time()}
+        self.test_cache.set("port_8081", {"type": "benchflow", "timestamp": time.time()})
+        self.test_cache.set("port_8082", {"type": "direct", "timestamp": time.time()})
 
-        clear_detection_cache(8081)
+        clear_detection_cache(8081, cache_strategy=self.test_cache)
 
-        assert "port_8081" not in _server_type_cache
-        assert "port_8082" in _server_type_cache
+        # Verify specific port cleared but other remains
+        assert self.test_cache.get("port_8081") is None
+        assert self.test_cache.get("port_8082") is not None
 
     def test_get_detection_cache_stats(self):
         """Test cache statistics reporting."""
         current_time = time.time()
 
-        # Add mix of valid and expired entries
-        _server_type_cache["port_8081"] = {
-            "type": "benchflow",
-            "timestamp": current_time - 100,
-        }  # Valid
-        _server_type_cache["port_8082"] = {
-            "type": "direct",
-            "timestamp": current_time - 400,
-        }  # Expired
+        # Add cache entries
+        self.test_cache.set("port_8081", {"type": "benchflow", "timestamp": current_time})
+        self.test_cache.set("port_8082", {"type": "direct", "timestamp": current_time})
 
-        stats = get_detection_cache_stats()
+        stats = get_detection_cache_stats(cache_strategy=self.test_cache)
 
+        assert "strategy" in stats
+        assert stats["strategy"] == "InMemoryCache"
         assert stats["total_entries"] == 2
-        assert stats["valid_entries"] == 1
-        assert stats["expired_entries"] == 1
-        assert 0 < stats["cache_hit_ratio"] <= 1
+        # InMemoryCache provides detailed stats
+        assert "hits" in stats
+        assert "misses" in stats
+        assert "sets" in stats
 
 
 @pytest.mark.fast
@@ -292,8 +306,11 @@ class TestAutoDetectionWithFactory:
     """Test auto-detection integration with factory pattern."""
 
     def setup_method(self):
-        """Clear cache before each test."""
-        clear_detection_cache()
+        """Set up cache strategy for testing."""
+        # Use NullCache for predictable test behavior
+        self.test_cache = NullCache()
+        set_default_cache_strategy(self.test_cache)
+        clear_detection_cache(cache_strategy=self.test_cache)
 
     @patch("src.claudelearnspokemon.pokemon_gym_factory.detect_server_type")
     def test_auto_detection_creates_adapter_for_benchflow(self, mock_detect):
@@ -305,7 +322,11 @@ class TestAutoDetectionWithFactory:
         )
 
         assert isinstance(client, PokemonGymAdapter)
-        mock_detect.assert_called_once_with(8081, 3.0)
+        # Should be called with cache strategy
+        mock_detect.assert_called_once()
+        args = mock_detect.call_args[0]
+        assert args[0] == 8081  # port
+        assert args[1] == 3.0  # timeout
 
     @patch("src.claudelearnspokemon.pokemon_gym_factory.detect_server_type")
     def test_auto_detection_creates_client_for_direct(self, mock_detect):
@@ -317,7 +338,11 @@ class TestAutoDetectionWithFactory:
         )
 
         assert isinstance(client, PokemonGymClient)
-        mock_detect.assert_called_once_with(8081, 3.0)
+        # Should be called with cache strategy
+        mock_detect.assert_called_once()
+        args = mock_detect.call_args[0]
+        assert args[0] == 8081  # port
+        assert args[1] == 3.0  # timeout
 
     @patch("src.claudelearnspokemon.pokemon_gym_factory.detect_server_type")
     def test_auto_detection_passes_custom_timeout(self, mock_detect):
@@ -328,12 +353,23 @@ class TestAutoDetectionWithFactory:
             port=8081, container_id="test_container", adapter_type="auto", detection_timeout=5.0
         )
 
-        mock_detect.assert_called_once_with(8081, 5.0)
+        # Should be called with custom timeout
+        mock_detect.assert_called_once()
+        args = mock_detect.call_args[0]
+        assert args[0] == 8081  # port
+        assert args[1] == 5.0  # timeout
 
 
 @pytest.mark.fast
 class TestClientCompatibilityValidation:
     """Test client compatibility validation functionality."""
+
+    def setup_method(self):
+        """Set up cache strategy for testing."""
+        # Use NullCache for predictable test behavior
+        self.test_cache = NullCache()
+        set_default_cache_strategy(self.test_cache)
+        clear_detection_cache(cache_strategy=self.test_cache)
 
     def test_validate_pokemon_gym_client(self):
         """Test validation of PokemonGymClient compatibility."""
@@ -386,8 +422,11 @@ class TestFactoryErrorHandling:
     """Test factory error handling and edge cases."""
 
     def setup_method(self):
-        """Clear cache before each test."""
-        clear_detection_cache()
+        """Set up cache strategy for testing."""
+        # Use NullCache for predictable test behavior
+        self.test_cache = NullCache()
+        set_default_cache_strategy(self.test_cache)
+        clear_detection_cache(cache_strategy=self.test_cache)
 
     @patch("src.claudelearnspokemon.pokemon_gym_factory.detect_server_type")
     def test_factory_handles_detection_failure(self, mock_detect):
@@ -419,8 +458,11 @@ class TestFactoryMetrics:
     """Test factory metrics and monitoring functionality."""
 
     def setup_method(self):
-        """Clear cache before each test."""
-        clear_detection_cache()
+        """Set up cache strategy for testing."""
+        # Use NullCache for predictable test behavior
+        self.test_cache = NullCache()
+        set_default_cache_strategy(self.test_cache)
+        clear_detection_cache(cache_strategy=self.test_cache)
 
     def test_get_factory_metrics(self):
         """Test factory metrics reporting."""
@@ -430,7 +472,7 @@ class TestFactoryMetrics:
         assert "supported_types" in metrics
         assert "default_detection_timeout" in metrics
         assert "default_input_delay" in metrics
-        assert "cache_timeout_seconds" in metrics
+        assert "cache_strategy_type" in metrics
 
         # Verify supported types
         expected_types = ["direct", "benchflow", "auto", "fallback"]
@@ -446,15 +488,18 @@ class TestFactoryProductionScenarios:
     """Test factory behavior in production-like scenarios."""
 
     def setup_method(self):
-        """Clear cache before each test."""
-        clear_detection_cache()
+        """Set up cache strategy for testing."""
+        # Use InMemoryCache for thread safety testing
+        self.test_cache = InMemoryCache()
+        set_default_cache_strategy(self.test_cache)
+        clear_detection_cache(cache_strategy=self.test_cache)
 
     @patch("src.claudelearnspokemon.pokemon_gym_factory.detect_server_type")
     def test_factory_with_mixed_server_types(self, mock_detect):
         """Test factory handles mixed server types correctly."""
 
         # Mock different server types for different ports
-        def mock_detection(port, timeout):
+        def mock_detection(port, timeout=3.0, cache_strategy=None):
             if port == 8081:
                 return "benchflow"
             else:
@@ -502,7 +547,7 @@ class TestFactoryProductionScenarios:
         def concurrent_detection(port):
             """Function to run in multiple threads"""
             try:
-                return detect_server_type(port)
+                return detect_server_type(port, cache_strategy=self.test_cache)
             except Exception as e:
                 return f"error: {e}"
 
@@ -519,12 +564,12 @@ class TestFactoryProductionScenarios:
                 results.append(("detect", port, result))
 
                 # Get stats (read cache)
-                stats = get_detection_cache_stats()
-                results.append(("stats", port, stats["total_entries"]))
+                stats = get_detection_cache_stats(cache_strategy=self.test_cache)
+                results.append(("stats", port, stats.get("total_entries", 0)))
 
                 # Clear specific port occasionally (write cache)
                 if i % 3 == 0:
-                    clear_detection_cache(port)
+                    clear_detection_cache(port, cache_strategy=self.test_cache)
                     results.append(("clear", port, "cleared"))
 
             return results
@@ -575,7 +620,6 @@ class TestFactoryProductionScenarios:
             assert total_entries >= 0, "Negative cache entries indicate corruption"
 
         # Final verification: cache should still be functional
-        final_stats = get_detection_cache_stats()
+        final_stats = get_detection_cache_stats(cache_strategy=self.test_cache)
         assert isinstance(final_stats, dict)
-        assert "total_entries" in final_stats
-        assert final_stats["total_entries"] >= 0
+        assert final_stats.get("total_entries", 0) >= 0

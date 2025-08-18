@@ -8,13 +8,13 @@ Author: Bot Dean - Production-First Engineering
 """
 
 import logging
-import threading
 import time
 from typing import TYPE_CHECKING, Any, Union
 
 import requests
 from requests.exceptions import RequestException, Timeout
 
+from .compatibility.cache_strategies import CacheStrategy, create_cache_strategy
 from .pokemon_gym_adapter import PokemonGymAdapter
 
 if TYPE_CHECKING:
@@ -23,10 +23,8 @@ if TYPE_CHECKING:
 # Configure logging for production observability
 logger = logging.getLogger(__name__)
 
-# Global cache for server type detection to avoid repeated probes
-_server_type_cache: dict[str, dict[str, Any]] = {}
-_cache_timeout = 300  # 5 minutes cache timeout
-_cache_lock = threading.RLock()  # Reentrant lock for thread safety
+# Default cache strategy instance - can be overridden via dependency injection
+_default_cache_strategy: CacheStrategy | None = None
 
 
 class FactoryError(Exception):
@@ -45,6 +43,7 @@ def create_pokemon_client(
     adapter_type: str = "auto",
     input_delay: float = 0.05,
     detection_timeout: float = 3.0,
+    cache_strategy: CacheStrategy | None = None,
 ) -> Union["PokemonGymClient", PokemonGymAdapter]:
     """
     Factory function to create appropriate Pokemon client based on server type.
@@ -59,6 +58,7 @@ def create_pokemon_client(
         adapter_type: Type selection - "auto", "benchflow", "direct", or "fallback"
         input_delay: Delay between sequential inputs for benchflow adapter (default: 50ms)
         detection_timeout: Timeout for server type detection (default: 3s)
+        cache_strategy: Optional cache strategy for server type detection (None = use default)
 
     Returns:
         Either PokemonGymClient (direct) or PokemonGymAdapter (benchflow)
@@ -106,8 +106,9 @@ def create_pokemon_client(
             logger.info(f"Creating PokemonGymClient (fallback mode) for port {port}")
             return PokemonGymClient(port, container_id)
 
-        # Auto-detection mode
-        server_type = detect_server_type(port, detection_timeout)
+        # Auto-detection mode with injected cache strategy
+        cache = cache_strategy or get_default_cache_strategy()
+        server_type = detect_server_type(port, detection_timeout, cache)
 
         if server_type == "benchflow":
             logger.info(f"Auto-detected benchflow-ai server on port {port}")
@@ -122,7 +123,9 @@ def create_pokemon_client(
         raise FactoryError(f"Client creation failed: {e}") from e
 
 
-def detect_server_type(port: int, timeout: float = 3.0) -> str:
+def detect_server_type(
+    port: int, timeout: float = 3.0, cache_strategy: CacheStrategy | None = None
+) -> str:
     """
     Auto-detect server type (benchflow-ai vs direct pokemon-gym).
 
@@ -138,6 +141,7 @@ def detect_server_type(port: int, timeout: float = 3.0) -> str:
     Args:
         port: HTTP port to check
         timeout: Detection timeout per endpoint (default: 3s)
+        cache_strategy: Cache strategy to use for detection results (None = use default)
 
     Returns:
         "benchflow" for benchflow-ai servers, "direct" for direct servers
@@ -146,17 +150,21 @@ def detect_server_type(port: int, timeout: float = 3.0) -> str:
         Always returns "direct" as fallback to ensure systems keep working
         even when detection fails. This provides graceful degradation.
     """
+    # Use provided cache strategy or default
+    cache = cache_strategy or get_default_cache_strategy()
     cache_key = f"port_{port}"
     current_time = time.time()
 
-    # Check cache first
-    with _cache_lock:
-        if cache_key in _server_type_cache:
-            cache_entry = _server_type_cache[cache_key]
-            if current_time - cache_entry["timestamp"] < _cache_timeout:
-                server_type = cache_entry["type"]
-                logger.debug(f"Using cached server type for port {port}: {server_type}")
-                return server_type
+    # Check cache first (with error handling)
+    try:
+        cached_result = cache.get(cache_key)
+        if cached_result:
+            server_type = cached_result["type"]
+            logger.debug(f"Using cached server type for port {port}: {server_type}")
+            return server_type
+    except Exception as e:
+        logger.warning(f"Cache read failed for key {cache_key}: {e}")
+        # Continue without cache
 
     logger.info(f"Detecting server type for port {port}")
 
@@ -173,9 +181,12 @@ def detect_server_type(port: int, timeout: float = 3.0) -> str:
             server_type = "direct"
             logger.info(f"Detected direct pokemon-gym server on port {port}")
 
-        # Cache the result
-        with _cache_lock:
-            _server_type_cache[cache_key] = {"type": server_type, "timestamp": current_time}
+        # Cache the result (with error handling)
+        try:
+            cache.set(cache_key, {"type": server_type, "timestamp": current_time})
+        except Exception as e:
+            logger.warning(f"Cache write failed for key {cache_key}: {e}")
+            # Continue without caching
 
         return server_type
 
@@ -184,12 +195,12 @@ def detect_server_type(port: int, timeout: float = 3.0) -> str:
         # Graceful fallback to direct client
         server_type = "direct"
 
-        # Cache the fallback result with shorter timeout
-        with _cache_lock:
-            _server_type_cache[cache_key] = {
-                "type": server_type,
-                "timestamp": current_time - _cache_timeout + 60,  # 1 minute cache for failures
-            }
+        # Cache the fallback result with shorter timeout (1 minute)
+        try:
+            cache.set(cache_key, {"type": server_type, "timestamp": current_time}, ttl_seconds=60)
+        except Exception as e:
+            logger.warning(f"Cache write failed for fallback key {cache_key}: {e}")
+            # Continue without caching
 
         return server_type
 
@@ -241,7 +252,9 @@ def _is_benchflow_server(base_url: str, session: requests.Session, timeout: floa
         return False
 
 
-def clear_detection_cache(port: int | None = None) -> None:
+def clear_detection_cache(
+    port: int | None = None, cache_strategy: CacheStrategy | None = None
+) -> None:
     """
     Clear server type detection cache.
 
@@ -249,49 +262,33 @@ def clear_detection_cache(port: int | None = None) -> None:
 
     Args:
         port: Specific port to clear cache for, or None to clear all
+        cache_strategy: Cache strategy to use (None = use default)
     """
-    global _server_type_cache
+    cache = cache_strategy or get_default_cache_strategy()
 
-    with _cache_lock:
-        if port is None:
-            _server_type_cache.clear()
-            logger.info("Cleared all server type detection cache")
-        else:
-            cache_key = f"port_{port}"
-            _server_type_cache.pop(cache_key, None)
-            logger.info(f"Cleared server type detection cache for port {port}")
+    if port is None:
+        cache.clear()
+        logger.info("Cleared all server type detection cache")
+    else:
+        cache_key = f"port_{port}"
+        cache.clear(cache_key)
+        logger.info(f"Cleared server type detection cache for port {port}")
 
 
-def get_detection_cache_stats() -> dict[str, Any]:
+def get_detection_cache_stats(cache_strategy: CacheStrategy | None = None) -> dict[str, Any]:
     """
     Get statistics about the detection cache.
 
     Useful for monitoring and debugging cache behavior.
 
+    Args:
+        cache_strategy: Cache strategy to get stats from (None = use default)
+
     Returns:
         Dictionary with cache statistics
     """
-    current_time = time.time()
-
-    valid_entries = 0
-    expired_entries = 0
-
-    with _cache_lock:
-        for cache_entry in _server_type_cache.values():
-            if current_time - cache_entry["timestamp"] < _cache_timeout:
-                valid_entries += 1
-            else:
-                expired_entries += 1
-
-        total_entries = len(_server_type_cache)
-
-    return {
-        "total_entries": total_entries,
-        "valid_entries": valid_entries,
-        "expired_entries": expired_entries,
-        "cache_timeout": _cache_timeout,
-        "cache_hit_ratio": valid_entries / max(total_entries, 1),
-    }
+    cache = cache_strategy or get_default_cache_strategy()
+    return cache.get_stats()
 
 
 def validate_client_compatibility(client: Union["PokemonGymClient", PokemonGymAdapter]) -> bool:
@@ -330,22 +327,61 @@ def validate_client_compatibility(client: Union["PokemonGymClient", PokemonGymAd
         return False
 
 
+def get_default_cache_strategy() -> CacheStrategy:
+    """
+    Get or create the default cache strategy for the factory.
+
+    Uses lazy initialization to create the default cache strategy only when needed.
+    This allows for environment-based configuration while maintaining singleton behavior.
+
+    Returns:
+        Default cache strategy instance
+    """
+    global _default_cache_strategy
+
+    if _default_cache_strategy is None:
+        # Lazy initialization with environment-aware defaults
+        _default_cache_strategy = create_cache_strategy("auto", default_ttl_seconds=300)
+        logger.info(f"Initialized default cache strategy: {type(_default_cache_strategy).__name__}")
+
+    return _default_cache_strategy
+
+
+def set_default_cache_strategy(strategy: CacheStrategy) -> None:
+    """
+    Set the default cache strategy for the factory.
+
+    Useful for testing or when you want to override the default strategy
+    across all factory operations.
+
+    Args:
+        strategy: Cache strategy instance to use as default
+    """
+    global _default_cache_strategy
+
+    _default_cache_strategy = strategy
+    logger.info(f"Set default cache strategy to: {type(strategy).__name__}")
+
+
 # Production monitoring and metrics helpers
 
 
-def get_factory_metrics() -> dict[str, Any]:
+def get_factory_metrics(cache_strategy: CacheStrategy | None = None) -> dict[str, Any]:
     """
     Get factory usage metrics for monitoring.
+
+    Args:
+        cache_strategy: Cache strategy to get metrics from (None = use default)
 
     Returns:
         Dictionary with factory operation metrics
     """
-    cache_stats = get_detection_cache_stats()
+    cache_stats = get_detection_cache_stats(cache_strategy)
 
     return {
         "detection_cache": cache_stats,
         "supported_types": ["direct", "benchflow", "auto", "fallback"],
         "default_detection_timeout": 3.0,
         "default_input_delay": 0.05,
-        "cache_timeout_seconds": _cache_timeout,
+        "cache_strategy_type": cache_stats.get("strategy", "unknown"),
     }
