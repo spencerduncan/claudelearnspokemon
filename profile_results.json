@@ -1,4 +1,5 @@
 {
+<<<<<<< HEAD
   "timestamp": "2025-08-18 14:52:06",
   "summary": {
     "fast": 5,
@@ -9,25 +10,110 @@
   "results": {
     "tests/test_claude_code_manager.py": {
       "duration": 0.9419413969735615,
+=======
+  "timestamp": "2025-08-18 14:24:49",
+  "summary": {
+    "fast": 17,
+    "medium": 9,
+    "slow": 2,
+    "total": 28
+  },
+  "results": {
+    "tests/test_claude_code_manager.py": {
+      "duration": 0.8910572839668021,
+>>>>>>> 62d1702 (fix: Resolve interface contract violations in PokemonGymAdapter integration tests)
       "status": "passed",
       "category": "fast"
     },
     "tests/test_compatibility_validation.py": {
+<<<<<<< HEAD
       "duration": 0.8631792910164222,
+=======
+      "duration": 0.7634085310273804,
+>>>>>>> 62d1702 (fix: Resolve interface contract violations in PokemonGymAdapter integration tests)
       "status": "passed",
       "category": "fast"
     },
     "tests/test_health_monitor_integration_simple.py": {
+<<<<<<< HEAD
       "duration": 0.9387294430052862,
+=======
+      "duration": 0.7553397000301629,
+>>>>>>> 62d1702 (fix: Resolve interface contract violations in PokemonGymAdapter integration tests)
       "status": "passed",
       "category": "fast"
     },
     "tests/test_ssh_compatibility.py": {
+<<<<<<< HEAD
       "duration": 0.7759894300252199,
+=======
+      "duration": 0.5160436809528619,
+      "status": "passed",
+      "category": "fast"
+    },
+    "tests/test_script_compiler.py": {
+      "duration": 0.7593454559682868,
+      "status": "passed",
+      "category": "fast"
+    },
+    "tests/test_pokemon_gym_factory.py": {
+      "duration": 0.8687673750100657,
+      "status": "passed",
+      "category": "fast"
+    },
+    "tests/test_tile_observer.py": {
+      "duration": 0.741612812038511,
+      "status": "passed",
+      "category": "fast"
+    },
+    "tests/test_session_recovery.py": {
+      "duration": 0.610485184006393,
+      "status": "passed",
+      "category": "fast"
+    },
+    "tests/test_checkpoint_manager_concurrent.py": {
+      "duration": 0.6009537309873849,
+      "status": "passed",
+      "category": "fast"
+    },
+    "tests/test_concurrent_performance_benchmark.py": {
+      "duration": 0.7871669529704377,
+      "status": "passed",
+      "category": "fast"
+    },
+    "tests/test_emulator_pool_compatibility.py": {
+      "duration": 0.6295445340219885,
+      "status": "passed",
+      "category": "fast"
+    },
+    "tests/test_emulator_pool_concurrent.py": {
+      "duration": 0.6348595549934544,
+      "status": "passed",
+      "category": "fast"
+    },
+    "tests/test_factory_cache_integration.py": {
+      "duration": 0.5387520279618911,
+      "status": "passed",
+      "category": "fast"
+    },
+    "tests/test_memgraph_checkpoint_discovery.py": {
+      "duration": 0.7474862849921919,
+      "status": "passed",
+      "category": "fast"
+    },
+    "tests/test_refactoring_verification.py": {
+      "duration": 0.6303178900270723,
+      "status": "passed",
+      "category": "fast"
+    },
+    "tests/test_pokemon_gym_adapter.py": {
+      "duration": 0.7219026880338788,
+>>>>>>> 62d1702 (fix: Resolve interface contract violations in PokemonGymAdapter integration tests)
       "status": "passed",
       "category": "fast"
     },
     "tests/test_setup.py": {
+<<<<<<< HEAD
       "duration": 0.9318279279978015,
       "status": "passed",
       "category": "fast"
@@ -54,20 +140,42 @@
     },
     "tests/test_container_auto_restart.py": {
       "duration": 0.9133270399761386,
+=======
+      "duration": 0.6262199290213175,
+      "status": "passed",
+      "category": "fast"
+    },
+    "tests/test_cache_strategies.py": {
+      "duration": 1.3359224600135349,
+      "status": "passed",
+      "category": "medium"
+    },
+    "tests/test_checkpoint_discovery_integration.py": {
+      "duration": 0.872038119006902,
+>>>>>>> 62d1702 (fix: Resolve interface contract violations in PokemonGymAdapter integration tests)
       "status": "passed",
       "category": "medium"
     },
     "tests/test_enhanced_client.py": {
+<<<<<<< HEAD
       "duration": 3.6337980940006673,
+=======
+      "duration": 3.1623213600250892,
+>>>>>>> 62d1702 (fix: Resolve interface contract violations in PokemonGymAdapter integration tests)
       "status": "passed",
       "category": "medium"
     },
     "tests/test_health_monitor.py": {
+<<<<<<< HEAD
       "duration": 1.5681834559654817,
+=======
+      "duration": 1.0868203730206005,
+>>>>>>> 62d1702 (fix: Resolve interface contract violations in PokemonGymAdapter integration tests)
       "status": "passed",
       "category": "medium"
     },
     "tests/test_checkpoint_manager.py": {
+<<<<<<< HEAD
       "duration": 4.407192340993788,
       "status": "passed",
       "category": "medium"
@@ -99,10 +207,24 @@
     },
     "tests/test_performance_validation.py": {
       "duration": 0.944804442988243,
+=======
+      "duration": 2.867345700971782,
+      "status": "passed",
+      "category": "medium"
+    },
+    "tests/test_pokemon_gym_adapter_integration.py": {
+      "duration": 4.823198158002924,
+      "status": "failed",
+      "category": "medium"
+    },
+    "tests/test_pokemon_gym_adapter_contracts.py": {
+      "duration": 3.233410245971754,
+>>>>>>> 62d1702 (fix: Resolve interface contract violations in PokemonGymAdapter integration tests)
       "status": "passed",
       "category": "medium"
     },
     "tests/test_emulator_pool.py": {
+<<<<<<< HEAD
       "duration": 4.837884081993252,
       "status": "passed",
       "category": "medium"
@@ -119,10 +241,14 @@
     },
     "tests/test_factory_cache_integration.py": {
       "duration": 1.1386649990454316,
+=======
+      "duration": 1.8569764500134625,
+>>>>>>> 62d1702 (fix: Resolve interface contract violations in PokemonGymAdapter integration tests)
       "status": "passed",
       "category": "medium"
     },
     "tests/test_retry_manager.py": {
+<<<<<<< HEAD
       "duration": 2.465883203956764,
       "status": "passed",
       "category": "medium"
@@ -134,6 +260,9 @@
     },
     "tests/test_pokemon_gym_adapter.py": {
       "duration": 1.5792982169659808,
+=======
+      "duration": 1.8442539530224167,
+>>>>>>> 62d1702 (fix: Resolve interface contract violations in PokemonGymAdapter integration tests)
       "status": "passed",
       "category": "medium"
     },
