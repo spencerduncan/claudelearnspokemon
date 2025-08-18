@@ -2,10 +2,10 @@
 Test suite for OpusStrategist parallel results analysis.
 
 Performance-focused test design following John Botmack principles:
-- Pattern identification algorithms must achieve O(n log n) complexity
+- Pattern identification algorithms use O(n) complexity
 - Result compression must complete in <100ms for strategic processing
 - Statistical correlation analysis must handle parallel execution results
-- Memory-efficient result caching with LRU eviction policy
+- Memory-efficient result caching with FIFO eviction policy
 
 Test Categories:
 - TestOpusStrategistBasics: Initialization and process integration

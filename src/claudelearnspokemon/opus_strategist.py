@@ -1,22 +1,20 @@
 """
 OpusStrategist - Strategic Intelligence Layer for Parallel Results Analysis
 
-High-performance strategic planning component that wraps ClaudeCodeManager's
-Opus process with specialized pattern identification and result correlation
-algorithms. Designed following John Botmack principles for optimal algorithmic
-complexity and cache-friendly data structures.
+Strategic planning component that wraps ClaudeCodeManager's Opus process
+with pattern identification and result correlation algorithms.
 
 Performance Targets:
 - Strategic response generation: <500ms
 - Pattern analysis: <100ms for result queries
-- Memory efficient result compression with LRU caching
-- Statistical correlation analysis with O(n log n) complexity
+- Memory efficient result compression with FIFO caching
+- Statistical correlation analysis with O(n) complexity
 
 Architecture:
 - Wraps ClaudeCodeManager strategic process with intelligence layer
-- Uses vectorized operations for correlation matrix calculations
+- Simple correlation calculations using standard Python loops
 - Pre-allocated buffers for consistent performance
-- Cache-friendly Structure of Arrays (SOA) data layout
+- Structured data layout for analysis efficiency
 """
 
 import json
@@ -32,10 +30,9 @@ class OpusStrategist:
     """
     Strategic intelligence wrapper for Claude Opus parallel results analysis.
 
-    This class provides high-performance pattern identification and statistical
-    correlation analysis across multiple parallel execution streams. It leverages
-    the existing ClaudeCodeManager foundation while adding algorithmic optimizations
-    for strategic processing.
+    This class provides pattern identification and statistical correlation analysis
+    across multiple parallel execution streams. It leverages the existing
+    ClaudeCodeManager foundation with straightforward processing algorithms.
     """
 
     def __init__(self, claude_manager):
@@ -52,7 +49,7 @@ class OpusStrategist:
         self._strategic_process = None
         self._initialize_strategic_process()
 
-        # Performance optimization: Pre-allocate buffers
+        # Simple caching: Pre-allocate buffers
         self._correlation_buffer = {}
         self._pattern_cache = {}
 
@@ -83,8 +80,8 @@ class OpusStrategist:
         Core method: Analyze and synthesize results from parallel script executions.
 
         This method implements the strategic intelligence layer for pattern identification,
-        statistical correlation analysis, and result compression. Performance optimized
-        for <100ms pattern queries and <500ms strategic response generation.
+        statistical correlation analysis, and result compression. Performance targets
+        are <100ms pattern queries and <500ms strategic response generation.
 
         Args:
             results: List of ExecutionResult objects from parallel execution streams
@@ -92,9 +89,9 @@ class OpusStrategist:
         Returns:
             List of analysis results with identified patterns, correlations, and insights
 
-        Performance Notes:
-            - Uses vectorized operations for correlation matrix calculation
-            - Implements LRU caching for repeated pattern queries
+        Implementation Notes:
+            - Uses simple Python loops for correlation calculations
+            - Implements FIFO caching for repeated pattern queries
             - Pre-allocated buffers minimize memory allocation overhead
         """
         if not results:
@@ -143,12 +140,12 @@ class OpusStrategist:
 
     def _structure_results_for_analysis(self, results: list[Any]) -> dict[str, Any]:
         """
-        Structure parallel execution results for cache-friendly analysis.
+        Structure parallel execution results for efficient analysis.
 
-        Uses Structure of Arrays (SOA) layout for potential SIMD optimization
-        and improved cache locality during correlation calculations.
+        Uses array-based data layout for organized processing during
+        correlation calculations.
         """
-        # Extract parallel arrays for vectorized operations
+        # Extract arrays for organized processing
         worker_ids = []
         success_rates = []
         execution_times = []
@@ -180,8 +177,8 @@ class OpusStrategist:
         """
         Calculate statistical correlations between execution variables.
 
-        Optimized for O(n log n) complexity using efficient correlation algorithms.
-        Uses pre-allocated buffers and vectorized operations where possible.
+        Implements O(n) complexity using standard correlation calculations.
+        Uses pre-allocated buffers and simple Python loops.
         """
         correlations = {}
 
@@ -217,7 +214,7 @@ class OpusStrategist:
                         frame_lag_corr = self._pearson_correlation(frame_rates, input_lags)
                         correlations["frame_rate_input_lag"] = frame_lag_corr
 
-        # Cache results for future queries (LRU eviction)
+        # Cache results for future queries (FIFO eviction)
         self._correlation_buffer[cache_key] = correlations
 
         # Maintain cache size for memory efficiency
@@ -527,15 +524,15 @@ REQUEST: Provide strategic direction for optimal parallel execution coordination
         Get cached pattern analysis for repeated queries.
 
         Provides <100ms response time for frequently analyzed pattern combinations
-        through instance-level caching with manual LRU eviction.
+        through instance-level caching with manual FIFO eviction.
         """
         return self._pattern_cache.get(pattern_signature)
 
     def _cache_pattern_analysis(self, pattern_signature: str, analysis: dict[str, Any]) -> None:
-        """Cache pattern analysis result with LRU eviction."""
+        """Cache pattern analysis result with FIFO eviction."""
         self._pattern_cache[pattern_signature] = analysis
 
-        # Manual LRU eviction to prevent memory leaks
+        # Manual FIFO eviction to prevent memory leaks
         if len(self._pattern_cache) > 128:
             oldest_key = next(iter(self._pattern_cache))
             del self._pattern_cache[oldest_key]
