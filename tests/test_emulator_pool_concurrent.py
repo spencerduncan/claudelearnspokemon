@@ -137,6 +137,7 @@ class ConcurrentResourceTracker:
 
 
 @pytest.mark.slow
+@pytest.mark.fast
 class TestEmulatorPoolConcurrentPerformance(unittest.TestCase):
     """Test concurrent performance with real metrics - no sleep() fraud"""
 
@@ -455,6 +456,7 @@ class TestEmulatorPoolConcurrentPerformance(unittest.TestCase):
 
 
 @pytest.mark.slow
+@pytest.mark.fast
 class TestEmulatorPoolContextManagerThreadSafety(unittest.TestCase):
     """Test context manager functionality under concurrent access"""
 
