@@ -103,6 +103,7 @@ def sample_metadata():
     }
 
 
+@pytest.mark.medium
 class TestCheckpointManagerCore:
     """Test core save/load functionality."""
 
@@ -274,6 +275,7 @@ class TestCheckpointManagerCore:
             checkpoint_manager.load_checkpoint("nonexistent-id")
 
 
+@pytest.mark.medium
 class TestCheckpointValidation:
     """Test checkpoint integrity validation."""
 
@@ -320,6 +322,7 @@ class TestCheckpointValidation:
         assert checkpoint_manager.validate_checkpoint(None) is False
 
 
+@pytest.mark.medium
 class TestCheckpointPruning:
     """Test checkpoint pruning algorithm."""
 
@@ -381,18 +384,42 @@ class TestCheckpointPruning:
         all_checkpoint_ids = checkpoint_manager_no_auto_prune._get_all_checkpoint_ids()
         assert len(all_checkpoint_ids) == 8
 
-    def test_prune_checkpoints_performance(self, checkpoint_manager, sample_game_state):
-        """Test pruning performance meets requirements."""
-        # Create many checkpoints to test performance
-        for i in range(50):
-            checkpoint_manager.save_checkpoint(sample_game_state, {"location": f"loc_{i}"})
+    def test_prune_checkpoints_performance(
+        self, checkpoint_manager_no_auto_prune, sample_game_state
+    ):
+        """Test pruning performance meets requirements with production-grade timeout protection."""
+        import signal
 
-        start_time = time.perf_counter()
-        checkpoint_manager.prune_checkpoints(25)
-        pruning_time = time.perf_counter() - start_time
+        def timeout_handler(signum, frame):
+            raise TimeoutError("Performance test exceeded 3-second timeout - indicates bottleneck")
 
-        # Performance requirement: < 2s for pruning operation
-        assert pruning_time < checkpoint_manager.MAX_PRUNING_TIME_S
+        # Production-grade circuit breaker: 3-second hard timeout
+        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(3)
+
+        try:
+            # Create many checkpoints to test performance
+            for i in range(50):
+                checkpoint_manager_no_auto_prune.save_checkpoint(
+                    sample_game_state, {"location": f"loc_{i}"}
+                )
+
+            start_time = time.perf_counter()
+            checkpoint_manager_no_auto_prune.prune_checkpoints(25)
+            pruning_time = time.perf_counter() - start_time
+
+            # Performance requirement: < 2s for pruning operation
+            assert pruning_time < checkpoint_manager_no_auto_prune.MAX_PRUNING_TIME_S
+
+            # Production validation: Log actual performance for monitoring
+            print(
+                f"✅ PRODUCTION PERF: Pruning completed in {pruning_time:.3f}s (target: {checkpoint_manager_no_auto_prune.MAX_PRUNING_TIME_S}s)"
+            )
+
+        finally:
+            # Always clean up timeout handler - production hygiene
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
 
     def test_prune_checkpoints_value_scoring(
         self, checkpoint_manager_no_auto_prune, sample_game_state, sample_metadata
@@ -432,6 +459,7 @@ class TestCheckpointPruning:
             checkpoint_manager.prune_checkpoints(-1)
 
 
+@pytest.mark.medium
 class TestCheckpointListing:
     """Test checkpoint listing and querying."""
 
@@ -477,6 +505,7 @@ class TestCheckpointListing:
         assert not_found_id == ""
 
 
+@pytest.mark.medium
 class TestMetricsAndObservability:
     """Test metrics collection and observability features."""
 
@@ -537,6 +566,7 @@ class TestMetricsAndObservability:
         assert metrics["corruption_events"] > 0
 
 
+@pytest.mark.medium
 class TestErrorHandling:
     """Test error handling and edge cases."""
 
@@ -703,6 +733,7 @@ class TestErrorHandling:
         assert len(set(results)) == 5  # All unique IDs
 
 
+@pytest.mark.medium
 class TestCheckpointManagerPerformance:
     """Test performance requirements."""
 
@@ -781,6 +812,7 @@ class TestCheckpointManagerPerformance:
         assert loaded_state == large_state
 
 
+@pytest.mark.medium
 class TestCheckpointManagerAtomicOperations:
     """Test atomic write operations."""
 
@@ -823,6 +855,7 @@ class TestCheckpointManagerAtomicOperations:
         assert len(temp_files) == 0, f"Temp files not cleaned up: {temp_files}"
 
 
+@pytest.mark.medium
 class TestCheckpointManagerUtilityMethods:
     """Test utility methods."""
 
@@ -883,6 +916,7 @@ class TestCheckpointManagerUtilityMethods:
         assert "avg_load_time_ms" in stats
 
 
+@pytest.mark.medium
 class TestCheckpointManagerUniqueIdentifiers:
     """Test UUID generation uniqueness."""
 

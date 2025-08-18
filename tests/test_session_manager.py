@@ -22,6 +22,8 @@ import unittest
 from unittest.mock import patch
 
 # Test imports
+import pytest
+
 # Import the session manager components
 from claudelearnspokemon.session_manager import (
     SessionHealthMonitor,
@@ -37,6 +39,7 @@ from claudelearnspokemon.session_manager import (
 )
 
 
+@pytest.mark.slow
 class TestSessionMetrics(unittest.TestCase):
     """Test SessionMetrics data class functionality."""
 
@@ -80,6 +83,7 @@ class TestSessionMetrics(unittest.TestCase):
         assert 45.0 <= ops_per_sec <= 55.0  # Allow some timing variance
 
 
+@pytest.mark.slow
 class TestSessionPersistence(unittest.TestCase):
     """Test SessionPersistence database operations."""
 
@@ -273,6 +277,7 @@ class TestSessionPersistence(unittest.TestCase):
         assert len(set(session_ids)) == expected_count  # All unique
 
 
+@pytest.mark.slow
 class TestSessionHealthMonitor(unittest.TestCase):
     """Test SessionHealthMonitor functionality."""
 
@@ -391,6 +396,7 @@ class TestSessionHealthMonitor(unittest.TestCase):
         # This test would need more sophisticated timing control in production
 
 
+@pytest.mark.slow
 class TestSessionManager(unittest.TestCase):
     """Test SessionManager core functionality."""
 
@@ -676,6 +682,7 @@ class TestSessionManager(unittest.TestCase):
         assert 0.0 <= resource_usage["disk_usage_percent"] <= 100.0
 
 
+@pytest.mark.slow
 class TestSessionManagerFactory(unittest.TestCase):
     """Test factory functions and utilities."""
 
@@ -704,6 +711,7 @@ class TestSessionManagerFactory(unittest.TestCase):
             assert "cpu_percent" in resource_usage
 
 
+@pytest.mark.slow
 class TestPerformanceCharacteristics(unittest.TestCase):
     """Test performance requirements and SLA compliance."""
 

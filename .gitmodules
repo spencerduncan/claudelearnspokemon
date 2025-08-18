@@ -1,0 +1,3 @@
+[submodule "pokemon-gym"]
+	path = pokemon-gym
+	url = https://github.com/benchflow-ai/pokemon-gym.git
