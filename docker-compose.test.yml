@@ -1,7 +1,8 @@
-version: '3.8'
-
 services:
   pokemon-gym:
+    build:
+      context: ./docker/pokemon-gym
+      dockerfile: Dockerfile
     image: pokemon-gym:latest
     ports:
       - "8080"
