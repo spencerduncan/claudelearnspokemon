@@ -15,6 +15,8 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, patch
 
+import pytest
+
 from claudelearnspokemon.claude_code_manager import (
     ClaudeCodeManager,
     benchmark_startup_performance,
@@ -26,6 +28,7 @@ from claudelearnspokemon.process_metrics_collector import ProcessMetrics
 from claudelearnspokemon.prompts import ProcessType
 
 
+@pytest.mark.fast
 class TestClaudeCodeManagerBasics(unittest.TestCase):
     """Test basic ClaudeCodeManager functionality."""
 
@@ -74,6 +77,7 @@ class TestClaudeCodeManagerBasics(unittest.TestCase):
         self.assertIsNone(available)
 
 
+@pytest.mark.fast
 class TestProcessLifecycle(unittest.TestCase):
     """Test process lifecycle operations."""
 
@@ -159,6 +163,7 @@ class TestProcessLifecycle(unittest.TestCase):
         self.assertFalse(self.manager.is_running())
 
 
+@pytest.mark.fast
 class TestPerformanceMetrics(unittest.TestCase):
     """Test performance metrics and benchmarking."""
 
@@ -245,6 +250,7 @@ class TestPerformanceMetrics(unittest.TestCase):
         self.assertEqual(metrics.restart_count, 0)
 
 
+@pytest.mark.fast
 class TestFailureHandling(unittest.TestCase):
     """Test failure scenarios and error handling."""
 
@@ -306,6 +312,7 @@ class TestFailureHandling(unittest.TestCase):
         self.assertEqual(restart_count, 0)
 
 
+@pytest.mark.fast
 class TestParallelOperations(unittest.TestCase):
     """Test concurrent and parallel operations."""
 
@@ -390,6 +397,7 @@ class TestParallelOperations(unittest.TestCase):
         self.assertFalse(manager.is_running())
 
 
+@pytest.mark.fast
 class TestProcessConfig(unittest.TestCase):
     """Test ProcessConfig and ProcessMetrics functionality."""
 
@@ -429,6 +437,7 @@ class TestProcessConfig(unittest.TestCase):
         self.assertFalse(config.use_process_group)
 
 
+@pytest.mark.fast
 class TestClaudeProcess(unittest.TestCase):
     """Test individual ClaudeProcess functionality."""
 
@@ -500,6 +509,7 @@ class TestClaudeProcess(unittest.TestCase):
         # Process should be terminated after context
 
 
+@pytest.mark.fast
 class TestBenchmarkUtilities(unittest.TestCase):
     """Test performance benchmarking utilities."""
 

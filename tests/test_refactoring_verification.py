@@ -11,7 +11,10 @@ This test file verifies that:
 import unittest
 from unittest.mock import Mock, patch
 
+import pytest
 
+
+@pytest.mark.fast
 class TestRefactoringVerification(unittest.TestCase):
     """Verify the Clean Code refactoring is complete and working."""
 

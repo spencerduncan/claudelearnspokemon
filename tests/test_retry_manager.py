@@ -26,7 +26,6 @@ from claudelearnspokemon.retry_manager import (
 
 
 @pytest.mark.medium
-@pytest.mark.slow
 class TestRetryManager:
     """Test suite for RetryManager functionality."""
 
