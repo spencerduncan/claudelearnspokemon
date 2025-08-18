@@ -20,6 +20,7 @@ from claudelearnspokemon.emulator_pool import (
 )
 
 
+@pytest.mark.medium
 class TestEmulatorPool:
     """Test EmulatorPool with production-grade failure scenarios."""
 
@@ -387,6 +388,7 @@ class TestEmulatorPool:
             container.stop.assert_called_once()
 
 
+@pytest.mark.medium
 class TestEmulatorPoolResourcePool:
     """Test resource pool functionality for EmulatorPool."""
 
@@ -686,6 +688,7 @@ class TestEmulatorPoolResourcePool:
         assert result == "A DOWN START"
 
 
+@pytest.mark.medium
 class TestPokemonGymClient:
     """Test PokemonGymClient functionality."""
 
@@ -758,6 +761,7 @@ class TestPokemonGymClient:
         assert client.is_healthy() is False
 
 
+@pytest.mark.medium
 class TestExecutionResult:
     """Test ExecutionResult functionality."""
 
@@ -780,6 +784,7 @@ class TestExecutionResult:
         assert "FAILURE" in str(result)
 
 
+@pytest.mark.medium
 class TestEmulatorPoolError:
     """Test custom exception class."""
 

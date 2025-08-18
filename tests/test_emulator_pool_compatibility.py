@@ -16,6 +16,7 @@ from src.claudelearnspokemon.emulator_pool import EmulatorPool, EmulatorPoolErro
 from src.claudelearnspokemon.pokemon_gym_adapter import PokemonGymAdapter
 
 
+@pytest.mark.fast
 class TestEmulatorPoolCompatibilityLayerIntegration:
     """Test EmulatorPool integration with compatibility layer."""
 
@@ -152,6 +153,7 @@ class TestEmulatorPoolCompatibilityLayerIntegration:
         assert "Failed to start container on port 8081" in str(exc_info.value)
 
 
+@pytest.mark.fast
 class TestEmulatorPoolBackwardCompatibility:
     """Test that EmulatorPool maintains backward compatibility."""
 
@@ -250,6 +252,7 @@ class TestEmulatorPoolBackwardCompatibility:
         pool.shutdown()
 
 
+@pytest.mark.fast
 class TestEmulatorPoolWithDifferentAdapterTypes:
     """Test EmulatorPool behavior with different adapter types."""
 
@@ -352,6 +355,7 @@ class TestEmulatorPoolWithDifferentAdapterTypes:
         mock_create_client.return_value = mock_client
 
 
+@pytest.mark.fast
 class TestEmulatorPoolScriptExecution:
     """Test EmulatorPool script execution with compatibility layer."""
 
@@ -408,6 +412,7 @@ class TestEmulatorPoolScriptExecution:
         mock_client.get_state.assert_called_once()
 
 
+@pytest.mark.fast
 class TestEmulatorPoolLogging:
     """Test EmulatorPool logging with compatibility layer."""
 

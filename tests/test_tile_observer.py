@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from claudelearnspokemon.tile_observer import TileObserver
 
 
+@pytest.mark.fast
 class TestTileObserverBasicStructure:
     """Test TileObserver class initialization and basic structure."""
 
@@ -57,6 +58,7 @@ class TestTileObserverBasicStructure:
         assert len(observer._map_context) == 0
 
 
+@pytest.mark.fast
 class TestTileCapture:
     """Test tile grid capture functionality."""
 
@@ -108,6 +110,7 @@ class TestTileCapture:
         }
 
 
+@pytest.mark.fast
 class TestPositionDetection:
     """Test player and NPC position identification."""
 
@@ -164,6 +167,7 @@ class TestPositionDetection:
         assert (5, 5) in analysis["npcs"]
 
 
+@pytest.mark.fast
 class TestCollisionLearning:
     """Test learning tile semantics through collision detection."""
 
@@ -212,6 +216,7 @@ class TestCollisionLearning:
         assert tile_properties["observation_count"] == 3
 
 
+@pytest.mark.fast
 class TestPatternDetection:
     """Test pattern detection in tile arrangements."""
 
@@ -274,6 +279,7 @@ class TestPatternDetection:
         assert (0, 16) in matches
 
 
+@pytest.mark.fast
 class TestMenuHandling:
     """Test handling of menu overlay tiles."""
 
@@ -306,6 +312,7 @@ class TestMenuHandling:
         assert analysis["player_position"] == (10, 9)
 
 
+@pytest.mark.fast
 class TestPathfinding:
     """Test walkable path identification."""
 
@@ -360,6 +367,7 @@ class TestPathfinding:
         assert isinstance(path, list)
 
 
+@pytest.mark.fast
 class TestIntegrationScenarios:
     """Test integrated scenarios combining multiple TileObserver capabilities."""
 
@@ -424,6 +432,7 @@ class TestIntegrationScenarios:
         }
 
 
+@pytest.mark.fast
 class TestEdgeCasesAndErrorHandling:
     """Test edge cases and error handling scenarios."""
 

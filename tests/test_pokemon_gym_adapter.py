@@ -1,547 +1,1069 @@
 """
-Test suite for PokemonGymAdapter compatibility layer.
+Comprehensive unit tests for PokemonGymAdapter.
 
-Tests the adapter implementation with production patterns including
-error handling, session management, and performance validation.
+Tests the adapter pattern implementation that bridges our EmulatorPool interface
+with the benchflow-ai/pokemon-gym server API.
 
-Author: Bot Dean - Production-First Engineering
+Following Uncle Bob's TDD principles:
+- Write failing tests first (RED)
+- Implement minimal code to pass (GREEN)
+- Refactor for clean code (REFACTOR)
+
+Author: Uncle Bot - Software Craftsmanship Applied
 """
 
+import json
 import time
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
-from requests.exceptions import RequestException
+import responses
 
-from src.claudelearnspokemon.pokemon_gym_adapter import AdapterError, PokemonGymAdapter
-
-
-class TestPokemonGymAdapterBasics:
-    """Test basic adapter functionality and initialization."""
-
-    def setup_method(self):
-        """Set up test fixtures before each test method."""
-        self.adapter = PokemonGymAdapter(port=8081, container_id="test_container_123")
-
-    def test_initialization(self):
-        """Test adapter initializes correctly."""
-        assert self.adapter.port == 8081
-        assert self.adapter.container_id == "test_container_123"
-        assert self.adapter.base_url == "http://localhost:8081"
-        assert self.adapter.input_delay == 0.05
-        assert not self.adapter.initialized
-        assert self.adapter.session_id is None
-
-    def test_string_representation(self):
-        """Test string representation provides useful debugging info."""
-        str_repr = str(self.adapter)
-        assert "PokemonGymAdapter" in str_repr
-        assert "8081" in str_repr
-        assert "test_container_123"[:12] in str_repr
-
-    def test_custom_input_delay(self):
-        """Test adapter accepts custom input delay configuration."""
-        custom_adapter = PokemonGymAdapter(
-            port=8082, container_id="test_container_456", input_delay=0.1
-        )
-        assert custom_adapter.input_delay == 0.1
+from claudelearnspokemon.pokemon_gym_adapter import (
+    PokemonGymAdapter,
+    PokemonGymAdapterError,
+    SessionManager,
+)
 
 
-class TestPokemonGymAdapterSessionManagement:
-    """Test session lifecycle management with production patterns."""
+@pytest.mark.fast
+class TestPokemonGymAdapterInitialization:
+    """Test adapter initialization and configuration."""
 
-    def setup_method(self):
-        """Set up test fixtures before each test method."""
-        self.adapter = PokemonGymAdapter(port=8081, container_id="test_container_123")
-        self.mock_session = Mock()
-        self.adapter.session = self.mock_session
+    def test_adapter_initializes_with_port_and_container_id(self):
+        """Test adapter initializes correctly with required parameters."""
+        adapter = PokemonGymAdapter(8080, "test-container-123")
 
-    def test_session_initialization_success(self):
-        """Test successful session initialization."""
-        # Mock successful initialization response
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"session_id": "test_session_123"}
-        mock_response.raise_for_status.return_value = None
-        self.mock_session.post.return_value = mock_response
+        assert adapter.port == 8080
+        assert adapter.container_id == "test-container-123"
+        assert adapter.base_url == "http://localhost:8080"
+        assert adapter.session is not None
+        assert isinstance(adapter.session_manager, SessionManager)
 
-        # Initialize session
-        self.adapter._initialize_session()
+    def test_adapter_initializes_with_custom_config(self):
+        """Test adapter accepts custom configuration parameters."""
+        config = {"rom_path": "/path/to/pokemon.gb", "save_state": "initial.save", "headless": True}
 
-        # Verify session state
-        assert self.adapter.initialized
-        assert self.adapter.session_id == "test_session_123"
-        assert self.adapter.session_start is not None
+        adapter = PokemonGymAdapter(8081, "custom-container", config=config)
 
-        # Verify API call
-        self.mock_session.post.assert_called_once_with(
-            "http://localhost:8081/initialize",
-            json={
-                "headless": True,
-                "sound": False,
-                "save_video": False,
-                "fast_video": True,
-            },
-            timeout=15,
+        assert adapter.config == config
+        assert adapter.port == 8081
+
+    def test_adapter_sets_reasonable_timeouts(self):
+        """Test adapter configures appropriate HTTP timeouts."""
+        adapter = PokemonGymAdapter(8080, "test-container")
+
+        # Verify timeout configuration
+        assert hasattr(adapter, "input_timeout")
+        assert hasattr(adapter, "state_timeout")
+        assert adapter.input_timeout <= 10.0  # Reasonable input timeout
+        assert adapter.state_timeout <= 5.0  # Fast state queries
+
+
+@pytest.mark.medium
+class TestInputTranslation:
+    """Test input sequence translation from batch to sequential actions."""
+
+    @responses.activate
+    def test_send_input_translates_single_button(self):
+        """Test single button input translates to one API call."""
+        adapter = PokemonGymAdapter(8080, "test-container")
+
+        # Mock session initialization
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "test-session-123", "status": "initialized"},
+            status=200,
         )
 
-    def test_session_initialization_failure(self):
-        """Test session initialization failure handling."""
-        # Mock failed initialization response
-        self.mock_session.post.side_effect = RequestException("Connection failed")
-
-        # Verify initialization raises AdapterError
-        with pytest.raises(AdapterError) as exc_info:
-            self.adapter._initialize_session()
-
-        assert "Failed to initialize session" in str(exc_info.value)
-        assert not self.adapter.initialized
-        assert self.adapter.session_id is None
-
-    def test_session_expiration_detection(self):
-        """Test session expiration detection logic."""
-        # Set up expired session
-        self.adapter.session_start = time.time() - 2000  # 33+ minutes ago
-
-        assert self.adapter._session_expired()
-
-        # Set up fresh session
-        self.adapter.session_start = time.time() - 300  # 5 minutes ago
-
-        assert not self.adapter._session_expired()
-
-    def test_ensure_session_with_valid_session(self):
-        """Test _ensure_session with valid active session."""
-        # Set up valid session
-        self.adapter.initialized = True
-        self.adapter.session_start = time.time() - 300  # Fresh session
-
-        # Should not try to initialize
-        self.adapter._ensure_session()
-
-        self.mock_session.post.assert_not_called()
-
-    def test_ensure_session_with_expired_session(self):
-        """Test _ensure_session reinitializes expired session."""
-        # Set up expired session
-        self.adapter.initialized = True
-        self.adapter.session_start = time.time() - 2000  # Expired
-
-        # Mock successful reinitialization
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"session_id": "new_session_456"}
-        mock_response.raise_for_status.return_value = None
-        self.mock_session.post.return_value = mock_response
-
-        # Should reinitialize
-        self.adapter._ensure_session()
-
-        # Verify reinitialization occurred
-        self.mock_session.post.assert_called_once()
-        assert self.adapter.session_id == "new_session_456"
-
-
-class TestPokemonGymAdapterInputTranslation:
-    """Test input translation from batch strings to sequential API calls."""
-
-    def setup_method(self):
-        """Set up test fixtures before each test method."""
-        self.adapter = PokemonGymAdapter(port=8081, container_id="test_container_123")
-        self.mock_session = Mock()
-        self.adapter.session = self.mock_session
-
-        # Mock session as initialized to skip initialization
-        self.adapter.initialized = True
-        self.adapter.session_start = time.time()
-
-    def test_single_button_input(self):
-        """Test single button input translation."""
-        # Mock successful action response
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"status": "success"}
-        mock_response.raise_for_status.return_value = None
-        self.mock_session.post.return_value = mock_response
-
-        # Send single button input
-        result = self.adapter.send_input("A")
-
-        # Verify API call
-        self.mock_session.post.assert_called_once_with(
-            "http://localhost:8081/action",
-            json={"action_type": "press_key", "keys": ["A"]},
-            timeout=10,
+        # Mock button press action
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/action",
+            json={"status": "success", "frame_count": 1},
+            status=200,
         )
 
-        # Verify result
-        assert result == {"status": "success"}
+        result = adapter.send_input("A")
 
-    def test_multiple_button_input_sequence(self):
-        """Test multiple button input sequence with timing."""
-        # Mock successful action responses
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"status": "success"}
-        mock_response.raise_for_status.return_value = None
-        self.mock_session.post.return_value = mock_response
+        assert len(responses.calls) == 2  # initialize + action
+        action_call = responses.calls[1]
+        action_body = json.loads(action_call.request.body)
 
-        # Mock time.sleep to track timing
-        with patch("time.sleep") as mock_sleep:
-            _ = self.adapter.send_input("A B START")
-
-        # Verify three API calls made
-        assert self.mock_session.post.call_count == 3
-
-        # Verify calls were made with correct data
-        calls = self.mock_session.post.call_args_list
-        assert calls[0][1]["json"] == {"action_type": "press_key", "keys": ["A"]}
-        assert calls[1][1]["json"] == {"action_type": "press_key", "keys": ["B"]}
-        assert calls[2][1]["json"] == {"action_type": "press_key", "keys": ["START"]}
-
-        # Verify timing delays (should be called 2 times for 3 inputs)
-        assert mock_sleep.call_count == 2
-        mock_sleep.assert_called_with(0.05)
-
-    def test_empty_input_handling(self):
-        """Test handling of empty input sequences."""
-        result = self.adapter.send_input("")
-
-        # Should not make any API calls
-        self.mock_session.post.assert_not_called()
-
-        # Should return success message
+        assert action_body == {"action_type": "press_key", "keys": ["A"]}
         assert result["status"] == "success"
 
-    def test_invalid_button_handling(self):
-        """Test handling of invalid button names."""
-        with pytest.raises(AdapterError) as exc_info:
-            self.adapter.send_input("A INVALID_BUTTON B")
+    @responses.activate
+    def test_send_input_translates_multiple_buttons(self):
+        """Test multiple button sequence translates to sequential API calls."""
+        adapter = PokemonGymAdapter(8080, "test-container")
 
-        assert "Invalid button 'INVALID_BUTTON'" in str(exc_info.value)
+        # Mock session initialization
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "test-session-456", "status": "initialized"},
+            status=200,
+        )
 
-    def test_button_validation(self):
-        """Test button name validation."""
-        valid_buttons = ["A", "B", "START", "SELECT", "UP", "DOWN", "LEFT", "RIGHT", "L", "R"]
-        for button in valid_buttons:
-            assert self.adapter._is_valid_button(button)
+        # Mock each button press
+        for _ in range(3):  # A, B, START
+            responses.add(
+                responses.POST,
+                "http://localhost:8080/action",
+                json={"status": "success", "frame_count": 1},
+                status=200,
+            )
 
-        invalid_buttons = ["X", "Y", "INVALID", "123", ""]
-        for button in invalid_buttons:
-            assert not self.adapter._is_valid_button(button)
+        adapter.send_input("A B START")
 
-    def test_input_case_normalization(self):
-        """Test input button names are normalized to uppercase."""
-        # Mock successful action response
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"status": "success"}
-        mock_response.raise_for_status.return_value = None
-        self.mock_session.post.return_value = mock_response
+        # Should be 1 initialize + 3 actions = 4 total calls
+        assert len(responses.calls) == 4
 
-        # Send lowercase input
-        self.adapter.send_input("a b start")
+        # Verify each action call
+        expected_buttons = ["A", "B", "START"]
+        for i, expected_button in enumerate(expected_buttons):
+            action_call = responses.calls[i + 1]  # Skip initialize call
+            action_body = json.loads(action_call.request.body)
+            assert action_body == {"action_type": "press_key", "keys": [expected_button]}
 
-        # Verify calls were made with uppercase
-        calls = self.mock_session.post.call_args_list
-        assert calls[0][1]["json"]["keys"] == ["A"]
-        assert calls[1][1]["json"]["keys"] == ["B"]
-        assert calls[2][1]["json"]["keys"] == ["START"]
+    @responses.activate
+    def test_send_input_handles_direction_inputs(self):
+        """Test directional inputs are translated correctly."""
+        adapter = PokemonGymAdapter(8080, "test-container")
+
+        # Mock session and actions
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "test", "status": "initialized"},
+        )
+        responses.add(responses.POST, "http://localhost:8080/action", json={"status": "success"})
+        responses.add(responses.POST, "http://localhost:8080/action", json={"status": "success"})
+
+        adapter.send_input("UP DOWN")
+
+        # Verify directional inputs
+        up_call = json.loads(responses.calls[1].request.body)
+        down_call = json.loads(responses.calls[2].request.body)
+
+        assert up_call["keys"] == ["UP"]
+        assert down_call["keys"] == ["DOWN"]
+
+    def test_input_parsing_handles_empty_input(self):
+        """Test empty input sequence is handled gracefully."""
+        adapter = PokemonGymAdapter(8080, "test-container")
+
+        # Should not make any action calls for empty input
+        with responses.RequestsMock() as rsps:
+            adapter.send_input("")
+            assert len(rsps.calls) == 0
+
+    def test_input_parsing_normalizes_whitespace(self):
+        """Test input parsing handles extra whitespace."""
+        adapter = PokemonGymAdapter(8080, "test-container")
+
+        # Test internal parsing logic
+        parsed = adapter._parse_input_sequence("  A   B  START  ")
+        expected = ["A", "B", "START"]
+        assert parsed == expected
 
 
-class TestPokemonGymAdapterStateMapping:
-    """Test state mapping from benchflow-ai format to expected format."""
+@pytest.mark.medium
+class TestStateMapping:
+    """Test state mapping from benchflow-ai format to our expected format."""
 
-    def setup_method(self):
-        """Set up test fixtures before each test method."""
-        self.adapter = PokemonGymAdapter(port=8081, container_id="test_container_123")
-        self.mock_session = Mock()
-        self.adapter.session = self.mock_session
+    @responses.activate
+    def test_get_state_maps_benchflow_response(self):
+        """Test get_state maps benchflow-ai status to our expected format."""
+        adapter = PokemonGymAdapter(8080, "test-container")
 
-        # Mock session as initialized
-        self.adapter.initialized = True
-        self.adapter.session_start = time.time()
-        self.adapter.session_id = "test_session_789"
+        # Mock session initialization
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "test-session", "status": "initialized"},
+            status=200,
+        )
 
-    def test_state_retrieval_success(self):
-        """Test successful state retrieval and mapping."""
         # Mock benchflow-ai status response
-        benchflow_state = {
-            "location": {"map": "pallet_town"},
-            "coordinates": {"x": 10, "y": 15},
-            "player_name": "Red",
-            "money": 5000,
-            "badges": ["boulder", "cascade"],
-            "inventory": [{"item": "pokeball", "count": 5}],
-            "party": [{"name": "pikachu", "level": 25}],
-            "game_state": {"stage": "exploring"},
+        benchflow_response = {
+            "game_status": "running",
+            "player": {"x": 10, "y": 15, "map_id": "pallet_town"},
+            "screen": {"tiles": [[1, 2, 3], [4, 5, 6]], "width": 20, "height": 18},
+            "frame_count": 1205,
         }
 
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = benchflow_state
-        mock_response.raise_for_status.return_value = None
-        self.mock_session.get.return_value = mock_response
+        responses.add(
+            responses.GET, "http://localhost:8080/status", json=benchflow_response, status=200
+        )
 
-        # Get state
-        result = self.adapter.get_state()
+        result = adapter.get_state()
 
-        # Verify API call
-        self.mock_session.get.assert_called_once_with("http://localhost:8081/status", timeout=5)
+        # Verify mapping to our expected format
+        assert "game_status" in result
+        assert "player_position" in result
+        assert "screen_data" in result
+        assert "frame_count" in result
 
-        # Verify mapped structure
-        assert result["location"] == {"map": "pallet_town"}
-        assert result["coordinates"] == {"x": 10, "y": 15}
-        assert result["player"]["name"] == "Red"
-        assert result["player"]["money"] == 5000
-        assert result["player"]["badges"] == ["boulder", "cascade"]
-        assert result["inventory"] == [{"item": "pokeball", "count": 5}]
-        assert result["pokemon"] == [{"name": "pikachu", "level": 25}]
+        # Verify specific mappings
+        assert result["game_status"] == "running"
+        assert result["player_position"] == {"x": 10, "y": 15, "map_id": "pallet_town"}
+        assert result["screen_data"]["tiles"] == [[1, 2, 3], [4, 5, 6]]
+        assert result["frame_count"] == 1205
 
-        # Verify metadata included
-        assert result["_adapter_info"]["session_id"] == "test_session_789"
-        assert result["_adapter_info"]["adapter_type"] == "benchflow-ai"
-        assert result["_original"] == benchflow_state
+    @responses.activate
+    def test_get_state_handles_missing_fields(self):
+        """Test state mapping gracefully handles missing fields."""
+        adapter = PokemonGymAdapter(8080, "test-container")
 
-    def test_state_mapping_with_missing_fields(self):
-        """Test state mapping handles missing fields gracefully."""
-        # Minimal benchflow-ai response
-        minimal_state = {"location": {"map": "unknown"}}
+        # Mock session initialization
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "test-session", "status": "initialized"},
+            status=200,
+        )
 
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = minimal_state
-        mock_response.raise_for_status.return_value = None
-        self.mock_session.get.return_value = mock_response
+        # Minimal benchflow response
+        minimal_response = {"game_status": "paused"}
 
-        # Get state
-        result = self.adapter.get_state()
+        responses.add(
+            responses.GET, "http://localhost:8080/status", json=minimal_response, status=200
+        )
 
-        # Verify defaults are provided
-        assert result["player"]["name"] == "Red"  # Default
-        assert result["player"]["money"] == 0  # Default
-        assert result["inventory"] == []  # Default
-        assert result["pokemon"] == []  # Default
+        result = adapter.get_state()
 
-    def test_state_retrieval_failure(self):
-        """Test state retrieval failure handling."""
-        # Mock failed response
-        self.mock_session.get.side_effect = RequestException("Connection failed")
+        # Should provide sensible defaults for missing fields
+        assert result["game_status"] == "paused"
+        assert result["player_position"] == {}
+        assert result["screen_data"] == {}
+        assert result["frame_count"] == 0
 
-        # Should raise AdapterError
-        with pytest.raises(AdapterError) as exc_info:
-            self.adapter.get_state()
+    def test_state_mapping_defensive_parsing(self):
+        """Test state mapping handles malformed data defensively."""
+        adapter = PokemonGymAdapter(8080, "test-container")
 
-        assert "Failed to get state" in str(exc_info.value)
+        # Test internal mapping logic
+        malformed_data = {
+            "player": "not_a_dict",
+            "screen": {"tiles": "not_a_list"},
+            "frame_count": "not_a_number",
+        }
+
+        result = adapter._map_state_response(malformed_data)
+
+        # Should not crash and provide safe defaults
+        assert isinstance(result, dict)
+        assert "player_position" in result
+        assert "screen_data" in result
 
 
-class TestPokemonGymAdapterResetFunctionality:
-    """Test game reset functionality via stop/initialize sequence."""
+@pytest.mark.medium
+class TestSessionManagement:
+    """Test session lifecycle management."""
 
-    def setup_method(self):
-        """Set up test fixtures before each test method."""
-        self.adapter = PokemonGymAdapter(port=8081, container_id="test_container_123")
-        self.mock_session = Mock()
-        self.adapter.session = self.mock_session
+    @responses.activate
+    def test_session_auto_initialization(self):
+        """Test session is automatically initialized on first API call."""
+        adapter = PokemonGymAdapter(8080, "test-container")
 
-    def test_reset_with_active_session(self):
-        """Test reset with active session performs stop/initialize."""
-        # Set up active session
-        self.adapter.initialized = True
-        self.adapter.session_id = "old_session"
-        self.adapter.session_start = time.time() - 300
+        # Mock successful initialization
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "auto-session-789", "status": "initialized"},
+            status=200,
+        )
+        responses.add(
+            responses.GET, "http://localhost:8080/status", json={"game_status": "running"}
+        )
 
-        # Mock stop response
-        mock_stop_response = Mock()
-        mock_stop_response.status_code = 200
-        mock_stop_response.raise_for_status.return_value = None
+        # First call should trigger initialization
+        adapter.get_state()
 
-        # Mock initialize response
-        mock_init_response = Mock()
-        mock_init_response.status_code = 200
-        mock_init_response.json.return_value = {"session_id": "new_session"}
-        mock_init_response.raise_for_status.return_value = None
+        assert adapter.session_manager.session_id == "auto-session-789"
+        assert adapter.session_manager.is_initialized
 
-        # Configure mock to return different responses
-        self.mock_session.post.side_effect = [mock_stop_response, mock_init_response]
+    @responses.activate
+    def test_reset_game_stops_and_reinitializes(self):
+        """Test reset_game implements stop/initialize sequence."""
+        adapter = PokemonGymAdapter(8080, "test-container")
 
-        # Reset game
-        result = self.adapter.reset_game()
+        # Mock session lifecycle
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "session-1", "status": "initialized"},
+        )
+        responses.add(
+            responses.GET, "http://localhost:8080/status", json={"game_status": "running"}
+        )
+        responses.add(responses.POST, "http://localhost:8080/stop", json={"status": "stopped"})
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "session-2", "status": "initialized"},
+        )
 
-        # Verify stop and initialize calls
-        assert self.mock_session.post.call_count == 2
-        calls = self.mock_session.post.call_args_list
+        # Initialize first session
+        adapter.get_state()
+        old_session = adapter.session_manager.session_id
 
-        # First call should be stop
-        assert calls[0][0][0] == "http://localhost:8081/stop"
+        # Reset should stop and reinitialize
+        result = adapter.reset_game()
 
-        # Second call should be initialize
-        assert calls[1][0][0] == "http://localhost:8081/initialize"
+        assert result["status"] == "initialized"
+        assert adapter.session_manager.session_id == "session-2"
+        assert adapter.session_manager.session_id != old_session
 
-        # Verify session was reset and reinitialized
-        assert self.adapter.session_id == "new_session"
-        assert self.adapter.initialized
+    @responses.activate
+    def test_session_timeout_recovery(self):
+        """Test automatic reconnection on session timeout."""
+        adapter = PokemonGymAdapter(8080, "test-container")
+
+        # First initialization
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "session-1", "status": "initialized"},
+        )
+
+        # Simulate session timeout on action
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/action",
+            json={"error": "session_expired"},
+            status=400,
+        )
+
+        # Recovery initialization
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "session-2", "status": "initialized"},
+        )
+        responses.add(responses.POST, "http://localhost:8080/action", json={"status": "success"})
+
+        # Should recover automatically
+        result = adapter.send_input("A")
+
         assert result["status"] == "success"
+        assert adapter.session_manager.session_id == "session-2"
 
-    def test_reset_without_active_session(self):
-        """Test reset without active session just initializes."""
-        # No active session
-        self.adapter.initialized = False
+    def test_session_manager_tracks_state(self):
+        """Test SessionManager properly tracks session state."""
+        session_manager = SessionManager("http://localhost:8080")
 
-        # Mock initialize response
-        mock_init_response = Mock()
-        mock_init_response.status_code = 200
-        mock_init_response.json.return_value = {"session_id": "new_session"}
-        mock_init_response.raise_for_status.return_value = None
-        self.mock_session.post.return_value = mock_init_response
+        assert not session_manager.is_initialized
+        assert session_manager.session_id is None
 
-        # Reset game
-        _ = self.adapter.reset_game()
+        # Mock initialization
+        with patch("requests.Session.post") as mock_post:
+            mock_post.return_value.json.return_value = {
+                "session_id": "test-session",
+                "status": "initialized",
+            }
+            mock_post.return_value.raise_for_status.return_value = None
 
-        # Should only call initialize
-        assert self.mock_session.post.call_count == 1
-        call = self.mock_session.post.call_args_list[0]
-        assert call[0][0] == "http://localhost:8081/initialize"
+            session_manager.initialize_session()
 
-        # Verify session initialized
-        assert self.adapter.session_id == "new_session"
-        assert self.adapter.initialized
+            assert session_manager.is_initialized
+            assert session_manager.session_id == "test-session"
 
 
-class TestPokemonGymAdapterHealthChecking:
-    """Test health checking functionality."""
+@pytest.mark.medium
+class TestResetFunctionalityEnhancements:
+    """Test enhanced reset functionality for Issue #143."""
 
-    def setup_method(self):
-        """Set up test fixtures before each test method."""
-        self.adapter = PokemonGymAdapter(port=8081, container_id="test_container_123")
-        self.mock_session = Mock()
-        self.adapter.session = self.mock_session
+    @responses.activate
+    def test_reset_performance_under_500ms(self):
+        """Test reset operation completes within 500ms performance target."""
+        adapter = PokemonGymAdapter(8080, "test-container")
 
-    def test_health_check_success(self):
-        """Test successful health check."""
-        # Mock healthy status response
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"session_active": True}
-        self.mock_session.get.return_value = mock_response
+        # Mock fast responses for performance test
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "perf-session-1", "status": "initialized"},
+        )
+        responses.add(responses.POST, "http://localhost:8080/stop", json={"status": "stopped"})
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "perf-session-2", "status": "initialized"},
+        )
+        responses.add(
+            responses.GET, "http://localhost:8080/status", json={"game_status": "running"}
+        )
 
-        # Check health
-        assert self.adapter.is_healthy()
+        # Initialize session first
+        adapter._ensure_session_initialized()
 
-        # Verify API call
-        self.mock_session.get.assert_called_once_with("http://localhost:8081/status", timeout=3)
+        # Measure reset performance
+        start_time = time.time()
+        result = adapter.reset_game()
+        elapsed_ms = (time.time() - start_time) * 1000
 
-    def test_health_check_inactive_session(self):
-        """Test health check with inactive session."""
-        # Mock inactive session response
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"session_active": False}
-        self.mock_session.get.return_value = mock_response
+        # Should meet performance requirement
+        assert elapsed_ms < 500, f"Reset took {elapsed_ms}ms, exceeds 500ms target"
+        assert "operation_time_ms" in result
+        assert result["operation_time_ms"] < 500
+        assert "sla_exceeded" not in result or not result["sla_exceeded"]
 
-        # Should be unhealthy
-        assert not self.adapter.is_healthy()
+    @responses.activate
+    def test_reset_configuration_preservation(self):
+        """Test configuration is preserved across resets."""
+        original_config = {
+            "rom_path": "/test/pokemon.gb",
+            "save_state": "test.save",
+            "headless": True,
+        }
+        adapter = PokemonGymAdapter(8080, "test-container", config=original_config)
 
-    def test_health_check_network_failure(self):
-        """Test health check with network failure."""
-        # Mock network failure
-        self.mock_session.get.side_effect = RequestException("Connection failed")
+        # Mock session lifecycle
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "config-session-1", "status": "initialized"},
+        )
+        responses.add(responses.POST, "http://localhost:8080/stop", json={"status": "stopped"})
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "config-session-2", "status": "initialized"},
+        )
+        responses.add(
+            responses.GET, "http://localhost:8080/status", json={"game_status": "running"}
+        )
 
-        # Should be unhealthy
-        assert not self.adapter.is_healthy()
+        # Initialize and reset
+        adapter._ensure_session_initialized()
+        result = adapter.reset_game()
 
+        # Verify configuration preservation
+        assert adapter.config == original_config
+        assert result["configuration_preserved"] is True
+        assert "reset_details" in result
 
-class TestPokemonGymAdapterCircuitBreaker:
-    """Test circuit breaker pattern for production resilience."""
+    @responses.activate
+    def test_concurrent_reset_handling(self):
+        """Test graceful handling of concurrent reset operations."""
+        adapter = PokemonGymAdapter(8080, "test-container")
 
-    def setup_method(self):
-        """Set up test fixtures before each test method."""
-        self.adapter = PokemonGymAdapter(port=8081, container_id="test_container_123")
-        self.mock_session = Mock()
-        self.adapter.session = self.mock_session
+        # Mock session lifecycle with delays to simulate concurrent access
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "concurrent-session-1", "status": "initialized"},
+        )
+        responses.add(responses.POST, "http://localhost:8080/stop", json={"status": "stopped"})
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "concurrent-session-2", "status": "initialized"},
+        )
+        responses.add(
+            responses.GET, "http://localhost:8080/status", json={"game_status": "running"}
+        )
 
-    def test_circuit_breaker_opens_after_failures(self):
-        """Test circuit breaker opens after consecutive failures."""
-        # Mock failures
-        self.mock_session.post.side_effect = RequestException("Connection failed")
+        # Initialize session
+        adapter._ensure_session_initialized()
 
-        # Trigger multiple failures to open circuit breaker
-        for _ in range(3):
+        import threading
+
+        results = []
+        errors = []
+
+        def reset_worker():
             try:
-                self.adapter._initialize_session()
-            except AdapterError:
-                pass
+                result = adapter.reset_game()
+                results.append(result)
+            except Exception as e:
+                errors.append(e)
 
-        # Circuit should be open
-        assert self.adapter.circuit_open
-        assert self.adapter.consecutive_failures >= 3
+        # Start concurrent reset operations
+        threads = []
+        for _ in range(3):
+            thread = threading.Thread(target=reset_worker)
+            threads.append(thread)
+            thread.start()
 
-    def test_circuit_breaker_timeout_functionality(self):
-        """Test circuit breaker respects timeout."""
-        # Force circuit open
-        self.adapter.circuit_open = True
-        self.adapter.last_failure_time = time.time() - 10  # 10 seconds ago
-        self.adapter.circuit_timeout = 5  # 5 second timeout
+        # Wait for all threads
+        for thread in threads:
+            thread.join()
 
-        # Mock successful response for when circuit tries to close
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"status": "healthy"}
-        self.mock_session.get.return_value = mock_response
+        # Should handle concurrent resets gracefully
+        assert len(results) > 0, "At least one reset should succeed"
+        assert len(errors) == 0, f"No errors expected, got: {errors}"
 
-        # Health check should try to close circuit after timeout
-        result = self.adapter.is_healthy()
+        # All successful results should have valid session IDs
+        for result in results:
+            assert result["status"] in [
+                "initialized",
+                "initialized",
+            ]  # May include concurrent message
+            assert "session_id" in result
 
-        # Circuit should be closed and health check should succeed
-        assert not self.adapter.circuit_open
-        assert result
+    @responses.activate
+    def test_reset_failure_recovery(self):
+        """Test emergency recovery when reset fails."""
+        adapter = PokemonGymAdapter(8080, "test-container")
+
+        # Mock initial session
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "failure-session-1", "status": "initialized"},
+        )
+
+        # Mock stop success but initialization failure in reset
+        responses.add(responses.POST, "http://localhost:8080/stop", json={"status": "stopped"})
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"error": "initialization_failed"},
+            status=500,
+        )
+
+        # Mock emergency recovery success
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "recovery-session", "status": "initialized"},
+        )
+
+        # Initialize session first
+        adapter._ensure_session_initialized()
+
+        # Reset should trigger emergency recovery
+        result = adapter.reset_game()
+
+        assert result["status"] == "recovered"
+        assert result["recovery_applied"] is True
+        assert "original_error" in result
+        assert adapter.session_manager.session_id == "recovery-session"
+
+    @responses.activate
+    def test_reset_complete_failure_cleanup(self):
+        """Test clean state after complete reset failure."""
+        adapter = PokemonGymAdapter(8080, "test-container")
+
+        # Mock initial session
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "cleanup-session", "status": "initialized"},
+        )
+
+        # Mock stop success but all subsequent initialization attempts fail
+        responses.add(responses.POST, "http://localhost:8080/stop", json={"status": "stopped"})
+
+        # Mock initialization failure in reset
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"error": "initialization_failed"},
+            status=500,
+        )
+
+        # Mock emergency recovery failure
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"error": "recovery_failed"},
+            status=500,
+        )
+
+        # Initialize session first
+        adapter._ensure_session_initialized()
+
+        # Reset should fail but clean up state
+        with pytest.raises(PokemonGymAdapterError) as exc_info:
+            adapter.reset_game()
+
+        # Should contain the final cleanup message
+        assert "Session state has been reset to clean state" in str(exc_info.value)
+        assert adapter.session_manager.is_initialized is False
+        assert adapter.session_manager.session_id is None
+
+    @responses.activate
+    def test_reset_detailed_response_format(self):
+        """Test reset response contains all required production details."""
+        adapter = PokemonGymAdapter(8080, "test-container", config={"test": "value"})
+
+        # Mock session lifecycle
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "detailed-session-1", "status": "initialized"},
+        )
+        responses.add(responses.POST, "http://localhost:8080/stop", json={"status": "stopped"})
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "detailed-session-2", "status": "initialized"},
+        )
+        responses.add(
+            responses.GET, "http://localhost:8080/status", json={"game_status": "running"}
+        )
+
+        # Initialize and reset
+        adapter._ensure_session_initialized()
+        result = adapter.reset_game()
+
+        # Verify comprehensive response format
+        required_fields = [
+            "status",
+            "session_id",
+            "message",
+            "emulator_port",
+            "container_id",
+            "operation_time_ms",
+            "configuration_preserved",
+            "reset_details",
+        ]
+
+        for field in required_fields:
+            assert field in result, f"Required field '{field}' missing from response"
+
+        assert result["status"] == "initialized"
+        assert result["emulator_port"] == 8080
+        assert result["container_id"] == "test-container"
+        assert result["configuration_preserved"] is True
+        assert isinstance(result["operation_time_ms"], int)
+        assert result["operation_time_ms"] >= 0
+
+    def test_session_manager_thread_safety(self):
+        """Test SessionManager thread safety with concurrent operations."""
+        session_manager = SessionManager("http://localhost:8080")
+
+        # Verify thread safety attributes exist
+        assert hasattr(session_manager, "_lock")
+        assert hasattr(session_manager, "_reset_in_progress")
+        assert session_manager._reset_in_progress is False
+
+        # Test that concurrent initialization is handled
+        with patch("requests.Session.post") as mock_post:
+            mock_post.return_value.json.return_value = {
+                "session_id": "thread-safety-test",
+                "status": "initialized",
+            }
+            mock_post.return_value.raise_for_status.return_value = None
+
+            import threading
+
+            results = []
+
+            def init_worker():
+                try:
+                    result = session_manager.initialize_session()
+                    results.append(result)
+                except Exception as e:
+                    results.append(e)
+
+            # Start concurrent initialization
+            threads = []
+            for _ in range(5):
+                thread = threading.Thread(target=init_worker)
+                threads.append(thread)
+                thread.start()
+
+            for thread in threads:
+                thread.join()
+
+            # All should succeed or be safely handled
+            assert len(results) == 5
+            # At least one should succeed
+            successful_results = [r for r in results if isinstance(r, dict)]
+            assert len(successful_results) > 0
 
 
-class TestPokemonGymAdapterResourceCleanup:
-    """Test proper resource cleanup and session management."""
+@pytest.mark.medium
+class TestErrorConditionsAndRecovery:
+    """Test error handling and recovery mechanisms."""
 
-    def setup_method(self):
-        """Set up test fixtures before each test method."""
-        self.adapter = PokemonGymAdapter(port=8081, container_id="test_container_123")
-        self.mock_session = Mock()
-        self.adapter.session = self.mock_session
+    @responses.activate
+    def test_network_timeout_handling(self):
+        """Test adapter handles network timeouts gracefully."""
+        adapter = PokemonGymAdapter(8080, "test-container")
 
-    def test_close_with_active_session(self):
-        """Test closing adapter with active session."""
-        # Set up active session
-        self.adapter.initialized = True
-        self.adapter.session_id = "test_session"
+        # Mock session initialization
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "test-session", "status": "initialized"},
+            status=200,
+        )
 
-        # Mock successful stop response
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.raise_for_status.return_value = None
-        self.mock_session.post.return_value = mock_response
+        # Simulate timeout
+        responses.add(responses.GET, "http://localhost:8080/status", body=Exception("Timeout"))
 
-        # Close adapter
-        self.adapter.close()
+        with pytest.raises(PokemonGymAdapterError) as exc_info:
+            adapter.get_state()
 
-        # Verify stop was called
-        self.mock_session.post.assert_called_once_with("http://localhost:8081/stop", timeout=5)
+        assert "timeout" in str(exc_info.value).lower()
 
-        # Verify session was closed
-        self.mock_session.close.assert_called_once()
+    @responses.activate
+    def test_server_error_handling(self):
+        """Test adapter handles server errors appropriately."""
+        adapter = PokemonGymAdapter(8080, "test-container")
 
-        # Verify state was cleared
-        assert not self.adapter.initialized
-        assert self.adapter.session_id is None
+        # Simulate server error
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"error": "server_error"},
+            status=500,
+        )
 
-    def test_close_handles_stop_failure_gracefully(self):
-        """Test close handles stop failure gracefully."""
-        # Set up active session
-        self.adapter.initialized = True
+        with pytest.raises(PokemonGymAdapterError) as exc_info:
+            adapter.send_input("A")
 
-        # Mock stop failure
-        self.mock_session.post.side_effect = RequestException("Stop failed")
+        assert "server error" in str(exc_info.value).lower()
 
-        # Should not raise exception
-        self.adapter.close()
+    @responses.activate
+    def test_malformed_response_handling(self):
+        """Test adapter handles malformed JSON responses."""
+        adapter = PokemonGymAdapter(8080, "test-container")
 
-        # Session should still be closed
-        self.mock_session.close.assert_called_once()
-        assert not self.adapter.initialized
+        # Mock session initialization
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "test-session", "status": "initialized"},
+            status=200,
+        )
+
+        # Return invalid JSON
+        responses.add(
+            responses.GET, "http://localhost:8080/status", body="invalid json{", status=200
+        )
+
+        with pytest.raises(PokemonGymAdapterError) as exc_info:
+            adapter.get_state()
+
+        assert "invalid response" in str(exc_info.value).lower()
+
+    def test_retry_mechanism_with_exponential_backoff(self):
+        """Test retry mechanism implements exponential backoff."""
+        adapter = PokemonGymAdapter(8080, "test-container")
+
+        # Test retry logic (would need to mock actual retries)
+        retry_delays = adapter._calculate_retry_delays(max_retries=3)
+
+        # Should implement exponential backoff
+        assert len(retry_delays) == 3
+        assert retry_delays[0] < retry_delays[1] < retry_delays[2]
+        assert all(delay >= 0.1 for delay in retry_delays)  # Minimum delay
+
+    @responses.activate
+    def test_health_check_detects_session_problems(self):
+        """Test is_healthy detects session and connectivity issues."""
+        adapter = PokemonGymAdapter(8080, "test-container")
+
+        # Healthy response
+        responses.add(
+            responses.GET,
+            "http://localhost:8080/status",
+            json={"game_status": "running"},
+            status=200,
+        )
+
+        assert adapter.is_healthy() is True
+
+        # Reset responses for unhealthy test
+        responses.reset()
+        responses.add(
+            responses.GET,
+            "http://localhost:8080/status",
+            json={"error": "session_expired"},
+            status=400,
+        )
+
+        assert adapter.is_healthy() is False
+
+
+@pytest.mark.medium
+class TestPerformanceBenchmarks:
+    """Test performance requirements and benchmarks."""
+
+    @responses.activate
+    def test_reset_performance_benchmark(self):
+        """Production benchmark test for reset performance - must be <500ms."""
+        adapter = PokemonGymAdapter(8080, "test-container")
+
+        # Mock fast responses to ensure we're testing adapter logic, not network
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "bench-session-1", "status": "initialized"},
+        )
+        responses.add(responses.POST, "http://localhost:8080/stop", json={"status": "stopped"})
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "bench-session-2", "status": "initialized"},
+        )
+        responses.add(
+            responses.GET, "http://localhost:8080/status", json={"game_status": "running"}
+        )
+
+        # Initialize session first
+        adapter._ensure_session_initialized()
+
+        # Run multiple reset operations to get reliable timing
+        reset_times = []
+        for i in range(5):
+            start_time = time.time()
+            result = adapter.reset_game()
+            elapsed_ms = (time.time() - start_time) * 1000
+            reset_times.append(elapsed_ms)
+
+            # Validate each reset
+            assert result["status"] == "initialized"
+            assert "operation_time_ms" in result
+
+            # Reset responses for next iteration
+            responses.reset()
+            responses.add(responses.POST, "http://localhost:8080/stop", json={"status": "stopped"})
+            responses.add(
+                responses.POST,
+                "http://localhost:8080/initialize",
+                json={"session_id": f"bench-session-{i+3}", "status": "initialized"},
+            )
+            responses.add(
+                responses.GET, "http://localhost:8080/status", json={"game_status": "running"}
+            )
+
+        # Performance validation
+        avg_reset_time = sum(reset_times) / len(reset_times)
+        max_reset_time = max(reset_times)
+        min_reset_time = min(reset_times)
+
+        print("\nReset Performance Benchmark Results:")
+        print(f"Average reset time: {avg_reset_time:.2f}ms")
+        print(f"Min reset time: {min_reset_time:.2f}ms")
+        print(f"Max reset time: {max_reset_time:.2f}ms")
+
+        # Production SLA requirement
+        assert avg_reset_time < 500, f"Average reset time {avg_reset_time:.2f}ms exceeds 500ms SLA"
+        assert (
+            max_reset_time < 1000
+        ), f"Max reset time {max_reset_time:.2f}ms exceeds reasonable upper bound"
+
+        # All individual operations should meet SLA
+        for i, reset_time in enumerate(reset_times):
+            assert reset_time < 500, f"Reset {i+1} took {reset_time:.2f}ms, exceeds 500ms SLA"
+
+    @responses.activate
+    def test_input_translation_performance(self):
+        """Test batch input processing completes within 100ms."""
+        adapter = PokemonGymAdapter(8080, "test-container")
+
+        # Mock fast responses
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "perf-test", "status": "initialized"},
+        )
+
+        for _ in range(10):  # 10 button sequence
+            responses.add(
+                responses.POST, "http://localhost:8080/action", json={"status": "success"}
+            )
+
+        # Measure performance
+        start_time = time.time()
+        adapter.send_input("A B START SELECT UP DOWN LEFT RIGHT A B")
+        elapsed = time.time() - start_time
+
+        # Should complete within performance requirement
+        assert elapsed < 0.1  # 100ms requirement
+
+    @responses.activate
+    def test_state_retrieval_performance(self):
+        """Test state retrieval completes within 50ms."""
+        adapter = PokemonGymAdapter(8080, "test-container")
+
+        # Mock session initialization
+        responses.add(
+            responses.POST,
+            "http://localhost:8080/initialize",
+            json={"session_id": "test-session", "status": "initialized"},
+            status=200,
+        )
+
+        # Mock fast state response
+        responses.add(
+            responses.GET, "http://localhost:8080/status", json={"game_status": "running"}
+        )
+
+        # Measure performance
+        start_time = time.time()
+        adapter.get_state()
+        elapsed = time.time() - start_time
+
+        # Should complete within performance requirement
+        assert elapsed < 0.05  # 50ms requirement
+
+    def test_memory_usage_efficiency(self):
+        """Test adapter maintains efficient memory usage."""
+        import gc
+        import tracemalloc
+
+        tracemalloc.start()
+
+        # Create and use adapter
+        PokemonGymAdapter(8080, "test-container")
+
+        # Force garbage collection
+        gc.collect()
+        current, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
+        # Memory usage should be reasonable (less than 1MB for basic adapter)
+        assert peak < 1024 * 1024  # 1MB limit
+
+
+@pytest.mark.fast
+class TestCompatibilityLayer:
+    """Test compatibility with existing EmulatorPool interface."""
+
+    def test_adapter_implements_pokemongymclient_interface(self):
+        """Test adapter provides same interface as PokemonGymClient."""
+        adapter = PokemonGymAdapter(8080, "test-container")
+
+        # Verify all required methods exist
+        assert hasattr(adapter, "send_input")
+        assert hasattr(adapter, "get_state")
+        assert hasattr(adapter, "reset_game")
+        assert hasattr(adapter, "is_healthy")
+        assert hasattr(adapter, "close")
+
+        # Verify method signatures match
+        import inspect
+
+        # send_input should accept string and return dict
+        sig = inspect.signature(adapter.send_input)
+        assert len(sig.parameters) == 1  # input_sequence parameter
+
+        # get_state should return dict
+        sig = inspect.signature(adapter.get_state)
+        assert len(sig.parameters) == 0  # no parameters
+
+    def test_adapter_works_with_emulator_pool(self):
+        """Test adapter can be used as drop-in replacement in EmulatorPool."""
+        # This would be an integration test, but we can test interface compatibility
+        adapter = PokemonGymAdapter(8080, "test-container")
+
+        # Should have same attributes as PokemonGymClient
+        assert hasattr(adapter, "port")
+        assert hasattr(adapter, "container_id")
+        assert hasattr(adapter, "base_url")
+
+        # Should work with string formatting (used in EmulatorPool logging)
+        adapter_str = str(adapter)
+        assert "8080" in adapter_str
+        assert "test-container" in adapter_str
+
+
+@pytest.mark.fast
+class TestFactoryPattern:
+    """Test factory methods for adapter creation."""
+
+    def test_create_adapter_factory_method(self):
+        """Test factory method creates appropriate adapter type."""
+        # This would test a factory that chooses between direct client and adapter
+        from claudelearnspokemon.pokemon_gym_adapter import create_pokemon_gym_client
+
+        # Should create adapter for benchflow-ai API
+        client = create_pokemon_gym_client(8080, "test-container", api_type="benchflow")
+        assert isinstance(client, PokemonGymAdapter)
+
+        # Should create direct client for legacy API
+        client = create_pokemon_gym_client(8080, "test-container", api_type="legacy")
+        # Would return PokemonGymClient in real implementation
+        assert hasattr(client, "send_input")
+
+    def test_factory_unknown_api_type_raises_error(self):
+        """Test factory raises error for unknown API type."""
+        from claudelearnspokemon.pokemon_gym_adapter import create_pokemon_gym_client
+
+        with pytest.raises(ValueError) as exc_info:
+            create_pokemon_gym_client(8080, "test-container", api_type="unknown")
+
+        assert "unknown api_type" in str(exc_info.value).lower()
+
+
+# Additional test fixtures and utilities for comprehensive testing
+@pytest.fixture
+def mock_adapter():
+    """Fixture providing a mocked adapter for testing."""
+    return PokemonGymAdapter(8080, "test-container-fixture")
+
+
+@pytest.fixture
+def benchflow_response():
+    """Fixture providing sample benchflow-ai response data."""
+    return {
+        "game_status": "running",
+        "player": {"x": 10, "y": 15, "map_id": "test_map"},
+        "screen": {"tiles": [[1, 2], [3, 4]], "width": 20, "height": 18},
+        "frame_count": 100,
+    }
+
+
+@pytest.mark.fast
+class TestEdgeCases:
+    """Test edge cases and boundary conditions."""
+
+    def test_very_long_input_sequences(self):
+        """Test adapter handles very long input sequences."""
+        adapter = PokemonGymAdapter(8080, "test-container")
+
+        # 100 button sequence
+        long_sequence = " ".join(["A"] * 100)
+        parsed = adapter._parse_input_sequence(long_sequence)
+
+        assert len(parsed) == 100
+        assert all(button == "A" for button in parsed)
+
+    def test_invalid_button_names(self):
+        """Test adapter handles invalid button names gracefully."""
+        adapter = PokemonGymAdapter(8080, "test-container")
+
+        # Should handle invalid buttons gracefully (filter or error)
+        with pytest.raises(PokemonGymAdapterError) as exc_info:
+            adapter._parse_input_sequence("A INVALID_BUTTON B")
+
+        assert "invalid button" in str(exc_info.value).lower()
+
+    def test_concurrent_adapter_usage(self):
+        """Test multiple adapters can be used concurrently."""
+        adapter1 = PokemonGymAdapter(8081, "container-1")
+        adapter2 = PokemonGymAdapter(8082, "container-2")
+
+        # Should have independent session managers
+        assert adapter1.session_manager is not adapter2.session_manager
+        assert adapter1.port != adapter2.port
+        assert adapter1.container_id != adapter2.container_id
+
+    def test_adapter_close_cleanup(self):
+        """Test adapter properly closes resources."""
+        adapter = PokemonGymAdapter(8080, "test-container")
+
+        # Mock session manager to test close behavior
+        with patch.object(adapter.session_manager, "close") as mock_close:
+            with patch.object(adapter.session, "close") as mock_session_close:
+                adapter.close()
+
+                # Should close both session manager and HTTP session
+                mock_close.assert_called_once()
+                mock_session_close.assert_called_once()
+
+
+if __name__ == "__main__":
+    # Allow running tests directly for development
+    pytest.main([__file__, "-v"])

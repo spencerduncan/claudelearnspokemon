@@ -28,6 +28,7 @@ from src.claudelearnspokemon.pokemon_gym_factory import (
 )
 
 
+@pytest.mark.fast
 class TestPokemonGymFactoryBasics:
     """Test basic factory functionality and parameter validation."""
 
@@ -70,7 +71,7 @@ class TestPokemonGymFactoryBasics:
         )
 
         assert isinstance(client, PokemonGymAdapter)
-        assert client.input_delay == 0.1
+        assert client.config["input_delay"] == 0.1
 
     def test_factory_parameter_validation(self):
         """Test factory validates input parameters."""
@@ -90,6 +91,7 @@ class TestPokemonGymFactoryBasics:
         assert "Invalid adapter_type" in str(exc_info.value)
 
 
+@pytest.mark.fast
 class TestServerTypeDetection:
     """Test server type auto-detection logic."""
 
@@ -184,6 +186,7 @@ class TestServerTypeDetection:
         assert not _is_benchflow_server("http://localhost:8081", mock_session, 3.0)
 
 
+@pytest.mark.fast
 class TestDetectionCaching:
     """Test detection result caching functionality."""
 
@@ -284,6 +287,7 @@ class TestDetectionCaching:
         assert 0 < stats["cache_hit_ratio"] <= 1
 
 
+@pytest.mark.fast
 class TestAutoDetectionWithFactory:
     """Test auto-detection integration with factory pattern."""
 
@@ -327,6 +331,7 @@ class TestAutoDetectionWithFactory:
         mock_detect.assert_called_once_with(8081, 5.0)
 
 
+@pytest.mark.fast
 class TestClientCompatibilityValidation:
     """Test client compatibility validation functionality."""
 
@@ -376,6 +381,7 @@ class TestClientCompatibilityValidation:
         assert not validate_client_compatibility(mock_client)
 
 
+@pytest.mark.fast
 class TestFactoryErrorHandling:
     """Test factory error handling and edge cases."""
 
@@ -408,6 +414,7 @@ class TestFactoryErrorHandling:
         assert "Client creation failed" in str(exc_info.value)
 
 
+@pytest.mark.fast
 class TestFactoryMetrics:
     """Test factory metrics and monitoring functionality."""
 
@@ -434,6 +441,7 @@ class TestFactoryMetrics:
         assert metrics["default_input_delay"] == 0.05
 
 
+@pytest.mark.fast
 class TestFactoryProductionScenarios:
     """Test factory behavior in production-like scenarios."""
 
@@ -483,3 +491,91 @@ class TestFactoryProductionScenarios:
         for i, client in enumerate(clients):
             assert client.port == 8081 + i
             assert client.container_id == f"container_{i}"
+
+    def test_cache_thread_safety(self):
+        """Test cache operations are thread-safe under concurrent access."""
+        import concurrent.futures
+
+        # Clear cache before test
+        clear_detection_cache()
+
+        def concurrent_detection(port):
+            """Function to run in multiple threads"""
+            try:
+                return detect_server_type(port)
+            except Exception as e:
+                return f"error: {e}"
+
+        def concurrent_cache_operations(thread_id):
+            """Mixed cache operations to stress test thread safety"""
+            results = []
+
+            # Each thread performs various cache operations
+            for i in range(5):
+                port = 8080 + (thread_id * 10 + i) % 20  # Spread ports across threads
+
+                # Detection (read and potentially write cache)
+                result = concurrent_detection(port)
+                results.append(("detect", port, result))
+
+                # Get stats (read cache)
+                stats = get_detection_cache_stats()
+                results.append(("stats", port, stats["total_entries"]))
+
+                # Clear specific port occasionally (write cache)
+                if i % 3 == 0:
+                    clear_detection_cache(port)
+                    results.append(("clear", port, "cleared"))
+
+            return results
+
+        # Run concurrent operations with multiple threads
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            # Submit work to all threads simultaneously
+            futures = [
+                executor.submit(concurrent_cache_operations, thread_id) for thread_id in range(10)
+            ]
+
+            # Wait for all threads to complete
+            all_results = []
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    thread_results = future.result(timeout=30)
+                    all_results.extend(thread_results)
+                except Exception as e:
+                    # Thread safety violations would cause exceptions
+                    pytest.fail(f"Thread safety violation detected: {e}")
+
+        # Verify no thread safety violations occurred
+        assert len(all_results) > 0, "No operations completed - possible deadlock"
+
+        # Check that detection results are valid
+        detection_results = [r for r in all_results if r[0] == "detect"]
+        for _op_type, _port, result in detection_results:
+            if isinstance(result, str) and result.startswith("error:"):
+                # Allow network errors but not thread safety errors
+                error_msg = result.lower()
+                thread_safety_indicators = [
+                    "dictionary changed size during iteration",
+                    "dictionary keys changed during iteration",
+                    "dictionary changed during iteration",
+                    "keyerror",  # If cache corruption causes missing keys
+                    "runtimeerror",  # General thread safety errors
+                ]
+                for indicator in thread_safety_indicators:
+                    assert indicator not in error_msg, f"Thread safety violation: {result}"
+            else:
+                # Valid detection results
+                assert result in ["benchflow", "direct"], f"Invalid detection result: {result}"
+
+        # Verify cache stats are consistent (no negative values or other corruption)
+        stats_results = [r for r in all_results if r[0] == "stats"]
+        for _op_type, _port, total_entries in stats_results:
+            assert isinstance(total_entries, int), "Cache stats corrupted"
+            assert total_entries >= 0, "Negative cache entries indicate corruption"
+
+        # Final verification: cache should still be functional
+        final_stats = get_detection_cache_stats()
+        assert isinstance(final_stats, dict)
+        assert "total_entries" in final_stats
+        assert final_stats["total_entries"] >= 0

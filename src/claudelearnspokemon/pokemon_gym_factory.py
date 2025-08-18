@@ -8,6 +8,7 @@ Author: Bot Dean - Production-First Engineering
 """
 
 import logging
+import threading
 import time
 from typing import TYPE_CHECKING, Any, Union
 
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 # Global cache for server type detection to avoid repeated probes
 _server_type_cache: dict[str, dict[str, Any]] = {}
 _cache_timeout = 300  # 5 minutes cache timeout
+_cache_lock = threading.RLock()  # Reentrant lock for thread safety
 
 
 class FactoryError(Exception):
@@ -94,7 +96,8 @@ def create_pokemon_client(
         # Handle explicit type selection
         if adapter_type == "benchflow":
             logger.info(f"Creating PokemonGymAdapter (benchflow) for port {port}")
-            return PokemonGymAdapter(port, container_id, input_delay)
+            config = {"input_delay": input_delay}
+            return PokemonGymAdapter(port, container_id, config)
         elif adapter_type == "direct":
             logger.info(f"Creating PokemonGymClient (direct) for port {port}")
             return PokemonGymClient(port, container_id)
@@ -108,7 +111,8 @@ def create_pokemon_client(
 
         if server_type == "benchflow":
             logger.info(f"Auto-detected benchflow-ai server on port {port}")
-            return PokemonGymAdapter(port, container_id, input_delay)
+            config = {"input_delay": input_delay}
+            return PokemonGymAdapter(port, container_id, config)
         else:
             logger.info(f"Auto-detected direct pokemon-gym server on port {port}")
             return PokemonGymClient(port, container_id)
@@ -146,12 +150,13 @@ def detect_server_type(port: int, timeout: float = 3.0) -> str:
     current_time = time.time()
 
     # Check cache first
-    if cache_key in _server_type_cache:
-        cache_entry = _server_type_cache[cache_key]
-        if current_time - cache_entry["timestamp"] < _cache_timeout:
-            server_type = cache_entry["type"]
-            logger.debug(f"Using cached server type for port {port}: {server_type}")
-            return server_type
+    with _cache_lock:
+        if cache_key in _server_type_cache:
+            cache_entry = _server_type_cache[cache_key]
+            if current_time - cache_entry["timestamp"] < _cache_timeout:
+                server_type = cache_entry["type"]
+                logger.debug(f"Using cached server type for port {port}: {server_type}")
+                return server_type
 
     logger.info(f"Detecting server type for port {port}")
 
@@ -169,7 +174,8 @@ def detect_server_type(port: int, timeout: float = 3.0) -> str:
             logger.info(f"Detected direct pokemon-gym server on port {port}")
 
         # Cache the result
-        _server_type_cache[cache_key] = {"type": server_type, "timestamp": current_time}
+        with _cache_lock:
+            _server_type_cache[cache_key] = {"type": server_type, "timestamp": current_time}
 
         return server_type
 
@@ -179,10 +185,11 @@ def detect_server_type(port: int, timeout: float = 3.0) -> str:
         server_type = "direct"
 
         # Cache the fallback result with shorter timeout
-        _server_type_cache[cache_key] = {
-            "type": server_type,
-            "timestamp": current_time - _cache_timeout + 60,  # 1 minute cache for failures
-        }
+        with _cache_lock:
+            _server_type_cache[cache_key] = {
+                "type": server_type,
+                "timestamp": current_time - _cache_timeout + 60,  # 1 minute cache for failures
+            }
 
         return server_type
 
@@ -245,13 +252,14 @@ def clear_detection_cache(port: int | None = None) -> None:
     """
     global _server_type_cache
 
-    if port is None:
-        _server_type_cache.clear()
-        logger.info("Cleared all server type detection cache")
-    else:
-        cache_key = f"port_{port}"
-        _server_type_cache.pop(cache_key, None)
-        logger.info(f"Cleared server type detection cache for port {port}")
+    with _cache_lock:
+        if port is None:
+            _server_type_cache.clear()
+            logger.info("Cleared all server type detection cache")
+        else:
+            cache_key = f"port_{port}"
+            _server_type_cache.pop(cache_key, None)
+            logger.info(f"Cleared server type detection cache for port {port}")
 
 
 def get_detection_cache_stats() -> dict[str, Any]:
@@ -268,18 +276,21 @@ def get_detection_cache_stats() -> dict[str, Any]:
     valid_entries = 0
     expired_entries = 0
 
-    for cache_entry in _server_type_cache.values():
-        if current_time - cache_entry["timestamp"] < _cache_timeout:
-            valid_entries += 1
-        else:
-            expired_entries += 1
+    with _cache_lock:
+        for cache_entry in _server_type_cache.values():
+            if current_time - cache_entry["timestamp"] < _cache_timeout:
+                valid_entries += 1
+            else:
+                expired_entries += 1
+
+        total_entries = len(_server_type_cache)
 
     return {
-        "total_entries": len(_server_type_cache),
+        "total_entries": total_entries,
         "valid_entries": valid_entries,
         "expired_entries": expired_entries,
         "cache_timeout": _cache_timeout,
-        "cache_hit_ratio": valid_entries / max(len(_server_type_cache), 1),
+        "cache_hit_ratio": valid_entries / max(total_entries, 1),
     }
 
 
