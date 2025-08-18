@@ -1,0 +1,13 @@
+services:
+  pokemon-gym:
+    build:
+      context: ./docker/pokemon-gym
+      dockerfile: Dockerfile
+    image: pokemon-gym:latest
+    ports:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
