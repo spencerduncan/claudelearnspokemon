@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum, auto
-from typing import Any, Optional, Union
+from typing import Any
 
 
 class NodeType(IntEnum):
@@ -53,11 +53,11 @@ class ASTNode:
     """
 
     node_type: NodeType
-    value: Union[str, int, float] = ""
+    value: str | int | float = ""
     children: tuple[ASTNode, ...] = ()
-    metadata: dict[str, Any] = None
+    metadata: dict[str, Any] | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """Ensure metadata is never None for consistent access patterns."""
         if self.metadata is None:
             object.__setattr__(self, "metadata", {})
@@ -84,7 +84,7 @@ class ASTNode:
         elif self.node_type == NodeType.SEQUENCE:
             return sum(child.estimate_complexity() for child in self.children)
         elif self.node_type == NodeType.REPEAT:
-            count = int(self.value) if isinstance(self.value, (int, str)) else 1
+            count = int(self.value) if isinstance(self.value, int | str) else 1
             child_complexity = sum(child.estimate_complexity() for child in self.children)
             return count * child_complexity
         elif self.node_type == NodeType.MACRO:
@@ -107,9 +107,9 @@ class NodeFactory:
     - Fast node creation without redundant allocations
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._string_cache: dict[str, str] = {}
-        self._common_nodes: dict[tuple, ASTNode] = {}
+        self._common_nodes: dict[tuple[Any, ...], ASTNode] = {}
 
     def create_input_node(self, input_name: str) -> ASTNode:
         """Create optimized input node with string interning."""
@@ -150,7 +150,7 @@ class NodeFactory:
         if not children:
             raise ValueError("Sequence node requires at least one child")
 
-        total_frames = sum(child.metadata.get("frames", 1) for child in children)
+        total_frames = sum((child.metadata or {}).get("frames", 1) for child in children)
 
         return ASTNode(
             node_type=NodeType.SEQUENCE, children=tuple(children), metadata={"frames": total_frames}
@@ -163,7 +163,7 @@ class NodeFactory:
         if not children:
             raise ValueError("Repeat node requires at least one child")
 
-        child_frames = sum(child.metadata.get("frames", 1) for child in children)
+        child_frames = sum((child.metadata or {}).get("frames", 1) for child in children)
         total_frames = count * child_frames
 
         return ASTNode(
@@ -173,7 +173,7 @@ class NodeFactory:
             metadata={"frames": total_frames, "loop_count": count},
         )
 
-    def create_macro_node(self, name: str, args: list[str] = None) -> ASTNode:
+    def create_macro_node(self, name: str, args: list[str] | None = None) -> ASTNode:
         """Create macro node with parameter tracking."""
         args = args or []
         return ASTNode(
@@ -183,7 +183,7 @@ class NodeFactory:
         )
 
     def create_conditional_node(
-        self, condition: str, then_branch: ASTNode, else_branch: Optional[ASTNode] = None
+        self, condition: str, then_branch: ASTNode, else_branch: ASTNode | None = None
     ) -> ASTNode:
         """Create conditional node with branch analysis."""
         children = [then_branch]
@@ -191,8 +191,8 @@ class NodeFactory:
             children.append(else_branch)
 
         # Estimate frames as average of branches (conservative)
-        then_frames = then_branch.metadata.get("frames", 1)
-        else_frames = else_branch.metadata.get("frames", 0) if else_branch else 0
+        then_frames = (then_branch.metadata or {}).get("frames", 1)
+        else_frames = (else_branch.metadata or {}).get("frames", 0) if else_branch else 0
         avg_frames = (then_frames + else_frames) // 2
 
         return ASTNode(
@@ -262,7 +262,7 @@ class ASTVisitor:
     Subclasses override visit_* methods for custom behavior.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         # Build dispatch table for O(1) method lookup
         self._dispatch_table = {
             NodeType.INPUT: self.visit_input,
