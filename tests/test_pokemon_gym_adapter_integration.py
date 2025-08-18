@@ -133,6 +133,7 @@ def slow_test_server():
 
 
 @pytest.mark.slow
+@pytest.mark.medium
 class TestPokemonGymAdapterIntegration:
     """Integration tests for PokemonGymAdapter with real HTTP behavior."""
 
