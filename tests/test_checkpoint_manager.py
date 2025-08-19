@@ -104,6 +104,7 @@ def sample_metadata():
 
 
 @pytest.mark.medium
+@pytest.mark.slow
 class TestCheckpointManagerCore:
     """Test core save/load functionality."""
 
@@ -276,6 +277,7 @@ class TestCheckpointManagerCore:
 
 
 @pytest.mark.medium
+@pytest.mark.slow
 class TestCheckpointValidation:
     """Test checkpoint integrity validation."""
 
@@ -323,6 +325,7 @@ class TestCheckpointValidation:
 
 
 @pytest.mark.medium
+@pytest.mark.slow
 class TestCheckpointPruning:
     """Test checkpoint pruning algorithm."""
 
@@ -460,6 +463,7 @@ class TestCheckpointPruning:
 
 
 @pytest.mark.medium
+@pytest.mark.slow
 class TestCheckpointListing:
     """Test checkpoint listing and querying."""
 
@@ -506,6 +510,7 @@ class TestCheckpointListing:
 
 
 @pytest.mark.medium
+@pytest.mark.slow
 class TestMetricsAndObservability:
     """Test metrics collection and observability features."""
 
@@ -567,6 +572,7 @@ class TestMetricsAndObservability:
 
 
 @pytest.mark.medium
+@pytest.mark.slow
 class TestErrorHandling:
     """Test error handling and edge cases."""
 
@@ -734,6 +740,7 @@ class TestErrorHandling:
 
 
 @pytest.mark.medium
+@pytest.mark.slow
 class TestCheckpointManagerPerformance:
     """Test performance requirements."""
 
@@ -813,6 +820,7 @@ class TestCheckpointManagerPerformance:
 
 
 @pytest.mark.medium
+@pytest.mark.slow
 class TestCheckpointManagerAtomicOperations:
     """Test atomic write operations."""
 
@@ -856,6 +864,7 @@ class TestCheckpointManagerAtomicOperations:
 
 
 @pytest.mark.medium
+@pytest.mark.slow
 class TestCheckpointManagerUtilityMethods:
     """Test utility methods."""
 
@@ -917,6 +926,7 @@ class TestCheckpointManagerUtilityMethods:
 
 
 @pytest.mark.medium
+@pytest.mark.slow
 class TestCheckpointManagerUniqueIdentifiers:
     """Test UUID generation uniqueness."""
 
