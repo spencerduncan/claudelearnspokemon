@@ -1054,13 +1054,13 @@ class TestEdgeCases:
         """Test adapter properly closes resources."""
         adapter = PokemonGymAdapter(8080, "test-container")
 
-        # Mock session manager to test close behavior
-        with patch.object(adapter.session_manager, "close") as mock_close:
+        # Mock session manager and HTTP session to test close behavior
+        with patch.object(adapter.session_manager, "close") as mock_session_manager_close:
             with patch.object(adapter.session, "close") as mock_session_close:
                 adapter.close()
 
                 # Should close both session manager and HTTP session
-                mock_close.assert_called_once()
+                mock_session_manager_close.assert_called_once()
                 mock_session_close.assert_called_once()
 
 
