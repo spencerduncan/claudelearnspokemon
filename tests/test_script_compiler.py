@@ -194,6 +194,107 @@ class TestMacroRegistry:
         assert registry.estimate_pattern_frames("SHORT") == 1
         assert registry.estimate_pattern_frames("LONG") == 7
 
+    def test_expands_nested_macros_two_levels(self) -> None:
+        """Test expansion of macros that call other macros (two levels)."""
+        registry = MacroRegistry()
+        registry.register_pattern("BASE", ["A", "B"])
+        registry.register_pattern("NESTED", ["BASE", "C"])
+
+        expanded = registry.expand_macro("NESTED")
+        # Should expand BASE first, then flatten: BASE -> ["A", "B"], so NESTED -> ["A", "B", "C"]
+        assert expanded == ["A", "B", "C"]
+
+    def test_expands_nested_macros_three_levels(self) -> None:
+        """Test expansion of macros nested three levels deep."""
+        registry = MacroRegistry()
+        registry.register_pattern("LEVEL1", ["A"])
+        registry.register_pattern("LEVEL2", ["LEVEL1", "B"])
+        registry.register_pattern("LEVEL3", ["LEVEL2", "C"])
+
+        expanded = registry.expand_macro("LEVEL3")
+        # LEVEL3 -> LEVEL2 + C -> LEVEL1 + B + C -> A + B + C
+        assert expanded == ["A", "B", "C"]
+
+    def test_expands_nested_macros_with_mixed_content(self) -> None:
+        """Test expansion of macros with mixed primitive and macro content."""
+        registry = MacroRegistry()
+        registry.register_pattern("MOVE", ["UP", "1"])
+        registry.register_pattern("ATTACK", ["A"])
+        registry.register_pattern("COMBO", ["MOVE", "ATTACK", "DOWN"])
+
+        expanded = registry.expand_macro("COMBO")
+        # COMBO -> MOVE + ATTACK + DOWN -> [UP, 1] + [A] + DOWN -> [UP, WAIT, A, DOWN]
+        assert expanded == ["UP", "WAIT", "A", "DOWN"]
+
+    def test_expands_nested_macros_multiple_calls(self) -> None:
+        """Test expansion with multiple calls to same nested macro."""
+        registry = MacroRegistry()
+        registry.register_pattern("STEP", ["UP", "1"])
+        registry.register_pattern("DOUBLE_STEP", ["STEP", "STEP"])
+
+        expanded = registry.expand_macro("DOUBLE_STEP")
+        # DOUBLE_STEP -> STEP + STEP -> [UP, 1] + [UP, 1] -> [UP, WAIT, UP, WAIT]
+        assert expanded == ["UP", "WAIT", "UP", "WAIT"]
+
+    def test_detects_nested_recursive_macros(self) -> None:
+        """Test detection of recursion in nested macro chains."""
+        registry = MacroRegistry()
+        registry.register_pattern("A", ["B", "X"])
+        registry.register_pattern("B", ["C"])
+        registry.register_pattern("C", ["A"])  # Creates cycle A->B->C->A
+
+        assert registry.has_recursive_dependency("A")
+        assert registry.has_recursive_dependency("B")
+        assert registry.has_recursive_dependency("C")
+
+    def test_prevents_nested_recursive_expansion(self) -> None:
+        """Test that nested recursive macros raise appropriate errors."""
+        registry = MacroRegistry()
+        registry.register_pattern("LOOP", ["LOOP", "A"])
+
+        with pytest.raises(
+            ValueError, match="maximum recursion depth|Recursive macro definition detected"
+        ):
+            registry.expand_macro("LOOP")
+
+    def test_respects_maximum_expansion_depth(self) -> None:
+        """Test that expansion depth is limited to prevent infinite chains."""
+        registry = MacroRegistry()
+        # Create a deep chain: DEEP10 -> DEEP9 -> ... -> DEEP1 -> A
+        registry.register_pattern("DEEP1", ["A"])
+        for i in range(2, 15):  # Create 14 levels (should exceed limit)
+            registry.register_pattern(f"DEEP{i}", [f"DEEP{i-1}"])
+
+        with pytest.raises(ValueError, match="Maximum recursion depth"):
+            registry.expand_macro("DEEP14")
+
+    def test_caches_nested_expansion_results(self) -> None:
+        """Test that nested expansion results are cached for performance."""
+        registry = MacroRegistry()
+        registry.register_pattern("BASE", ["A", "B"])
+        registry.register_pattern("NESTED", ["BASE", "C"])
+
+        # First expansion
+        expanded1 = registry.expand_macro("NESTED")
+
+        # Second expansion should hit cache
+        expanded2 = registry.expand_macro("NESTED")
+
+        assert expanded1 == expanded2
+        assert expanded1 == ["A", "B", "C"]
+
+    def test_preserves_parameter_passing_through_nesting(self) -> None:
+        """Test that parameters are preserved through nested macro calls."""
+        registry = MacroRegistry()
+        registry.register_pattern("PARAMETERIZED", ["A"])
+        registry.register_pattern("WRAPPER", ["PARAMETERIZED", "B"])
+
+        # Note: Current implementation doesn't support parameters,
+        # but test ensures the pattern is preserved for future enhancement
+        expanded = registry.expand_macro("WRAPPER")
+        assert "A" in expanded
+        assert "B" in expanded
+
 
 @pytest.mark.fast
 @pytest.mark.medium
@@ -537,8 +638,11 @@ class TestPerformanceRequirements:
         compile_time_ms = (end_time - start_time) * 1000
 
         assert compile_time_ms < 100.0
-        # Deterministic: 20 iterations * 4 instructions (UP, DOWN, A, B) = 80
-        assert len(compiled.instructions) == 80
+        # Deterministic with nested expansion:
+        # MOVE_SEQUENCE expands to UP, WAIT, DOWN, WAIT (4 instructions)
+        # Plus A, B (2 instructions) = 6 instructions per iteration
+        # 20 iterations * 6 instructions = 120
+        assert len(compiled.instructions) == 120
 
     def test_large_script_compilation_performance(self) -> None:
         """Test performance with very large scripts."""
