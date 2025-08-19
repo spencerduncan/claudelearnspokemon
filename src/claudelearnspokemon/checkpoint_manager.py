@@ -1005,6 +1005,128 @@ class CheckpointManager:
             total_time_ms = (time.perf_counter() - start_time) * 1000
             logger.debug("Checkpoint discovery completed", total_time_ms=total_time_ms)
 
+    def find_nearest_checkpoints(
+        self, location: str, max_suggestions: int = 5, include_distance: bool = True
+    ) -> dict[str, Any]:
+        """
+        Find multiple checkpoint suggestions with ranking and distance information.
+
+        Enhanced discovery interface supporting Issue #82 requirements for multiple suggestions.
+        Maintains clean integration with discovery backend while providing comprehensive results.
+
+        Production strategy:
+        1. Try enhanced discovery backend first (if available and supports multiple results)
+        2. Fallback to SQLite-based multi-search on backend failure
+        3. Return consistent format regardless of backend used
+        4. Maintain circuit breaker state and metrics
+
+        Args:
+            location: Target location identifier
+            max_suggestions: Maximum number of suggestions to return (default: 5)
+            include_distance: Include distance/score information in results (default: True)
+
+        Returns:
+            dict: Suggestions with rankings, distances, and metadata
+                Format: {
+                    "suggestions": [{"checkpoint_id": str, "location": str, "score": float, ...}],
+                    "query_location": str,
+                    "query_time_ms": float,
+                    "backend_used": str,
+                    "total_found": int
+                }
+        """
+        start_time = time.perf_counter()
+
+        try:
+            # Try enhanced discovery backend first (if available and supports multiple results)
+            if (
+                self.discovery_backend
+                and self._circuit_breaker
+                and self._circuit_breaker.is_available()
+                and hasattr(self.discovery_backend, "find_nearest_checkpoints")
+            ):
+                try:
+                    discovery_start = time.perf_counter()
+                    suggestions_result = self.discovery_backend.find_nearest_checkpoints(
+                        location, max_suggestions, include_distance
+                    )
+                    discovery_time_ms = (time.perf_counter() - discovery_start) * 1000
+
+                    # Record success in circuit breaker and metrics
+                    self._circuit_breaker.record_success()
+                    if self.enable_metrics:
+                        self._metrics["discovery_calls_total"] += 1
+                        self._metrics["discovery_success_total"] += 1
+                        self._update_discovery_avg_time(discovery_time_ms)
+
+                    # Convert to consistent format
+                    result = {
+                        "suggestions": [
+                            {
+                                "checkpoint_id": s.checkpoint_id,
+                                "location": s.location_name,
+                                "confidence_score": s.confidence_score,
+                                "relevance_score": s.relevance_score,
+                                "distance_score": s.distance_score,
+                                "final_score": s.final_score,
+                                "fuzzy_match_distance": s.fuzzy_match_distance,
+                            }
+                            for s in suggestions_result.suggestions
+                        ],
+                        "query_location": suggestions_result.query_location,
+                        "query_time_ms": suggestions_result.query_time_ms,
+                        "backend_used": "memgraph_discovery",
+                        "total_found": suggestions_result.total_matches_found,
+                        "fuzzy_matches_used": suggestions_result.fuzzy_matches_used,
+                    }
+
+                    logger.debug(
+                        "Discovery backend found multiple checkpoints",
+                        location=location,
+                        suggestions_count=len(result["suggestions"]),
+                        discovery_time_ms=discovery_time_ms,
+                        backend_type=type(self.discovery_backend).__name__,
+                    )
+
+                    return result
+
+                except Exception as e:
+                    # Discovery backend failed - record failure and fallback
+                    self._circuit_breaker.record_failure()
+                    if self.enable_metrics:
+                        self._metrics["discovery_calls_total"] += 1
+                        self._metrics["discovery_fallback_total"] += 1
+
+                    logger.warning(
+                        "Discovery backend failed for multiple suggestions, falling back to SQLite",
+                        location=location,
+                        error=str(e),
+                        circuit_breaker_state=self._circuit_breaker.state.value,
+                    )
+                    # Continue to SQLite fallback below
+
+            # SQLite-based fallback for multiple suggestions
+            return self._find_nearest_checkpoints_sqlite(
+                location, max_suggestions, include_distance
+            )
+
+        except Exception as e:
+            logger.error(
+                "Failed to find multiple nearest checkpoints", location=location, error=str(e)
+            )
+            total_time_ms = (time.perf_counter() - start_time) * 1000
+            return {
+                "suggestions": [],
+                "query_location": location,
+                "query_time_ms": total_time_ms,
+                "backend_used": "error",
+                "total_found": 0,
+                "error": str(e),
+            }
+        finally:
+            total_time_ms = (time.perf_counter() - start_time) * 1000
+            logger.debug("Multiple checkpoint discovery completed", total_time_ms=total_time_ms)
+
     def _find_nearest_checkpoint_sqlite(self, location: str) -> str:
         """
         SQLite-based checkpoint discovery (original implementation).
@@ -1040,6 +1162,110 @@ class CheckpointManager:
         except Exception as e:
             logger.error("SQLite checkpoint discovery failed", location=location, error=str(e))
             return ""
+
+    def _find_nearest_checkpoints_sqlite(
+        self, location: str, max_suggestions: int = 5, include_distance: bool = True
+    ) -> dict[str, Any]:
+        """
+        SQLite-based multiple checkpoint discovery fallback.
+
+        Provides multiple suggestions using the metadata database when
+        the enhanced discovery backend is unavailable.
+
+        Args:
+            location: Target location identifier
+            max_suggestions: Maximum suggestions to return
+            include_distance: Include distance information
+
+        Returns:
+            dict: Consistent format with discovery backend
+        """
+        start_time = time.perf_counter()
+
+        try:
+            all_checkpoints = self._get_all_checkpoint_metadata()
+
+            # Find exact matches first
+            exact_matches = [cp for cp in all_checkpoints if cp.location == location]
+
+            # If we have exact matches, score them
+            if exact_matches:
+                scored_matches = []
+                for checkpoint in exact_matches:
+                    score = self._calculate_value_score(checkpoint)
+                    scored_matches.append((checkpoint, score, 0))  # 0 = exact match distance
+
+                # Sort by score (descending)
+                scored_matches.sort(key=lambda x: x[1], reverse=True)
+
+                # Take top N matches
+                top_matches = scored_matches[:max_suggestions]
+
+                suggestions = []
+                for checkpoint, score, distance in top_matches:
+                    suggestion = {
+                        "checkpoint_id": checkpoint.checkpoint_id,
+                        "location": checkpoint.location,
+                        "confidence_score": score,
+                        "relevance_score": 1.0,  # Exact match
+                        "distance_score": 1.0,  # Exact match
+                        "final_score": score,
+                        "fuzzy_match_distance": distance,
+                    }
+                    suggestions.append(suggestion)
+
+                query_time_ms = (time.perf_counter() - start_time) * 1000
+
+                result = {
+                    "suggestions": suggestions,
+                    "query_location": location,
+                    "query_time_ms": query_time_ms,
+                    "backend_used": "sqlite_exact",
+                    "total_found": len(suggestions),
+                    "fuzzy_matches_used": False,
+                }
+
+                logger.debug(
+                    "SQLite found multiple exact match checkpoints",
+                    location=location,
+                    suggestions_count=len(suggestions),
+                    query_time_ms=query_time_ms,
+                )
+
+                return result
+
+            # No exact matches - return empty result for SQLite fallback
+            # (Fuzzy matching in SQLite would be too slow for production)
+            query_time_ms = (time.perf_counter() - start_time) * 1000
+
+            logger.debug(
+                "SQLite found no exact matches for multiple suggestions",
+                location=location,
+                query_time_ms=query_time_ms,
+            )
+
+            return {
+                "suggestions": [],
+                "query_location": location,
+                "query_time_ms": query_time_ms,
+                "backend_used": "sqlite_fallback",
+                "total_found": 0,
+                "fuzzy_matches_used": False,
+            }
+
+        except Exception as e:
+            logger.error(
+                "SQLite multiple checkpoint discovery failed", location=location, error=str(e)
+            )
+            query_time_ms = (time.perf_counter() - start_time) * 1000
+            return {
+                "suggestions": [],
+                "query_location": location,
+                "query_time_ms": query_time_ms,
+                "backend_used": "sqlite_error",
+                "total_found": 0,
+                "error": str(e),
+            }
 
     def get_metrics(self) -> dict[str, Any]:
         """

@@ -512,6 +512,7 @@ class TestEdgeCasesAndErrorHandling:
         assert tile_props["observation_count"] == 2
 
 
+@pytest.mark.fast
 class TestGameStateInterface:
     """Test GameState interface classes and functionality."""
 

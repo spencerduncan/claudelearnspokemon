@@ -48,6 +48,30 @@ class CheckpointDiscoveryResult:
     query_time_ms: float
 
 
+@dataclass
+class CheckpointSuggestion:
+    """Single checkpoint suggestion with ranking and distance information."""
+
+    checkpoint_id: str
+    location_name: str
+    confidence_score: float
+    relevance_score: float
+    distance_score: float
+    final_score: float
+    fuzzy_match_distance: int = 0  # Levenshtein distance for fuzzy matches
+
+
+@dataclass
+class CheckpointSuggestions:
+    """Multiple checkpoint suggestions with metadata."""
+
+    suggestions: list[CheckpointSuggestion]
+    query_location: str
+    query_time_ms: float
+    total_matches_found: int
+    fuzzy_matches_used: bool = False
+
+
 class MemgraphConnectionError(Exception):
     """Raised when memgraph connection fails."""
 
@@ -302,6 +326,125 @@ class MemgraphCheckpointDiscovery:
             logger.error("Checkpoint discovery failed", error=str(e), location=location)
             return ""
 
+    def find_nearest_checkpoints(
+        self, location: str, max_suggestions: int = 5, include_distance: bool = True
+    ) -> CheckpointSuggestions:
+        """
+        Find multiple checkpoint suggestions with ranking and distance information.
+
+        Enhanced discovery method supporting the full requirement from Issue #82.
+        Provides multiple suggestions with comprehensive scoring and distance metrics.
+
+        Target: <10ms for multiple results (2x single result allowance)
+
+        Args:
+            location: Target location name (supports fuzzy matching)
+            max_suggestions: Maximum number of suggestions to return (default: 5)
+            include_distance: Include distance/score information (default: True)
+
+        Returns:
+            CheckpointSuggestions: Complete suggestions with rankings and metadata
+        """
+        start_time = time.perf_counter()
+
+        try:
+            with self._connection_lock:
+                if self._connection is None:
+                    raise MemgraphConnectionError("Connection not established")
+                cursor = self._connection.cursor()
+
+                # Use pre-calculated similarities for fuzzy matching
+                matched_locations = self._fuzzy_match_location(cursor, location)
+
+                if not matched_locations:
+                    query_time_ms = (time.perf_counter() - start_time) * 1000
+                    return CheckpointSuggestions(
+                        suggestions=[],
+                        query_location=location,
+                        query_time_ms=query_time_ms,
+                        total_matches_found=0,
+                        fuzzy_matches_used=False,
+                    )
+
+                # Enhanced query for multiple results with detailed scoring
+                query = """
+                MATCH (c:Checkpoint)-[r:SAVED_AT]->(l:Location)
+                WHERE l.name IN $locations
+                RETURN c.id, l.name, r.relevance_score, c.composite_score,
+                       r.relevance_score * c.composite_score as final_score
+                ORDER BY final_score DESC
+                LIMIT $max_suggestions
+                """
+
+                cursor.execute(
+                    query, {"locations": matched_locations, "max_suggestions": max_suggestions}
+                )
+                results = cursor.fetchall()
+
+                query_time_ms = (time.perf_counter() - start_time) * 1000
+
+                # Build suggestions list with comprehensive information
+                suggestions = []
+                for result in results:
+                    (
+                        checkpoint_id,
+                        matched_location,
+                        relevance_score,
+                        composite_score,
+                        final_score,
+                    ) = result
+
+                    # Calculate fuzzy match distance for transparency
+                    fuzzy_distance = self._calculate_fuzzy_distance(location, matched_location)
+
+                    suggestion = CheckpointSuggestion(
+                        checkpoint_id=checkpoint_id,
+                        location_name=matched_location,
+                        confidence_score=composite_score,
+                        relevance_score=relevance_score,
+                        distance_score=1.0 - (fuzzy_distance / 10.0),  # Normalize distance to score
+                        final_score=final_score,
+                        fuzzy_match_distance=fuzzy_distance,
+                    )
+                    suggestions.append(suggestion)
+
+                # Determine if fuzzy matching was used
+                fuzzy_used = any(loc.lower() != location.lower() for loc in matched_locations)
+
+                # Update metrics
+                if self.enable_metrics:
+                    self._metrics["discovery_queries"] += 1
+                    self._metrics["discovery_total_time_ms"] += query_time_ms
+
+                checkpoint_suggestions = CheckpointSuggestions(
+                    suggestions=suggestions,
+                    query_location=location,
+                    query_time_ms=query_time_ms,
+                    total_matches_found=len(results),
+                    fuzzy_matches_used=fuzzy_used,
+                )
+
+                logger.debug(
+                    "Multiple checkpoint suggestions generated",
+                    location=location,
+                    suggestions_count=len(suggestions),
+                    query_time_ms=query_time_ms,
+                    fuzzy_matches_used=fuzzy_used,
+                )
+
+                return checkpoint_suggestions
+
+        except Exception as e:
+            logger.error("Multiple checkpoint discovery failed", error=str(e), location=location)
+            query_time_ms = (time.perf_counter() - start_time) * 1000
+            return CheckpointSuggestions(
+                suggestions=[],
+                query_location=location,
+                query_time_ms=query_time_ms,
+                total_matches_found=0,
+                fuzzy_matches_used=False,
+            )
+
     def _calculate_composite_score(
         self, success_rate: float, strategic_value: float, access_count: int, created_at: str
     ) -> float:
@@ -411,6 +554,21 @@ class MemgraphCheckpointDiscovery:
         except Exception as e:
             logger.error("Fuzzy matching failed", error=str(e))
             return []
+
+    def _calculate_fuzzy_distance(self, query_location: str, matched_location: str) -> int:
+        """
+        Calculate fuzzy match distance for transparency in results.
+
+        Args:
+            query_location: Original query location
+            matched_location: Matched location from database
+
+        Returns:
+            int: Levenshtein distance (0 = exact match)
+        """
+        if query_location.lower() == matched_location.lower():
+            return 0
+        return Levenshtein.distance(query_location.lower(), matched_location.lower())
 
     def get_performance_metrics(self) -> dict[str, Any]:
         """Get performance metrics for monitoring."""

@@ -23,6 +23,8 @@ import pytest
 
 from claudelearnspokemon.memgraph_checkpoint_discovery import (
     CheckpointDiscoveryResult,
+    CheckpointSuggestion,
+    CheckpointSuggestions,
     LocationScore,
     MemgraphCheckpointDiscovery,
     MemgraphConnectionError,
@@ -871,6 +873,195 @@ class TestEndToEndIntegration:
 
 
 # Uncle Bot's Final Craftsmanship Validation
+@pytest.mark.fast
+class TestMultipleCheckpointDiscovery:
+    """Test new find_nearest_checkpoints functionality for Issue #82."""
+
+    def test_find_nearest_checkpoints_exact_matches(self, mock_mgclient, checkpoint_discovery):
+        """Test multiple checkpoint discovery with exact location matches."""
+        # Setup mock to return multiple exact matches
+        mock_cursor = mock_mgclient["cursor"]
+
+        # Fuzzy matching returns exact match
+        mock_cursor.fetchone.return_value = ("Viridian City",)  # Exact match
+
+        # Multiple checkpoints query returns multiple results
+        mock_cursor.fetchall.return_value = [
+            ("checkpoint_001", "Viridian City", 0.9, 0.85, 0.765),  # final_score = 0.9 * 0.85
+            ("checkpoint_002", "Viridian City", 0.95, 0.80, 0.760),  # final_score = 0.95 * 0.80
+            ("checkpoint_003", "Viridian City", 0.88, 0.82, 0.722),  # final_score = 0.88 * 0.82
+        ]
+
+        result = checkpoint_discovery.find_nearest_checkpoints("Viridian City", max_suggestions=3)
+
+        # Verify result structure
+        assert isinstance(result, CheckpointSuggestions)
+        assert len(result.suggestions) == 3
+        assert result.query_location == "Viridian City"
+        assert result.total_matches_found == 3
+        assert result.fuzzy_matches_used is False
+        assert result.query_time_ms < 10  # Performance target for multiple results
+
+        # Verify suggestions are properly structured
+        first_suggestion = result.suggestions[0]
+        assert isinstance(first_suggestion, CheckpointSuggestion)
+        assert first_suggestion.checkpoint_id == "checkpoint_001"
+        assert first_suggestion.location_name == "Viridian City"
+        assert first_suggestion.confidence_score == 0.85
+        assert first_suggestion.relevance_score == 0.9
+        assert first_suggestion.final_score == 0.765
+        assert first_suggestion.fuzzy_match_distance == 0  # Exact match
+
+    def test_find_nearest_checkpoints_fuzzy_matches(self, mock_mgclient, checkpoint_discovery):
+        """Test multiple checkpoint discovery with fuzzy location matching."""
+        mock_cursor = mock_mgclient["cursor"]
+
+        # Fuzzy matching returns no exact match, then fuzzy matches
+        mock_cursor.fetchone.return_value = None  # No exact match
+        mock_cursor.fetchall.side_effect = [
+            [("Viridian City",), ("Viridian Forest",), ("Viridian Gym",)],  # All locations
+            [
+                ("checkpoint_001", "Viridian City", 0.9, 0.85, 0.765),
+                ("checkpoint_002", "Viridian Forest", 0.8, 0.75, 0.600),
+            ],
+        ]
+
+        result = checkpoint_discovery.find_nearest_checkpoints(
+            "Viridain City", max_suggestions=2
+        )  # Typo
+
+        # Verify fuzzy matching was used
+        assert isinstance(result, CheckpointSuggestions)
+        assert len(result.suggestions) == 2
+        assert result.fuzzy_matches_used is True
+        assert (
+            result.suggestions[0].fuzzy_match_distance > 0
+        )  # Should have distance for fuzzy match
+
+    def test_find_nearest_checkpoints_performance_target(self, mock_mgclient, checkpoint_discovery):
+        """Test that multiple suggestions meet <10ms performance target."""
+        mock_cursor = mock_mgclient["cursor"]
+        mock_cursor.fetchone.return_value = ("Test Location",)
+        mock_cursor.fetchall.return_value = [
+            ("cp_001", "Test Location", 0.9, 0.8, 0.72),
+            ("cp_002", "Test Location", 0.8, 0.9, 0.72),
+        ]
+
+        start_time = time.perf_counter()
+        result = checkpoint_discovery.find_nearest_checkpoints("Test Location", max_suggestions=5)
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+
+        # Should meet enhanced performance target
+        assert elapsed_ms < 10  # 10ms target for multiple results
+        assert result.query_time_ms < 10
+
+    def test_find_nearest_checkpoints_no_matches(self, mock_mgclient, checkpoint_discovery):
+        """Test multiple checkpoint discovery with no matches found."""
+        mock_cursor = mock_mgclient["cursor"]
+
+        # No exact match
+        mock_cursor.fetchone.return_value = None
+        # No locations in database
+        mock_cursor.fetchall.return_value = []
+
+        result = checkpoint_discovery.find_nearest_checkpoints("Nonexistent Location")
+
+        assert isinstance(result, CheckpointSuggestions)
+        assert len(result.suggestions) == 0
+        assert result.total_matches_found == 0
+        assert result.query_location == "Nonexistent Location"
+
+    def test_find_nearest_checkpoints_max_suggestions_limit(
+        self, mock_mgclient, checkpoint_discovery
+    ):
+        """Test that max_suggestions parameter is respected."""
+        mock_cursor = mock_mgclient["cursor"]
+        mock_cursor.fetchone.return_value = ("Test Location",)
+
+        # Mock should respect LIMIT clause by returning only requested amount
+        # This simulates the database properly implementing LIMIT $max_suggestions
+        mock_cursor.fetchall.return_value = [
+            (f"checkpoint_{i:03d}", "Test Location", 0.9, 0.8, 0.72)
+            for i in range(3)  # Only 3 results as requested
+        ]
+
+        result = checkpoint_discovery.find_nearest_checkpoints("Test Location", max_suggestions=3)
+
+        # Should be limited to max_suggestions
+        assert len(result.suggestions) == 3
+        assert result.total_matches_found == 3
+
+    def test_find_nearest_checkpoints_error_handling(self, mock_mgclient, checkpoint_discovery):
+        """Test error handling in multiple checkpoint discovery."""
+        mock_cursor = mock_mgclient["cursor"]
+        mock_cursor.execute.side_effect = Exception("Mock database error")
+
+        result = checkpoint_discovery.find_nearest_checkpoints("Test Location")
+
+        # Should return empty result with error handling
+        assert isinstance(result, CheckpointSuggestions)
+        assert len(result.suggestions) == 0
+        assert result.total_matches_found == 0
+        assert result.query_location == "Test Location"
+
+    def test_find_nearest_checkpoints_updates_metrics(self, mock_mgclient, checkpoint_discovery):
+        """Test that multiple discovery updates performance metrics."""
+        mock_cursor = mock_mgclient["cursor"]
+        mock_cursor.fetchone.return_value = ("Test Location",)
+        mock_cursor.fetchall.return_value = [("cp_001", "Test Location", 0.9, 0.8, 0.72)]
+
+        initial_metrics = checkpoint_discovery.get_performance_metrics()
+        initial_queries = initial_metrics.get("discovery_queries", 0)
+
+        checkpoint_discovery.find_nearest_checkpoints("Test Location")
+
+        updated_metrics = checkpoint_discovery.get_performance_metrics()
+        assert updated_metrics["discovery_queries"] == initial_queries + 1
+
+    def test_fuzzy_distance_calculation_accuracy(self, checkpoint_discovery):
+        """Test _calculate_fuzzy_distance helper method accuracy."""
+        # Exact match
+        assert checkpoint_discovery._calculate_fuzzy_distance("Viridian City", "Viridian City") == 0
+
+        # Case insensitive exact match
+        assert checkpoint_discovery._calculate_fuzzy_distance("viridian city", "Viridian City") == 0
+
+        # Single character difference
+        assert checkpoint_discovery._calculate_fuzzy_distance("Viridian City", "Viridian Caty") == 1
+
+        # Multiple character differences
+        distance = checkpoint_discovery._calculate_fuzzy_distance("Cerulean City", "Viridian City")
+        assert distance > 0
+
+    def test_data_classes_structure(self):
+        """Test that new data classes are properly structured."""
+        # Test CheckpointSuggestion
+        suggestion = CheckpointSuggestion(
+            checkpoint_id="cp_001",
+            location_name="Test Location",
+            confidence_score=0.9,
+            relevance_score=0.8,
+            distance_score=0.95,
+            final_score=0.72,
+            fuzzy_match_distance=1,
+        )
+
+        assert suggestion.checkpoint_id == "cp_001"
+        assert suggestion.fuzzy_match_distance == 1
+
+        # Test CheckpointSuggestions
+        suggestions = CheckpointSuggestions(
+            suggestions=[suggestion],
+            query_location="Test Location",
+            query_time_ms=5.2,
+            total_matches_found=1,
+            fuzzy_matches_used=True,
+        )
+
+        assert len(suggestions.suggestions) == 1
+        assert suggestions.fuzzy_matches_used is True
+
+
 @pytest.mark.fast
 def test_code_quality_and_clean_code_principles():
     """

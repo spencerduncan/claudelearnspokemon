@@ -98,7 +98,7 @@ def sample_metadata():
     }
 
 
-@pytest.mark.medium
+@pytest.mark.fast
 class TestBackwardCompatibility:
     """Test that existing CheckpointManager usage continues working unchanged."""
 
@@ -151,7 +151,7 @@ class TestBackwardCompatibility:
             assert not manager._discovery_backend_enabled
 
 
-@pytest.mark.medium
+@pytest.mark.fast
 class TestDiscoveryBackendIntegration:
     """Test integration with discovery backend."""
 
@@ -231,7 +231,7 @@ class TestDiscoveryBackendIntegration:
         assert metrics["discovery_backend"]["circuit_breaker"]["state"] == "open"
 
 
-@pytest.mark.medium
+@pytest.mark.fast
 class TestCircuitBreakerFunctionality:
     """Test circuit breaker behavior in production scenarios."""
 
@@ -303,6 +303,7 @@ class TestCircuitBreakerFunctionality:
 
 
 @pytest.mark.medium
+@pytest.mark.fast
 class TestProductionScenarios:
     """Test real-world production scenarios."""
 
