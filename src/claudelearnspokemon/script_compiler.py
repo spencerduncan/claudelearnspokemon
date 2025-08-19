@@ -234,19 +234,24 @@ class HighPerformanceLexer:
 
 class MacroRegistry:
     """
-    High-performance macro storage with expansion caching.
+    High-performance macro storage with recursive expansion support.
 
-    Optimizations:
+    Features:
+    - Nested macro expansion with depth limits
     - Pattern interning for memory efficiency
-    - Expansion result caching for repeated patterns
-    - Recursive dependency tracking for cycle detection
+    - Recursive expansion result caching for performance
+    - Cycle detection for nested macro chains
     - O(1) lookup for registered patterns
     """
+
+    # Maximum recursion depth to prevent infinite expansion
+    MAX_EXPANSION_DEPTH = 10
 
     def __init__(self):
         self._patterns: dict[str, list[ASTNode]] = {}
         self._original_expansions: dict[str, list[str]] = {}  # Store original expansions
         self._expansion_cache: dict[str, list[str]] = {}
+        self._nested_expansion_cache: dict[tuple[str, int], list[str]] = {}  # Cache with depth
         self._dependency_graph: dict[str, set[str]] = defaultdict(set)
         self._frame_estimates: dict[str, int] = {}
         self._node_factory = NodeFactory()
@@ -263,9 +268,14 @@ class MacroRegistry:
         ast_nodes = self._parse_expansion(expansion)
         self._patterns[name] = ast_nodes
 
-        # Clear related caches
+        # Clear related caches (both single-level and nested)
         self._expansion_cache.pop(name, None)
         self._frame_estimates.pop(name, None)
+
+        # Clear nested expansion cache entries for this pattern
+        keys_to_remove = [key for key in self._nested_expansion_cache.keys() if key[0] == name]
+        for key in keys_to_remove:
+            self._nested_expansion_cache.pop(key, None)
 
         # Update dependency graph for cycle detection
         self._update_dependencies(name, expansion)
@@ -276,24 +286,125 @@ class MacroRegistry:
 
     def expand_macro(self, name: str, args: list[str] | None = None) -> list[str]:
         """
-        Expand macro with caching for performance.
+        Expand macro with recursive nested expansion support.
+
+        Recursively expands any macro calls found within the expansion,
+        with depth limits to prevent infinite recursion.
         Uses memoization to avoid re-expanding identical patterns.
         """
-        cache_key = f"{name}:{','.join(args) if args else ''}"
+        return self._expand_macro_recursive(name, args, depth=0, expansion_path=set())
 
-        if cache_key in self._expansion_cache:
-            return self._expansion_cache[cache_key]
+    def _expand_macro_recursive(
+        self,
+        name: str,
+        args: list[str] | None = None,
+        depth: int = 0,
+        expansion_path: set[str] | None = None,
+    ) -> list[str]:
+        """
+        Recursive macro expansion with cycle detection and depth limits.
 
+        Args:
+            name: Macro name to expand
+            args: Arguments for macro expansion (future enhancement)
+            depth: Current recursion depth
+            expansion_path: Set of macros currently being expanded (cycle detection)
+
+        Returns:
+            List of expanded strings with all nested macros resolved
+
+        Raises:
+            ValueError: If recursion depth exceeded or cycles detected
+        """
+        # Initialize expansion path for cycle detection
+        if expansion_path is None:
+            expansion_path = set()
+
+        # Check recursion depth limit
+        if depth > self.MAX_EXPANSION_DEPTH:
+            raise ValueError(
+                f"Maximum recursion depth ({self.MAX_EXPANSION_DEPTH}) exceeded for macro '{name}'"
+            )
+
+        # Check for cycles in current expansion path
+        if name in expansion_path:
+            raise ValueError(
+                f"Recursive macro definition detected in expansion path: {expansion_path} -> {name}"
+            )
+
+        # Check cache for this specific depth context
+        cache_key = (name, depth)
+        if cache_key in self._nested_expansion_cache:
+            return self._nested_expansion_cache[cache_key].copy()
+
+        # Verify macro exists
         pattern = self._patterns.get(name)
         if not pattern:
             raise ValueError(f"Unknown macro: {name}")
 
-        # Expand pattern nodes to strings
-        expanded = self._expand_pattern_nodes(pattern, args or [])
+        # Add current macro to expansion path for cycle detection
+        current_path = expansion_path | {name}
 
-        # Cache result for future use
-        self._expansion_cache[cache_key] = expanded
-        return expanded
+        # Initial expansion to get base pattern
+        initial_expanded = self._expand_pattern_nodes(pattern, args or [])
+
+        # Recursively expand any macro calls found in the expansion
+        final_expanded = []
+        for item in initial_expanded:
+            if self._is_macro_call(item):
+                # Recursively expand nested macro
+                nested_expanded = self._expand_macro_recursive(
+                    item,
+                    args=None,  # TODO: Support parameter passing in future
+                    depth=depth + 1,
+                    expansion_path=current_path,
+                )
+                final_expanded.extend(nested_expanded)
+            else:
+                # Keep primitive instruction as-is
+                final_expanded.append(item)
+
+        # Cache the result for this depth context
+        self._nested_expansion_cache[cache_key] = final_expanded.copy()
+
+        # Also cache in the original cache for backward compatibility (depth 0 only)
+        if depth == 0:
+            cache_key_original = f"{name}:{','.join(args) if args else ''}"
+            self._expansion_cache[cache_key_original] = final_expanded.copy()
+
+        return final_expanded
+
+    def _is_macro_call(self, item: str) -> bool:
+        """
+        Determine if a string represents a macro call.
+
+        A string is considered a macro call if:
+        1. It's a registered pattern name
+        2. It matches identifier pattern (letters, numbers, underscore)
+        3. It's not a known primitive command
+
+        Args:
+            item: String to check
+
+        Returns:
+            True if item is a macro call, False otherwise
+        """
+        # Check if it's a registered pattern
+        if item in self._patterns:
+            return True
+
+        # Additional heuristics for macro-like strings
+        if (
+            isinstance(item, str)
+            and item.replace("_", "a").replace("-", "a").isalnum()
+            and not item.isdigit()  # Not a number (delay)
+            and item
+            not in {"WAIT", "NOOP", "A", "B", "START", "SELECT", "UP", "DOWN", "LEFT", "RIGHT"}
+        ):
+            # It looks like a macro name but isn't registered - could be undefined
+            return False
+
+        return False
 
     def has_recursive_dependency(self, name: str) -> bool:
         """

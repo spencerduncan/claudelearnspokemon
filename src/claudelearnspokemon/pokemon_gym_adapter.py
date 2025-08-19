@@ -342,6 +342,9 @@ class PokemonGymAdapter:
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
 
+        # HTTP client wrapper for test compatibility
+        self.http_client = HTTPClientWrapper(self.session, self.base_url)
+
         logger.info(f"PokemonGymAdapter initialized for port {port}, container {container_id[:12]}")
 
     @classmethod
@@ -787,7 +790,7 @@ class PokemonGymAdapter:
     def close(self) -> None:
         """Close HTTP session and cleanup resources."""
         self.session_manager.close()
-        self.session.close()
+        self.http_client.close()
 
     def _ensure_session_initialized(self) -> None:
         """Ensure session is initialized, initialize if needed."""
@@ -849,11 +852,14 @@ class PokemonGymAdapter:
         Returns:
             Action response data
         """
+        # Use timeout from config if available
+        action_timeout = self.timeout_config.get("action", self.input_timeout)
+
         # Use requests session for connection pooling and test compatibility
         response = self.session.post(
             f"{self.base_url}/action",
             json={"action_type": "press_key", "keys": [button]},
-            timeout=self.timeout_config.get("action", 1.0),
+            timeout=action_timeout,
         )
         response.raise_for_status()
         return dict(response.json())
