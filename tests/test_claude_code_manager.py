@@ -29,6 +29,7 @@ from claudelearnspokemon.prompts import ProcessType
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestClaudeCodeManagerBasics(unittest.TestCase):
     """Test basic ClaudeCodeManager functionality."""
 
@@ -78,6 +79,7 @@ class TestClaudeCodeManagerBasics(unittest.TestCase):
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestProcessLifecycle(unittest.TestCase):
     """Test process lifecycle operations."""
 
@@ -164,6 +166,7 @@ class TestProcessLifecycle(unittest.TestCase):
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestPerformanceMetrics(unittest.TestCase):
     """Test performance metrics and benchmarking."""
 
@@ -251,6 +254,7 @@ class TestPerformanceMetrics(unittest.TestCase):
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestFailureHandling(unittest.TestCase):
     """Test failure scenarios and error handling."""
 
@@ -313,6 +317,7 @@ class TestFailureHandling(unittest.TestCase):
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestParallelOperations(unittest.TestCase):
     """Test concurrent and parallel operations."""
 
@@ -398,6 +403,7 @@ class TestParallelOperations(unittest.TestCase):
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestProcessConfig(unittest.TestCase):
     """Test ProcessConfig and ProcessMetrics functionality."""
 
@@ -438,6 +444,7 @@ class TestProcessConfig(unittest.TestCase):
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestClaudeProcess(unittest.TestCase):
     """Test individual ClaudeProcess functionality."""
 
@@ -510,6 +517,7 @@ class TestClaudeProcess(unittest.TestCase):
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestBenchmarkUtilities(unittest.TestCase):
     """Test performance benchmarking utilities."""
 
