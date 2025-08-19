@@ -24,6 +24,7 @@ from src.claudelearnspokemon.compatibility.validation import (
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestServerUrlPortValidation:
     """Test server port validation with Uncle Bob's thorough approach."""
 
@@ -78,6 +79,7 @@ class TestServerUrlPortValidation:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestContainerIdentifierValidation:
     """Test container ID validation following clean code principles."""
 
@@ -122,6 +124,7 @@ class TestContainerIdentifierValidation:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestAdapterTypeSelectionValidation:
     """Test adapter type validation with comprehensive coverage."""
 
@@ -158,6 +161,7 @@ class TestAdapterTypeSelectionValidation:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestTimeoutParameterValidation:
     """Test timeout validation with edge cases and clear naming."""
 
@@ -198,6 +202,7 @@ class TestTimeoutParameterValidation:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestInputDelayParameterValidation:
     """Test input delay validation allowing zero but rejecting negative values."""
 
@@ -229,6 +234,7 @@ class TestInputDelayParameterValidation:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestClientCreationParametersValidation:
     """Test the main coordinator validation function - Uncle Bob's orchestration pattern."""
 
@@ -345,6 +351,7 @@ class TestClientCreationParametersValidation:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestValidationErrorMessages:
     """Test that error messages are clear and actionable - Uncle Bob's user empathy."""
 
