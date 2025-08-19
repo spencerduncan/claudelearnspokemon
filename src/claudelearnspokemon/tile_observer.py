@@ -15,11 +15,156 @@ Performance Requirements:
 Author: Uncle Bot (Claude Code)
 """
 
+import pickle
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+
+
+@dataclass
+class GamePosition:
+    """Represents a player position in the game world."""
+
+    x: int
+    y: int
+    map_id: str
+    facing_direction: str
+
+
+@dataclass
+class GameState:
+    """Complete game state capture for TileObserver analysis."""
+
+    position: GamePosition
+    tiles: np.ndarray  # 20x18 tile grid
+    npcs: list[Any]
+    menu_state: Any
+    inventory: dict[str, int]
+    timestamp: float
+    frame_count: int
+
+
+@dataclass
+class TileInfo:
+    """Information about a specific tile type."""
+
+    tile_id: int
+    passable: bool
+    interaction_type: str | None
+    semantic_tags: set[str]
+
+
+class GameStateInterface:
+    """Interface for capturing and processing game state information."""
+
+    def capture_current_state(self, emulator_client) -> GameState:
+        """Capture complete game state from emulator.
+
+        Args:
+            emulator_client: Client connection to Pokemon-gym emulator
+
+        Returns:
+            GameState: Complete captured game state
+
+        Raises:
+            ValueError: If emulator_client is invalid or unresponsive
+        """
+        if not emulator_client:
+            raise ValueError("Invalid emulator client provided")
+
+        try:
+            # Extract raw state from emulator
+            raw_state: dict[str, Any] = getattr(emulator_client, "get_state", lambda: {})()
+
+            # Convert tiles to 20x18 numpy array
+            tiles = np.zeros((20, 18), dtype=np.uint8)
+            if "tiles" in raw_state:
+                tile_data = np.array(raw_state["tiles"], dtype=np.uint8)
+                if tile_data.shape == (20, 18):
+                    # Type: ignore because we've verified the shape is exactly (20, 18)
+                    tiles = tile_data  # type: ignore[assignment]
+                else:
+                    # Reshape to proper dimensions
+                    resized_data = np.resize(tile_data, (20 * 18,))
+                    tiles = resized_data.reshape((20, 18)).astype(np.uint8)
+
+            # Extract position with defaults
+            pos_data = raw_state.get("player_position", (0, 0))
+            position = GamePosition(
+                x=pos_data[0] if len(pos_data) > 0 else 0,
+                y=pos_data[1] if len(pos_data) > 1 else 0,
+                map_id=raw_state.get("map_id", "unknown"),
+                facing_direction=raw_state.get("facing_direction", "down"),
+            )
+
+            return GameState(
+                position=position,
+                tiles=tiles,
+                npcs=raw_state.get("npcs", []),
+                menu_state=raw_state.get("menu_state", None),
+                inventory=raw_state.get("inventory", {}),
+                timestamp=time.time(),
+                frame_count=raw_state.get("frame_count", 0),
+            )
+
+        except Exception as e:
+            raise ValueError(f"Failed to capture game state: {e}") from e
+
+    def extract_tile_grid(self, state: GameState) -> np.ndarray:
+        """Extract 20x18 tile grid from game state.
+
+        Args:
+            state: GameState object containing tile data
+
+        Returns:
+            numpy.ndarray: 20x18 array of tile IDs
+
+        Raises:
+            ValueError: If state is invalid or tiles are wrong shape
+        """
+        if not isinstance(state, GameState):
+            raise ValueError("Invalid GameState object provided")
+        if state.tiles.shape != (20, 18):
+            raise ValueError(f"Expected grid shape (20, 18), got {state.tiles.shape}")
+        return state.tiles.copy()
+
+    def get_player_position(self, state: GameState) -> GamePosition:
+        """Get current player position and context.
+
+        Args:
+            state: GameState object containing position data
+
+        Returns:
+            GamePosition: Current player position and facing direction
+
+        Raises:
+            ValueError: If state is invalid
+        """
+        if not isinstance(state, GameState):
+            raise ValueError("Invalid GameState object provided")
+        return state.position
+
+    def serialize_state(self, state: GameState) -> bytes:
+        """Serialize game state for storage.
+
+        Args:
+            state: GameState object to serialize
+
+        Returns:
+            bytes: Serialized state data
+
+        Raises:
+            ValueError: If state cannot be serialized
+        """
+        if not isinstance(state, GameState):
+            raise ValueError("Invalid GameState object provided")
+        try:
+            return pickle.dumps(state)
+        except Exception as e:
+            raise ValueError(f"Failed to serialize game state: {e}") from e
 
 
 class TileObserver:
@@ -335,7 +480,7 @@ class TileObserver:
         """Handle menu overlay tiles by preserving underlying tile data."""
         # In a real implementation, this might preserve the underlying tiles
         # For now, we'll mark menu areas but not modify the core tiles
-        result = tiles.copy()
+        result: np.ndarray = tiles.copy()
         return result
 
     def _is_position_walkable(

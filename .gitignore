@@ -44,3 +44,11 @@ TASKS.md
 
 # Worktrees and development directories
 worktrees/
+
+# Orchestrator documentation (temporary planning files)
+pokemon-gym-adapter-orchestrator.md
+launch-adapter-orchestration.md
+adapter-progress-tracker.md
+
+# Generated profiling and analysis files
+profile_results.json

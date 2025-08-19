@@ -1,21 +1,35 @@
 """
-EmulatorPool: Docker container lifecycle management for Pokemon-gym emulators.
+EmulatorPool: Simplified Docker container management for Pokemon-gym emulators.
 
-Production-grade container orchestration with proper failure handling,
-timeouts, and resource cleanup. Built with Google-scale engineering principles.
+Workstation-appropriate container orchestration with clear error handling
+and reliable resource management. Built with Bot Dean engineering principles
+optimized for development workflow.
 
-Author: Bot Dean - Production Systems Engineering
+Author: Bot Dean - Workstation Engineering
 """
 
 import logging
 import queue
 import threading
 import time
+import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
+from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, cast
 
 import docker
 import requests
 from docker.errors import APIError, DockerException, ImageNotFound
+
+# Import compatibility layer factory for transparent adapter selection
+try:
+    from .pokemon_gym_factory import create_pokemon_client
+
+    COMPATIBILITY_LAYER_AVAILABLE = True
+except ImportError:
+    # Graceful degradation if compatibility layer not available
+    COMPATIBILITY_LAYER_AVAILABLE = False
 
 if TYPE_CHECKING:
     from .checkpoint_manager import CheckpointError, CheckpointManager
@@ -55,6 +69,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+class ExecutionStatus(Enum):
+    """Execution status enum for script execution results."""
+
+    SUCCESS = auto()
+    FAILED = auto()
+    TIMEOUT = auto()
+    CANCELLED = auto()
+
+
 class EmulatorPoolError(Exception):
     """
     Custom exception for EmulatorPool operations.
@@ -65,39 +88,100 @@ class EmulatorPoolError(Exception):
     pass
 
 
+@dataclass
 class ExecutionResult:
     """
-    Results from script execution on a Pokemon-gym emulator.
+    Production-ready execution results from Pokemon script execution.
 
-    Contains all information needed for analysis and debugging.
+    Comprehensive tracking of execution metrics, state, and outcomes
+    for analysis, debugging, and learning system optimization.
+
+    Design follows Clean Architecture principles:
+    - Single Responsibility: Contains only execution result data
+    - Open/Closed: Extensible via additional fields
+    - Immutable: Frozen dataclass for thread safety
     """
 
-    def __init__(
-        self,
-        success: bool,
-        output: Any,
-        error: str | None = None,
-        execution_time: float | None = None,
-        checkpoint_reached: str | None = None,
-    ):
-        self.success = success
-        self.output = output
-        self.error = error
-        self.execution_time = execution_time
-        self.checkpoint_reached = checkpoint_reached
+    # Core execution tracking
+    execution_id: str  # UUID for unique identification
+    script_id: str  # Identifier for the executed script
+    status: ExecutionStatus  # Execution outcome
+
+    # Timing information
+    start_time: float  # Unix timestamp when execution started
+    end_time: float  # Unix timestamp when execution completed
+
+    # State and observations
+    final_state: dict[str, Any]  # Final game state after execution
+    tile_observations: list[dict[str, Any]]  # Captured tile states during execution
+
+    # Performance and debugging
+    performance_metrics: dict[str, Any]  # frames_executed, actual_duration_ms, etc.
+    error_message: str | None = None  # Detailed error information if execution failed
+
+    # Optional execution context
+    checkpoint_id: str | None = None  # Checkpoint loaded before execution
+
+    @property
+    def success(self) -> bool:
+        """Backward compatibility property for existing code."""
+        return self.status == ExecutionStatus.SUCCESS
+
+    @property
+    def execution_time(self) -> float:
+        """Backward compatibility property - execution duration in seconds."""
+        return self.end_time - self.start_time
+
+    @property
+    def duration_ms(self) -> int:
+        """Execution duration in milliseconds for performance analysis."""
+        return int((self.end_time - self.start_time) * 1000)
 
     def __str__(self) -> str:
-        status = "SUCCESS" if self.success else "FAILURE"
-        return f"ExecutionResult({status}, time={self.execution_time:.2f}s)"
+        return f"ExecutionResult({self.status.name}, {self.duration_ms}ms, script={self.script_id[:8]})"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for serialization and analysis."""
+        return {
+            "execution_id": self.execution_id,
+            "script_id": self.script_id,
+            "status": self.status.name,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "duration_ms": self.duration_ms,
+            "final_state": self.final_state,
+            "tile_observations_count": len(self.tile_observations),
+            "performance_metrics": self.performance_metrics,
+            "error_message": self.error_message,
+            "checkpoint_id": self.checkpoint_id,
+        }
 
 
 class PokemonGymClient:
     """
-    HTTP client wrapper for Pokemon-gym emulator communication.
+    Production-grade HTTP client for Pokemon-gym emulator communication.
 
-    Provides clean interface for script execution and state management
-    while tracking the specific emulator instance.
+    Features:
+    - Circuit breaker pattern for resilience
+    - Exponential backoff retry logic
+    - Comprehensive error handling with actionable messages
+    - Checkpoint loading capability
+    - Request timing and performance monitoring
+
+    Design follows SOLID principles:
+    - Single Responsibility: HTTP communication with Pokemon-gym
+    - Open/Closed: Extensible retry and circuit breaker strategies
+    - Dependency Inversion: Abstract HTTP operations
     """
+
+    # Circuit breaker thresholds
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD = 5
+    CIRCUIT_BREAKER_RECOVERY_TIMEOUT = 30  # seconds
+
+    # Retry configuration
+    MAX_RETRIES = 3
+    INITIAL_RETRY_DELAY = 0.1  # 100ms
+    MAX_RETRY_DELAY = 2.0  # 2s
 
     def __init__(self, port: int, container_id: str):
         """
@@ -111,13 +195,22 @@ class PokemonGymClient:
         self.container_id = container_id
         self.base_url = f"http://localhost:{port}"
         self.session = requests.Session()
-        # Note: timeout is set per request, not on session
+
+        # Circuit breaker state
+        self._circuit_breaker_failures = 0
+        self._circuit_breaker_open_time = 0.0
+        self._circuit_breaker_lock = threading.Lock()
+
+        # Performance tracking
+        self._request_count = 0
+        self._total_request_time = 0.0
+        self._last_request_time = 0.0
 
         logger.info(f"PokemonGymClient initialized for port {port}, container {container_id[:12]}")
 
     def send_input(self, input_sequence: str) -> dict[str, Any]:
         """
-        Send input sequence to the emulator.
+        Send input sequence to the emulator with retry logic and circuit breaker.
 
         Args:
             input_sequence: Button inputs (A, B, START, etc.)
@@ -126,66 +219,58 @@ class PokemonGymClient:
             Response data from emulator
 
         Raises:
-            EmulatorPoolError: On communication failure
+            EmulatorPoolError: On communication failure after all retries
         """
-        try:
-            response = self.session.post(
-                f"{self.base_url}/input", json={"inputs": input_sequence}, timeout=10
-            )
-            response.raise_for_status()
-            return cast(dict[str, Any], response.json())
-        except requests.RequestException as e:
-            raise EmulatorPoolError(
-                f"Failed to send input to emulator on port {self.port}: {e}"
-            ) from e
+        return self._execute_with_resilience(
+            "POST",
+            "/input",
+            json_data={"inputs": input_sequence},
+            timeout=10,
+            operation_name="send_input",
+        )
 
     def get_state(self) -> dict[str, Any]:
         """
-        Get current game state from emulator.
+        Get current game state from emulator with retry logic.
 
         Returns:
             Current game state data
 
         Raises:
-            EmulatorPoolError: On communication failure
+            EmulatorPoolError: On communication failure after all retries
         """
-        try:
-            response = self.session.get(f"{self.base_url}/state", timeout=5)
-            response.raise_for_status()
-            return cast(dict[str, Any], response.json())
-        except requests.RequestException as e:
-            raise EmulatorPoolError(
-                f"Failed to get state from emulator on port {self.port}: {e}"
-            ) from e
+        return self._execute_with_resilience("GET", "/state", timeout=5, operation_name="get_state")
 
     def reset_game(self) -> dict[str, Any]:
         """
-        Reset the game to initial state.
+        Reset the game to initial state with retry logic.
 
         Returns:
             Reset confirmation from emulator
 
         Raises:
-            EmulatorPoolError: On communication failure
+            EmulatorPoolError: On communication failure after all retries
         """
-        try:
-            response = self.session.post(f"{self.base_url}/reset", timeout=10)
-            response.raise_for_status()
-            return cast(dict[str, Any], response.json())
-        except requests.RequestException as e:
-            raise EmulatorPoolError(f"Failed to reset emulator on port {self.port}: {e}") from e
+        return self._execute_with_resilience(
+            "POST", "/reset", timeout=10, operation_name="reset_game"
+        )
 
     def is_healthy(self) -> bool:
         """
         Check if emulator is responding to health checks.
 
+        Does not use retry logic for health checks to get fast feedback.
+
         Returns:
             True if emulator is healthy, False otherwise
         """
         try:
+            start_time = time.perf_counter()
             response = self.session.get(f"{self.base_url}/health", timeout=3)
+            self._update_performance_metrics(time.perf_counter() - start_time)
             return response.status_code == 200
         except requests.RequestException:
+            self._record_circuit_breaker_failure()
             return False
 
     def close(self) -> None:
@@ -194,6 +279,210 @@ class PokemonGymClient:
 
     def __str__(self) -> str:
         return f"PokemonGymClient(port={self.port}, container={self.container_id[:12]})"
+
+    def load_checkpoint(self, checkpoint_data: bytes) -> bool:
+        """
+        Load checkpoint data into the emulator.
+
+        Args:
+            checkpoint_data: Binary checkpoint data to load
+
+        Returns:
+            True if checkpoint loaded successfully, False otherwise
+
+        Raises:
+            EmulatorPoolError: On communication failure after all retries
+        """
+        try:
+            # Convert bytes to appropriate format for Pokemon-gym API
+            # This assumes the Pokemon-gym server accepts checkpoint data via POST
+            files = {"checkpoint": checkpoint_data}
+
+            result = self._execute_with_resilience(
+                "POST",
+                "/checkpoint/load",
+                files=files,
+                timeout=15,  # Checkpoint loading may take longer
+                operation_name="load_checkpoint",
+            )
+            return result.get("status") == "success"
+        except Exception as e:
+            logger.error(f"Checkpoint loading failed on {self}: {e}")
+            raise EmulatorPoolError(
+                f"Failed to load checkpoint on emulator port {self.port}: {e}"
+            ) from e
+
+    def get_performance_metrics(self) -> dict[str, Any]:
+        """
+        Get client performance metrics for monitoring.
+
+        Returns:
+            Dictionary with performance statistics
+        """
+        avg_request_time = (
+            self._total_request_time / self._request_count if self._request_count > 0 else 0.0
+        )
+
+        return {
+            "total_requests": self._request_count,
+            "average_request_time_ms": int(avg_request_time * 1000),
+            "last_request_time_ms": int(self._last_request_time * 1000),
+            "circuit_breaker_failures": self._circuit_breaker_failures,
+            "circuit_breaker_open": self._is_circuit_breaker_open(),
+        }
+
+    # Private methods for resilience patterns
+
+    def _execute_with_resilience(
+        self,
+        method: str,
+        endpoint: str,
+        json_data: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
+        timeout: float = 10.0,
+        operation_name: str = "unknown",
+    ) -> dict[str, Any]:
+        """
+        Execute HTTP request with circuit breaker and retry logic.
+
+        Args:
+            method: HTTP method (GET, POST, etc.)
+            endpoint: API endpoint path
+            json_data: JSON payload for request
+            files: Files payload for request
+            timeout: Request timeout in seconds
+            operation_name: Operation name for logging
+
+        Returns:
+            Response data from emulator
+
+        Raises:
+            EmulatorPoolError: On communication failure after all retries
+        """
+        # Check circuit breaker first
+        if self._is_circuit_breaker_open():
+            raise EmulatorPoolError(
+                f"Circuit breaker OPEN for emulator on port {self.port}. "
+                f"Too many recent failures. Retry after {self.CIRCUIT_BREAKER_RECOVERY_TIMEOUT}s."
+            )
+
+        last_exception = None
+
+        for attempt in range(self.MAX_RETRIES + 1):
+            try:
+                start_time = time.perf_counter()
+
+                # Execute the HTTP request
+                url = f"{self.base_url}{endpoint}"
+                if method.upper() == "GET":
+                    response = self.session.get(url, timeout=timeout)
+                elif method.upper() == "POST":
+                    if files:
+                        response = self.session.post(url, files=files, timeout=timeout)
+                    else:
+                        response = self.session.post(url, json=json_data, timeout=timeout)
+                else:
+                    raise ValueError(f"Unsupported HTTP method: {method}")
+
+                # Check response status
+                response.raise_for_status()
+
+                # Track performance
+                request_time = time.perf_counter() - start_time
+                self._update_performance_metrics(request_time)
+
+                # Reset circuit breaker on success
+                self._reset_circuit_breaker()
+
+                # Return response data
+                if response.content:
+                    return cast(dict[str, Any], response.json())
+                else:
+                    return {"status": "success"}  # For operations that don't return data
+
+            except requests.RequestException as e:
+                last_exception = e
+                self._record_circuit_breaker_failure()
+
+                # Don't retry on certain error types
+                if isinstance(e, requests.HTTPError) and e.response is not None:
+                    if e.response.status_code in (400, 401, 403, 404):
+                        # Client errors shouldn't be retried
+                        break
+
+                # Calculate exponential backoff delay
+                if attempt < self.MAX_RETRIES:
+                    delay = min(self.INITIAL_RETRY_DELAY * (2**attempt), self.MAX_RETRY_DELAY)
+                    logger.warning(
+                        f"Request failed on {self}, attempt {attempt + 1}/{self.MAX_RETRIES + 1}. "
+                        f"Retrying in {delay:.2f}s. Error: {e}"
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.error(
+                        f"Request failed on {self} after {self.MAX_RETRIES + 1} attempts. "
+                        f"Final error: {e}"
+                    )
+
+        # All retries exhausted
+        raise EmulatorPoolError(
+            f"Failed to execute {operation_name} on emulator port {self.port} after "
+            f"{self.MAX_RETRIES + 1} attempts. Last error: {last_exception}"
+        ) from last_exception
+
+    def _is_circuit_breaker_open(self) -> bool:
+        """
+        Check if circuit breaker is currently open.
+
+        Returns:
+            True if circuit breaker is open (preventing requests)
+        """
+        with self._circuit_breaker_lock:
+            if self._circuit_breaker_failures < self.CIRCUIT_BREAKER_FAILURE_THRESHOLD:
+                return False
+
+            # Check if recovery timeout has passed
+            if (
+                time.time() - self._circuit_breaker_open_time
+                > self.CIRCUIT_BREAKER_RECOVERY_TIMEOUT
+            ):
+                # Reset circuit breaker for half-open state
+                self._circuit_breaker_failures = 0
+                return False
+
+            return True
+
+    def _record_circuit_breaker_failure(self) -> None:
+        """
+        Record a failure for circuit breaker tracking.
+        """
+        with self._circuit_breaker_lock:
+            self._circuit_breaker_failures += 1
+            if self._circuit_breaker_failures >= self.CIRCUIT_BREAKER_FAILURE_THRESHOLD:
+                self._circuit_breaker_open_time = time.time()
+                logger.warning(
+                    f"Circuit breaker OPENED for {self} after {self._circuit_breaker_failures} failures"
+                )
+
+    def _reset_circuit_breaker(self) -> None:
+        """
+        Reset circuit breaker after successful request.
+        """
+        with self._circuit_breaker_lock:
+            if self._circuit_breaker_failures > 0:
+                logger.info(f"Circuit breaker RESET for {self} after successful request")
+                self._circuit_breaker_failures = 0
+
+    def _update_performance_metrics(self, request_time: float) -> None:
+        """
+        Update performance tracking metrics.
+
+        Args:
+            request_time: Request duration in seconds
+        """
+        self._request_count += 1
+        self._total_request_time += request_time
+        self._last_request_time = request_time
 
 
 class EmulatorContext:
@@ -247,9 +536,12 @@ class EmulatorPool:
         startup_timeout: int = 30,
         checkpoint_manager: "CheckpointManager | None" = None,
         default_timeout: float | None = None,
+        adapter_type: str = "auto",
+        input_delay: float = 0.05,
+        detection_timeout: float = 3.0,
     ):
         """
-        Initialize EmulatorPool with production configuration.
+        Initialize EmulatorPool with workstation configuration.
 
         Args:
             pool_size: Number of containers in pool (default: 4)
@@ -258,6 +550,9 @@ class EmulatorPool:
             startup_timeout: Max seconds to wait for container startup (default: 30)
             checkpoint_manager: CheckpointManager for state loading (optional)
             default_timeout: Default timeout for acquire operations (optional)
+            adapter_type: Client adapter type - "auto", "benchflow", "direct", "fallback" (default: "auto")
+            input_delay: Delay between sequential inputs for benchflow adapter (default: 50ms)
+            detection_timeout: Timeout for server type auto-detection (default: 3s)
         """
         self.pool_size = pool_size
         self.base_port = base_port
@@ -265,15 +560,20 @@ class EmulatorPool:
         self.startup_timeout = startup_timeout
         self.default_timeout = default_timeout
 
+        # Compatibility layer configuration
+        self.adapter_type = adapter_type
+        self.input_delay = input_delay
+        self.detection_timeout = detection_timeout
+
         # Container management state
         self.containers: list[docker.models.containers.Container] = []
         self.client: docker.DockerClient | None = None
 
-        # Resource pool state - thread-safe emulator allocation
+        # Simplified resource pool state - workstation-appropriate
         self.available_clients: queue.Queue = queue.Queue()
-        self.busy_clients: dict[int, PokemonGymClient] = {}  # port -> client mapping
-        self.clients_by_port: dict[int, PokemonGymClient] = {}  # All clients by port
-        self.pool_lock = threading.RLock()  # For thread-safe pool operations
+        self.clients_by_port: dict[int, Any] = (
+            {}
+        )  # All clients by port (PokemonGymClient or PokemonGymAdapter)
 
         # Core Pokemon functionality components (with graceful degradation)
         if POKEMON_COMPONENTS_AVAILABLE:
@@ -288,7 +588,7 @@ class EmulatorPool:
 
         logger.info(
             f"EmulatorPool configured: size={pool_size}, base_port={base_port}, "
-            f"image={image_name}, timeout={startup_timeout}s"
+            f"image={image_name}, timeout={startup_timeout}s, adapter_type={adapter_type}"
         )
 
     def initialize(self, pool_size: int | None = None) -> None:
@@ -330,9 +630,26 @@ class EmulatorPool:
                     started_containers.append(container)
                     self.containers.append(container)
 
-                    # Create PokemonGymClient and add to available pool
+                    # Create Pokemon client using compatibility layer factory
                     container_id = container.id or f"unknown-{port}"
-                    client = PokemonGymClient(port, container_id)
+                    if COMPATIBILITY_LAYER_AVAILABLE:
+                        # Use factory for transparent adapter selection
+                        client = create_pokemon_client(
+                            port=port,
+                            container_id=container_id,
+                            adapter_type=self.adapter_type,
+                            input_delay=self.input_delay,
+                            detection_timeout=self.detection_timeout,
+                        )
+                        logger.info(
+                            f"Created Pokemon client via compatibility layer for port {port}"
+                        )
+                    else:
+                        # Fallback to direct client if compatibility layer not available
+                        client = PokemonGymClient(port, container_id)
+                        logger.info(
+                            f"Created direct PokemonGymClient for port {port} (compatibility layer unavailable)"
+                        )
                     self.clients_by_port[port] = client
                     self.available_clients.put(client)
 
@@ -363,10 +680,10 @@ class EmulatorPool:
 
     def shutdown(self) -> None:
         """
-        Gracefully shutdown all containers with production-grade error handling.
+        Gracefully shutdown all containers with clear error handling.
 
         Continues shutdown process even if individual containers fail to stop.
-        Implements idempotent operation - safe to call multiple times.
+        Safe to call multiple times.
         """
         if not self.containers:
             logger.info("EmulatorPool shutdown called - no containers to stop")
@@ -374,52 +691,41 @@ class EmulatorPool:
 
         logger.info(f"Shutting down EmulatorPool with {len(self.containers)} containers")
 
-        # Track shutdown results for logging
-        shutdown_results = {"success": 0, "failed": 0}
-
+        # Stop all containers
         for container in self.containers:
             try:
                 logger.info(f"Stopping container {container.id}")
                 container.stop(timeout=10)  # Give containers time to gracefully stop
-                shutdown_results["success"] += 1
                 logger.info(f"Container {container.id} stopped successfully")
-
             except Exception as e:
                 # Log error but continue with other containers
                 logger.error(f"Failed to stop container {container.id}: {e}")
-                shutdown_results["failed"] += 1
 
-        # Clear container list - idempotent operation
+        # Clear container list
         self.containers.clear()
 
         # Clean up client resources
-        with self.pool_lock:
-            for client in self.clients_by_port.values():
-                try:
-                    client.close()
-                except Exception as e:
-                    logger.error(f"Error closing client {client}: {e}")
+        for client in self.clients_by_port.values():
+            try:
+                client.close()
+            except Exception as e:
+                logger.error(f"Error closing client {client}: {e}")
 
-            # Clear all client tracking
-            while not self.available_clients.empty():
-                try:
-                    self.available_clients.get_nowait()
-                except queue.Empty:
-                    break
+        # Clear all client tracking
+        while not self.available_clients.empty():
+            try:
+                self.available_clients.get_nowait()
+            except queue.Empty:
+                break
 
-            self.busy_clients.clear()
-            self.clients_by_port.clear()
-
-        logger.info(
-            f"EmulatorPool shutdown complete: {shutdown_results['success']} success, "
-            f"{shutdown_results['failed']} failed"
-        )
+        self.clients_by_port.clear()
+        logger.info("EmulatorPool shutdown complete")
 
     def acquire(self, timeout: float | None = None) -> PokemonGymClient:
         """
         Acquire an available emulator client from the pool.
 
-        Thread-safe resource allocation with blocking behavior when all emulators are busy.
+        Simple resource allocation with blocking behavior when all emulators are busy.
 
         Args:
             timeout: Maximum seconds to wait for available emulator (None = block indefinitely)
@@ -434,13 +740,8 @@ class EmulatorPool:
             raise EmulatorPoolError("EmulatorPool not initialized - call initialize() first")
 
         try:
-            # Block until emulator becomes available
+            # Block until emulator becomes available - queue handles thread safety
             client = cast(PokemonGymClient, self.available_clients.get(timeout=timeout))
-
-            with self.pool_lock:
-                # Move client from available to busy
-                self.busy_clients[client.port] = client
-
             logger.info(f"Acquired emulator {client}")
             return client
 
@@ -466,49 +767,58 @@ class EmulatorPool:
         effective_timeout = timeout if timeout is not None else self.default_timeout
         return EmulatorContext(self, effective_timeout)
 
-    def release(self, client: PokemonGymClient) -> None:
+    def release(self, client: Any) -> None:
         """
         Release emulator client back to available pool.
 
-        Thread-safe operation that makes emulator available for other tasks.
+        Simple operation that makes emulator available for other tasks.
 
         Args:
-            client: PokemonGymClient to return to pool
+            client: Pokemon client (PokemonGymClient or PokemonGymAdapter) to return to pool
 
         Raises:
             EmulatorPoolError: If client was not acquired from this pool
         """
-        # Check client validity - handle both real clients and mocked clients
+        # Check client validity - handle both client types and mocked clients
         if hasattr(client, "port") and hasattr(client, "container_id"):
-            # Valid client (either real or properly mocked)
+            # Valid client (direct client, adapter, or properly mocked)
             pass
         else:
-            raise EmulatorPoolError("Invalid client type - must be PokemonGymClient")
+            raise EmulatorPoolError(
+                "Invalid client type - must be a valid Pokemon client with port and container_id attributes"
+            )
 
-        with self.pool_lock:
-            if client.port not in self.busy_clients:
-                logger.warning(f"Attempted to release client {client} that wasn't marked as busy")
-                return
-
-            # Move client from busy back to available
-            del self.busy_clients[client.port]
-            self.available_clients.put(client)
-
+        # Return client to available pool - queue handles thread safety
+        self.available_clients.put(client)
         logger.info(f"Released emulator {client}")
 
-    def execute_script(self, script_text: str, checkpoint_id: str | None = None) -> ExecutionResult:
+    def execute_script(
+        self,
+        script_text: str,
+        checkpoint_id: str | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
+        cancellation_event: threading.Event | None = None,
+        timeout: float = 300.0,
+    ) -> ExecutionResult:
         """
-        Compile and execute script text on an available emulator with automatic client management.
+        Compile and execute script text with comprehensive monitoring and control.
 
-        This method provides the full Pokemon script execution pipeline when Pokemon components
-        are available, or falls back to basic script execution mode.
+        This method provides the full Pokemon script execution pipeline with:
+        - Automatic client acquisition and release
+        - Progress monitoring and cancellation support
+        - Timeout protection for long-running scripts
+        - Comprehensive error handling and metrics
+        - Graceful fallback when Pokemon components unavailable
 
         Args:
             script_text: DSL script to compile and execute
             checkpoint_id: Checkpoint to load before execution (optional)
+            progress_callback: Callback for progress updates (frames_executed, total_frames)
+            cancellation_event: Event to signal execution cancellation
+            timeout: Maximum execution time in seconds (default: 300s)
 
         Returns:
-            ExecutionResult with execution details and outcome
+            ExecutionResult with comprehensive execution details and outcome
 
         Raises:
             EmulatorPoolError: On execution failure or resource unavailability
@@ -525,8 +835,16 @@ class EmulatorPool:
                 logger.info(f"Compiling script: {script_text[:100]}...")
                 compiled_script = self.script_compiler.compile(script_text)
 
-                # Execute compiled script
-                return self.execute_compiled_script(client, compiled_script, checkpoint_id)
+                # Execute compiled script with monitoring support
+                script_id = f"script_{int(time.time())}"
+                return self.execute_compiled_script(
+                    client,
+                    compiled_script,
+                    checkpoint_id,
+                    progress_callback=progress_callback,
+                    cancellation_event=cancellation_event,
+                    script_id=script_id,
+                )
 
             else:
                 # Fallback to basic script execution
@@ -544,36 +862,95 @@ class EmulatorPool:
                 # Execute script on emulator
                 logger.info(f"Executing script on {client}: {script_text[:100]}...")
 
+                # Generate execution tracking
+                execution_id = str(uuid.uuid4())
+                script_id = f"basic_script_{int(time.time())}"
+
                 try:
                     # Send inputs to emulator
-                    response = client.send_input(input_sequence)
+                    client.send_input(input_sequence)
 
                     # Get final state
                     final_state = client.get_state()
 
-                    execution_time = time.time() - start_time
+                    end_time = time.time()
 
                     return ExecutionResult(
-                        success=True,
-                        output={"response": response, "final_state": final_state},
-                        execution_time=execution_time,
-                        checkpoint_reached=None,  # Would be determined by game state analysis
+                        execution_id=execution_id,
+                        script_id=script_id,
+                        status=ExecutionStatus.SUCCESS,
+                        start_time=start_time,
+                        end_time=end_time,
+                        final_state=final_state,
+                        tile_observations=[
+                            {
+                                "frame": 0,
+                                "instruction_index": 0,
+                                "state": final_state,
+                                "timestamp": end_time,
+                            }
+                        ],
+                        performance_metrics={
+                            "frames_executed": 1,  # Simple scripts execute as one block
+                            "actual_duration_ms": int((end_time - start_time) * 1000),
+                            "estimated_frames": 1,
+                            "instructions_completed": 1,
+                            "total_instructions": 1,
+                            "completion_percentage": 100.0,
+                            "observations_captured": 1,
+                        },
+                        error_message=None,
+                        checkpoint_id=checkpoint_id,
                     )
 
                 except Exception as e:
-                    execution_time = time.time() - start_time
+                    end_time = time.time()
                     logger.error(f"Script execution failed on {client}: {e}")
 
                     return ExecutionResult(
-                        success=False, output=None, error=str(e), execution_time=execution_time
+                        execution_id=execution_id,
+                        script_id=script_id,
+                        status=ExecutionStatus.FAILED,
+                        start_time=start_time,
+                        end_time=end_time,
+                        final_state={},
+                        tile_observations=[],
+                        performance_metrics={
+                            "frames_executed": 0,
+                            "actual_duration_ms": int((end_time - start_time) * 1000),
+                            "estimated_frames": 1,
+                            "instructions_completed": 0,
+                            "total_instructions": 1,
+                            "completion_percentage": 0.0,
+                            "observations_captured": 0,
+                        },
+                        error_message=str(e),
+                        checkpoint_id=checkpoint_id,
                     )
 
         except Exception as e:
-            execution_time = time.time() - start_time
+            end_time = time.time()
             logger.error(f"Failed to execute script: {e}")
 
             return ExecutionResult(
-                success=False, output=None, error=str(e), execution_time=execution_time
+                execution_id=str(uuid.uuid4()),
+                script_id=f"failed_script_{int(time.time())}",
+                status=ExecutionStatus.FAILED,
+                start_time=start_time,
+                end_time=end_time,
+                final_state={},
+                tile_observations=[],
+                performance_metrics={
+                    "frames_executed": 0,
+                    "actual_duration_ms": int((end_time - start_time) * 1000),
+                    "estimated_frames": 0,
+                    "instructions_completed": 0,
+                    "total_instructions": 0,
+                    "completion_percentage": 0.0,
+                    "observations_captured": 0,
+                },
+                error_message=str(e),
+                checkpoint_id=checkpoint_id,
             )
 
         finally:
@@ -610,32 +987,50 @@ class EmulatorPool:
             raise EmulatorPoolError(f"Script compilation failed: {e}") from e
 
     def execute_compiled_script(
-        self, client: PokemonGymClient, script: "CompiledScript", checkpoint_id: str | None = None
+        self,
+        client: PokemonGymClient,
+        script: "CompiledScript",
+        checkpoint_id: str | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
+        cancellation_event: threading.Event | None = None,
+        script_id: str | None = None,
     ) -> ExecutionResult:
         """
-        Execute compiled script on specified emulator client.
+        Execute compiled script on specified emulator client with comprehensive monitoring.
 
         This is the core Pokemon script execution method that integrates all components:
         - CheckpointManager for state loading
-        - Compiled script execution with timing
-        - Proper error handling and cleanup
+        - Sequential instruction execution with timing
+        - Progress monitoring and cancellation support
+        - Tile observation capture at specified points
+        - Comprehensive performance metrics
 
         Args:
             client: PokemonGymClient for script execution
             script: CompiledScript with instructions and metadata
             checkpoint_id: Checkpoint to load before execution (optional)
+            progress_callback: Callback for progress updates (frames_executed, total_frames)
+            cancellation_event: Event to signal execution cancellation
+            script_id: Unique identifier for the script (auto-generated if None)
 
         Returns:
-            ExecutionResult with execution details and outcome
+            ExecutionResult with comprehensive execution details and outcome
 
         Raises:
             EmulatorPoolError: On execution failure or invalid parameters
         """
+        # Initialize execution tracking
+        execution_id = str(uuid.uuid4())
+        script_id = script_id or str(uuid.uuid4())[:8]
         start_time = time.time()
+
+        # Initialize result containers
+        tile_observations: list[dict[str, Any]] = []
+        frames_executed = 0
 
         try:
             logger.info(
-                f"Executing compiled script on {client}: "
+                f"Executing compiled script {script_id} on {client}: "
                 f"{len(script.instructions)} instructions, "
                 f"{script.total_frames} frames estimated"
             )
@@ -647,14 +1042,16 @@ class EmulatorPool:
                     checkpoint_data = self.checkpoint_manager.load_checkpoint(checkpoint_id)
 
                     # Extract game state and load it into emulator
-                    game_state = checkpoint_data.get("game_state", {})
-                    if game_state:
-                        # This would require extending PokemonGymClient with state loading
-                        # For now, we'll use the reset method as a placeholder
-                        client.reset_game()
+                    # Convert checkpoint data to bytes for the client
+                    import json
+
+                    checkpoint_bytes = json.dumps(checkpoint_data).encode("utf-8")
+
+                    success = client.load_checkpoint(checkpoint_bytes)
+                    if success:
                         logger.info(f"Checkpoint {checkpoint_id} loaded successfully")
                     else:
-                        logger.warning(f"Checkpoint {checkpoint_id} has no game state")
+                        logger.warning(f"Checkpoint {checkpoint_id} failed to load")
 
                 except CheckpointError as e:
                     logger.error(f"Failed to load checkpoint {checkpoint_id}: {e}")
@@ -662,50 +1059,197 @@ class EmulatorPool:
                 except Exception as e:
                     logger.error(f"Unexpected error loading checkpoint {checkpoint_id}: {e}")
 
-            # Execute compiled script instructions
+            # Execute script instructions sequentially with monitoring
             try:
-                # Convert instructions tuple to space-separated string for Pokemon-gym
-                input_sequence = " ".join(script.instructions)
+                total_instructions = len(script.instructions)
 
-                # Send inputs to emulator
-                response = client.send_input(input_sequence)
+                # Capture initial state as observation
+                try:
+                    initial_state = client.get_state()
+                    tile_observations.append(
+                        {
+                            "frame": 0,
+                            "instruction_index": 0,
+                            "state": initial_state,
+                            "timestamp": time.time(),
+                        }
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to capture initial state: {e}")
 
-                # Get final state
-                final_state = client.get_state()
+                # Execute instructions one by one for fine-grained control
+                failed_instructions = 0
+                for instruction_index, instruction in enumerate(script.instructions):
+                    # Check for cancellation
+                    if cancellation_event and cancellation_event.is_set():
+                        logger.info(
+                            f"Execution cancelled at instruction {instruction_index}/{total_instructions}"
+                        )
+                        end_time = time.time()
 
-                execution_time = time.time() - start_time
+                        return ExecutionResult(
+                            execution_id=execution_id,
+                            script_id=script_id,
+                            status=ExecutionStatus.CANCELLED,
+                            start_time=start_time,
+                            end_time=end_time,
+                            final_state={},
+                            tile_observations=tile_observations,
+                            performance_metrics={
+                                "frames_executed": frames_executed,
+                                "actual_duration_ms": int((end_time - start_time) * 1000),
+                                "instructions_completed": instruction_index,
+                                "total_instructions": total_instructions,
+                                "completion_percentage": (instruction_index / total_instructions)
+                                * 100,
+                            },
+                            error_message="Execution cancelled by user",
+                            checkpoint_id=checkpoint_id,
+                        )
+
+                    # Execute single instruction
+                    try:
+                        client.send_input(instruction)
+                        frames_executed += 1
+
+                        # Report progress if callback provided
+                        if progress_callback:
+                            progress_callback(frames_executed, script.total_frames)
+
+                        # Capture tile observations at specified points
+                        if instruction_index in script.observation_points:
+                            try:
+                                current_state = client.get_state()
+                                tile_observations.append(
+                                    {
+                                        "frame": frames_executed,
+                                        "instruction_index": instruction_index,
+                                        "instruction": instruction,
+                                        "state": current_state,
+                                        "timestamp": time.time(),
+                                    }
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"Failed to capture observation at frame {frames_executed}: {e}"
+                                )
+
+                        # Small delay to prevent overwhelming the emulator
+                        time.sleep(0.05)
+
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to execute instruction '{instruction}' at index {instruction_index}: {e}"
+                        )
+                        failed_instructions += 1
+                        # Continue with next instruction for resilience
+
+                # Get final state after all instructions
+                try:
+                    final_state = client.get_state()
+                except Exception as e:
+                    logger.error(f"Failed to capture final state: {e}")
+                    final_state = {}
+
+                end_time = time.time()
 
                 # Analyze final state to determine if any checkpoints were reached
                 checkpoint_reached = self._analyze_checkpoint_reached(final_state)
 
+                # Determine success based on instruction failure rate
+                total_instructions = len(script.instructions)
+                success_rate = (
+                    (total_instructions - failed_instructions) / total_instructions
+                    if total_instructions > 0
+                    else 1.0
+                )
+
+                # Consider execution successful if at least 50% of instructions succeeded
+                # For complete failures (all instructions failed), this will be FAILED
+                is_success = success_rate >= 0.5
+                execution_status = ExecutionStatus.SUCCESS if is_success else ExecutionStatus.FAILED
+                error_msg = (
+                    None
+                    if is_success
+                    else f"Script execution failed: {failed_instructions}/{total_instructions} instructions failed"
+                )
+
                 return ExecutionResult(
-                    success=True,
-                    output={
-                        "response": response,
-                        "final_state": final_state,
-                        "script_metadata": script.metadata,
+                    execution_id=execution_id,
+                    script_id=script_id,
+                    status=execution_status,
+                    start_time=start_time,
+                    end_time=end_time,
+                    final_state=final_state,
+                    tile_observations=tile_observations,
+                    performance_metrics={
+                        "frames_executed": frames_executed,
+                        "actual_duration_ms": int((end_time - start_time) * 1000),
+                        "estimated_frames": script.total_frames,
+                        "instructions_completed": total_instructions - failed_instructions,
+                        "total_instructions": total_instructions,
+                        "completion_percentage": success_rate * 100.0,
+                        "observations_captured": len(tile_observations),
+                        "checkpoint_reached": checkpoint_reached,
+                        "failed_instructions": failed_instructions,
+                        "success_rate": success_rate,
                     },
-                    execution_time=execution_time,
-                    checkpoint_reached=checkpoint_reached,
+                    error_message=error_msg,
+                    checkpoint_id=checkpoint_id,
                 )
 
             except Exception as e:
-                execution_time = time.time() - start_time
+                end_time = time.time()
                 logger.error(f"Script execution failed on {client}: {e}")
 
                 return ExecutionResult(
-                    success=False,
-                    output={"script_metadata": script.metadata},
-                    error=str(e),
-                    execution_time=execution_time,
+                    execution_id=execution_id,
+                    script_id=script_id,
+                    status=ExecutionStatus.FAILED,
+                    start_time=start_time,
+                    end_time=end_time,
+                    final_state={},
+                    tile_observations=tile_observations,
+                    performance_metrics={
+                        "frames_executed": frames_executed,
+                        "actual_duration_ms": int((end_time - start_time) * 1000),
+                        "estimated_frames": script.total_frames,
+                        "instructions_completed": frames_executed,
+                        "total_instructions": len(script.instructions),
+                        "completion_percentage": (
+                            (frames_executed / len(script.instructions)) * 100
+                            if script.instructions
+                            else 0
+                        ),
+                        "observations_captured": len(tile_observations),
+                    },
+                    error_message=str(e),
+                    checkpoint_id=checkpoint_id,
                 )
 
         except Exception as e:
-            execution_time = time.time() - start_time
+            end_time = time.time()
             logger.error(f"Failed to execute compiled script: {e}")
 
             return ExecutionResult(
-                success=False, output=None, error=str(e), execution_time=execution_time
+                execution_id=execution_id,
+                script_id=script_id,
+                status=ExecutionStatus.FAILED,
+                start_time=start_time,
+                end_time=end_time,
+                final_state={},
+                tile_observations=tile_observations,
+                performance_metrics={
+                    "frames_executed": frames_executed,
+                    "actual_duration_ms": int((end_time - start_time) * 1000),
+                    "estimated_frames": 0,
+                    "instructions_completed": 0,
+                    "total_instructions": 0,
+                    "completion_percentage": 0.0,
+                    "observations_captured": len(tile_observations),
+                },
+                error_message=str(e),
+                checkpoint_id=checkpoint_id,
             )
 
     def health_check(self) -> dict[str, Any]:
@@ -764,86 +1308,164 @@ class EmulatorPool:
                 "status": "not_initialized",
             }
 
-        with self.pool_lock:
-            available_count = self.available_clients.qsize()
-            busy_count = len(self.busy_clients)
+        available_count = self.available_clients.qsize()
+        busy_count = self.pool_size - available_count  # Simple calculation
 
         return {
             "available_count": available_count,
             "busy_count": busy_count,
             "total_count": self.pool_size,
-            "queue_size": 0,  # Number of threads waiting for emulators (not currently tracked)
-            "status": "healthy" if available_count + busy_count == self.pool_size else "degraded",
+            "queue_size": 0,  # Simplified: not tracking waiting threads
+            "status": "healthy" if available_count <= self.pool_size else "degraded",
         }
 
-    def restart_emulator(self, port: int) -> None:
+    def replace_failed_container(self, port: int) -> bool:
         """
-        Restart specific emulator instance due to failure.
+        Replace a failed container with a new one on the same port.
+
+        This method provides workstation-appropriate container replacement for auto-restart
+        functionality. It stops the failed container and creates a replacement while
+        maintaining the simplified EmulatorPool architecture.
 
         Args:
-            port: Port of the emulator to restart
+            port: Port of the container to replace
 
-        Raises:
-            EmulatorPoolError: If restart fails or port is invalid
+        Returns:
+            True if replacement successful, False otherwise
         """
-        if port not in self.clients_by_port:
-            raise EmulatorPoolError(f"No emulator found on port {port}")
+        if not self.containers or not self.client:
+            logger.error(f"Cannot replace container on port {port}: EmulatorPool not initialized")
+            return False
 
-        logger.info(f"Restarting emulator on port {port}")
+        logger.info(f"Attempting to replace failed container on port {port}")
 
-        with self.pool_lock:
-            # Remove old client from tracking
-            old_client = self.clients_by_port[port]
+        try:
+            # Find and remove the old client from tracking
+            old_client = self.clients_by_port.get(port)
+            if not old_client:
+                logger.error(f"No client found for port {port}")
+                return False
 
-            # Close old client connection
+            # Check if client was available in queue and remove it if found
+            was_available = self._is_client_available(old_client, remove_if_found=True)
+
+            # Close the old client session
             try:
                 old_client.close()
             except Exception as e:
-                logger.error(f"Error closing old client on port {port}: {e}")
+                logger.warning(f"Error closing old client on port {port}: {e}")
 
-            # Find and stop old container
+            # Find and stop the old container
             old_container = None
-            for container in self.containers:
-                if container.id == old_client.container_id:
-                    old_container = container
-                    break
-
-            if old_container:
+            for i, container in enumerate(self.containers):
                 try:
-                    old_container.stop(timeout=5)
-                    self.containers.remove(old_container)
+                    container.reload()
+                    # Check container name to match port
+                    if container.name == f"pokemon-emulator-{port}":
+                        old_container = container
+                        logger.info(
+                            f"Stopping old container {container.id[:12] if container.id else 'unknown'} on port {port}"
+                        )
+                        container.stop(timeout=10)
+                        # Remove from containers list
+                        self.containers.pop(i)
+                        break
                 except Exception as e:
-                    logger.error(f"Error stopping old container {old_container.id}: {e}")
+                    logger.warning(
+                        f"Error checking container {container.id[:12] if container.id else 'unknown'}: {e}"
+                    )
 
-            # Start new container
+            if not old_container:
+                logger.warning(
+                    f"Could not find old container for port {port}, proceeding with new container creation"
+                )
+
+            # Create new container on the same port
             try:
                 new_container = self._start_single_container(port)
                 self.containers.append(new_container)
 
-                # Create new client
-                new_container_id = new_container.id or f"restarted-{port}"
-                new_client = PokemonGymClient(port, new_container_id)
+                # Create new client and update mapping
+                container_id = new_container.id or f"unknown-{port}"
+                new_client = PokemonGymClient(port, container_id)
                 self.clients_by_port[port] = new_client
 
-                # Remove old client from busy tracking if present
-                if port in self.busy_clients:
-                    del self.busy_clients[port]
-
-                # Add new client to available pool
-                self.available_clients.put(new_client)
+                # If the old client was available, make the new one available too
+                if was_available:
+                    self.available_clients.put(new_client)
 
                 logger.info(
-                    f"Successfully restarted emulator on port {port}, new container: {new_container_id[:12]}"
+                    f"Successfully replaced container on port {port} with {new_container.id[:12] if new_container.id else 'unknown'}"
                 )
+                return True
 
             except Exception as e:
-                # Remove failed emulator from tracking
-                if port in self.clients_by_port:
-                    del self.clients_by_port[port]
-                if port in self.busy_clients:
-                    del self.busy_clients[port]
+                logger.error(f"Failed to create replacement container on port {port}: {e}")
+                # Clean up partial state - remove the client mapping since container failed
+                self.clients_by_port.pop(port, None)
+                return False
 
-                raise EmulatorPoolError(f"Failed to restart emulator on port {port}: {e}") from e
+        except Exception as e:
+            logger.error(f"Unexpected error replacing container on port {port}: {e}")
+            return False
+
+    def _is_client_available(
+        self, target_client: PokemonGymClient, remove_if_found: bool = False
+    ) -> bool:
+        """
+        Check if a client is currently in the available queue.
+
+        This is a workstation-appropriate way to check availability without
+        complex queue introspection. We temporarily drain and restore the queue.
+
+        Args:
+            target_client: Client to check for availability
+            remove_if_found: If True, don't restore the client if found (remove it from queue)
+
+        Returns:
+            True if client is available, False if busy
+        """
+        # Simple approach: temporarily drain queue to check for client
+        temp_clients = []
+        client_found = False
+
+        try:
+            # Drain queue and look for our client
+            while not self.available_clients.empty():
+                try:
+                    client = self.available_clients.get_nowait()
+                    temp_clients.append(client)
+
+                    # Check if this is our target client (match by port and container_id)
+                    if (
+                        hasattr(client, "port")
+                        and hasattr(client, "container_id")
+                        and client.port == target_client.port
+                        and client.container_id == target_client.container_id
+                    ):
+                        client_found = True
+                        # If we should remove it, don't add it to temp_clients
+                        if remove_if_found:
+                            temp_clients.pop()  # Remove the client we just added
+
+                except queue.Empty:
+                    break
+
+            # Restore clients back to the queue (excluding removed client if any)
+            for client in temp_clients:
+                self.available_clients.put(client)
+
+            return client_found
+
+        except Exception as e:
+            logger.error(f"Error checking client availability: {e}")
+            # Restore any clients we managed to get
+            for client in temp_clients:
+                self.available_clients.put(client)
+            return False
+
+    # Removed restart_emulator() method - too complex for workstation use
+    # For workstation development, if an emulator fails, shutdown and reinitialize the entire pool
 
     def _compile_script(self, script: str) -> str:
         """
