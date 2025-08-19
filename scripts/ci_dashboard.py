@@ -897,7 +897,7 @@ class CIDashboard:
             table.add_column("Activity", justify="right", width=8)
             table.add_column("Ch", justify="center", width=3)
             table.add_column("PR", justify="center", width=8)
-            table.add_column("Issue", justify="center", width=6)
+            table.add_column("Issue", justify="center", width=8)
             table.add_column("St", justify="center", width=3)
         else:
             # Wide terminal - use original widths

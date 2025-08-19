@@ -24,6 +24,7 @@ from src.claudelearnspokemon.health_monitor import HealthMonitor, HealthMonitorE
 
 
 @pytest.mark.medium
+@pytest.mark.fast
 class TestHealthMonitorBasics(unittest.TestCase):
     """Test basic HealthMonitor functionality and lifecycle."""
 
@@ -123,6 +124,7 @@ class TestHealthMonitorBasics(unittest.TestCase):
 
 
 @pytest.mark.medium
+@pytest.mark.fast
 class TestHealthCheckLogic(unittest.TestCase):
     """Test health check logic and HTTP validation."""
 
@@ -274,6 +276,7 @@ class TestHealthCheckLogic(unittest.TestCase):
 
 
 @pytest.mark.medium
+@pytest.mark.fast
 class TestPerformanceAndTiming(unittest.TestCase):
     """Test performance characteristics and timing behavior."""
 
@@ -371,6 +374,7 @@ class TestPerformanceAndTiming(unittest.TestCase):
 
 
 @pytest.mark.medium
+@pytest.mark.fast
 class TestErrorHandlingAndRecovery(unittest.TestCase):
     """Test error handling and recovery scenarios."""
 
@@ -449,6 +453,7 @@ class TestErrorHandlingAndRecovery(unittest.TestCase):
 
 
 @pytest.mark.medium
+@pytest.mark.fast
 class TestIntegrationScenarios(unittest.TestCase):
     """Test integration scenarios with real-world EmulatorPool behavior."""
 
