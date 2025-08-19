@@ -247,6 +247,9 @@ class CIDashboard:
                     "pr_status": "no-pr",
                     "pr_state": None,
                     "pr_number": None,
+                    "issue_number": None,
+                    "issue_status": "unknown",
+                    "issue_state": None,
                 }
 
                 # Get branch name
@@ -295,6 +298,41 @@ class CIDashboard:
                                 except (json.JSONDecodeError, KeyError, IndexError):
                                     # Fallback to no-pr if parsing fails
                                     pass
+
+                # Extract issue number from worktree name and get issue status
+                if worktree_dir.name.startswith("issue-"):
+                    try:
+                        issue_num = int(worktree_dir.name.split("-", 1)[1])
+                        worktree["issue_number"] = issue_num
+
+                        # Get issue status using gh CLI
+                        code, stdout, _ = self._safe_gh_command(
+                            ["issue", "view", str(issue_num), "--json", "state,title"],
+                            cwd=worktree_dir,
+                        )
+
+                        if code == 0 and stdout.strip():
+                            try:
+                                import json
+
+                                issue_data = json.loads(stdout)
+                                issue_state = issue_data.get("state", "unknown").upper()
+                                worktree["issue_state"] = issue_state
+
+                                if issue_state == "OPEN":
+                                    worktree["issue_status"] = "open"
+                                elif issue_state == "CLOSED":
+                                    worktree["issue_status"] = "closed"
+                                else:
+                                    worktree["issue_status"] = "unknown"
+                            except (json.JSONDecodeError, KeyError):
+                                worktree["issue_status"] = "error"
+                        else:
+                            worktree["issue_status"] = "not-found"
+
+                    except (ValueError, IndexError):
+                        # Invalid issue number format
+                        worktree["issue_status"] = "invalid"
 
                 # Get last commit time
                 code, stdout, _ = self._safe_git_command(
@@ -846,7 +884,7 @@ class CIDashboard:
         return Panel(table, title="Git Status", border_style="blue")
 
     def create_worktree_panel(self) -> Panel:
-        """Create the worktree status panel showing ALL worktrees with PR status."""
+        """Create the worktree status panel showing ALL worktrees with PR and issue status."""
         worktrees = self.get_worktree_status()
 
         table = Table(show_header=True, box=None)
@@ -859,6 +897,7 @@ class CIDashboard:
             table.add_column("Activity", justify="right", width=8)
             table.add_column("Ch", justify="center", width=3)
             table.add_column("PR", justify="center", width=8)
+            table.add_column("Issue", justify="center", width=8)
             table.add_column("St", justify="center", width=3)
         else:
             # Wide terminal - use original widths
@@ -866,6 +905,7 @@ class CIDashboard:
             table.add_column("Last Activity", justify="right", width=10)
             table.add_column("Changes", justify="center", width=7)
             table.add_column("PR Status", justify="center", width=10)
+            table.add_column("Issue Status", justify="center", width=12)
             table.add_column("Status", justify="center", width=6)
 
         # Sort worktrees: active first, then recent, then stale, then merged, then inactive
@@ -924,6 +964,43 @@ class CIDashboard:
             changes_text = f"{worktree['uncommitted']}" if worktree["uncommitted"] > 0 else "-"
             changes_style = "yellow" if worktree["uncommitted"] > 0 else "dim"
 
+            # Issue Status indicator - SSH-aware
+            issue_status = worktree.get("issue_status", "unknown")
+            issue_number = worktree.get("issue_number")
+
+            if issue_status == "open":
+                issue_icon = safe_unicode_char("🟢", "[O]", self.is_ssh)  # Open issue
+                issue_text = (
+                    f"#{issue_number}"
+                    if issue_number and not self.is_ssh
+                    else str(issue_number) if issue_number else "open"
+                )
+                issue_style = "green"
+            elif issue_status == "closed":
+                issue_icon = safe_unicode_char("🔴", "[C]", self.is_ssh)  # Closed issue
+                issue_text = (
+                    f"#{issue_number}"
+                    if issue_number and not self.is_ssh
+                    else str(issue_number) if issue_number else "closed"
+                )
+                issue_style = "red"
+            elif issue_status == "not-found":
+                issue_icon = safe_unicode_char("❓", "[?]", self.is_ssh)  # Not found
+                issue_text = "not-found" if not self.is_ssh else "n/f"
+                issue_style = "dim"
+            elif issue_status == "error":
+                issue_icon = safe_unicode_char("⚠️", "[!]", self.is_ssh)  # Error
+                issue_text = "error" if not self.is_ssh else "err"
+                issue_style = "yellow"
+            elif issue_status == "invalid":
+                issue_icon = safe_unicode_char("❌", "[X]", self.is_ssh)  # Invalid format
+                issue_text = "invalid" if not self.is_ssh else "inv"
+                issue_style = "red"
+            else:  # unknown or no issue
+                issue_icon = safe_unicode_char("⚫", "[-]", self.is_ssh)  # No issue
+                issue_text = "no-issue" if not self.is_ssh else "none"
+                issue_style = "dim"
+
             # Truncate worktree name if too long
             name = worktree["name"]
             if len(name) > 13:
@@ -934,6 +1011,7 @@ class CIDashboard:
                 f"[{time_style}]{worktree['last_modified_relative']}[/{time_style}]",
                 f"[{changes_style}]{changes_text}[/{changes_style}]",
                 f"[{pr_style}]{pr_icon} {pr_text}[/{pr_style}]",
+                f"[{issue_style}]{issue_icon} {issue_text}[/{issue_style}]",
                 status_icon,
             )
 

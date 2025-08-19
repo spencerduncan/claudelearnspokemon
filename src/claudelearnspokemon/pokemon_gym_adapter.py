@@ -327,8 +327,20 @@ class PokemonGymAdapter:
         # Session management (Dependency Injection)
         self.session_manager = SessionManager(self.base_url, self.config)
 
-        # HTTP client for direct requests
+        # HTTP client with connection pooling for performance
+        # Use requests.Session for consistent HTTP operations and test compatibility
         self.session = requests.Session()
+
+        # Configure connection pooling for performance
+        adapter = requests.adapters.HTTPAdapter(
+            max_retries=requests.adapters.Retry(
+                total=3, backoff_factor=0.1, status_forcelist=[500, 502, 503, 504]
+            ),
+            pool_connections=self.connection_limits.get("max_connections", 20),
+            pool_maxsize=self.connection_limits.get("max_keepalive_connections", 10),
+        )
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
 
         # HTTP client wrapper for test compatibility
         self.http_client = HTTPClientWrapper(self.session, self.base_url)
@@ -832,7 +844,7 @@ class PokemonGymAdapter:
 
     def _send_single_action(self, button: str) -> dict[str, Any]:
         """
-        Send single button press action to benchflow-ai API.
+        Send single button press action to benchflow-ai API with optimized connection pooling.
 
         Args:
             button: Single button name
@@ -843,6 +855,7 @@ class PokemonGymAdapter:
         # Use timeout from config if available
         action_timeout = self.timeout_config.get("action", self.input_timeout)
 
+        # Use requests session for connection pooling and test compatibility
         response = self.session.post(
             f"{self.base_url}/action",
             json={"action_type": "press_key", "keys": [button]},
