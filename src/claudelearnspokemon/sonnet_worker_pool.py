@@ -97,7 +97,7 @@ class SonnetWorkerPool:
             for _i, process in enumerate(tactical_processes[:worker_count]):
                 # Verify worker health during initialization
                 health_check_start = time.time()
-                if not process.health_check() or not process.is_healthy():
+                if not process.health_check():
                     logger.warning(f"Process {process.process_id} failed health check, skipping")
                     continue
 
@@ -260,10 +260,15 @@ class SonnetWorkerPool:
         start_time = time.time()
 
         # Get list of available workers (healthy and ready)
+        # Update cached health state before filtering
+        for worker_info in self.workers.values():
+            if worker_info["healthy"] and not worker_info["process"].is_healthy():
+                worker_info["healthy"] = False  # Update stale cached state
+
         available_workers = [
             (worker_id, worker_info)
             for worker_id, worker_info in self.workers.items()
-            if worker_info["healthy"] and worker_info["process"].is_healthy()
+            if worker_info["healthy"]
         ]
 
         if not available_workers:
