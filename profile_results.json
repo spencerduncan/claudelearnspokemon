@@ -1,104 +1,109 @@
 {
-  "timestamp": "2025-08-18 01:15:22",
+  "timestamp": "2025-08-19 17:10:10",
   "summary": {
-    "fast": 12,
+    "fast": 13,
     "medium": 7,
     "slow": 3,
-    "total": 22
+    "total": 23
   },
   "results": {
     "tests/test_claude_code_manager.py": {
-      "duration": 0.6694978029991034,
+      "duration": 0.5922312770271674,
       "status": "passed",
       "category": "fast"
     },
     "tests/test_health_monitor_integration_simple.py": {
-      "duration": 0.4809942769934423,
+      "duration": 0.44799276802223176,
       "status": "passed",
       "category": "fast"
     },
     "tests/test_ssh_compatibility.py": {
-      "duration": 0.3860075650154613,
+      "duration": 0.3489795920322649,
       "status": "passed",
       "category": "fast"
     },
     "tests/test_script_compiler.py": {
-      "duration": 0.5221377780253533,
+      "duration": 0.5261428069788963,
       "status": "passed",
       "category": "fast"
     },
     "tests/test_pokemon_gym_factory.py": {
-      "duration": 0.5290954450028948,
+      "duration": 0.5106605099863373,
       "status": "passed",
       "category": "fast"
     },
+    "tests/test_opus_strategist.py": {
+      "duration": 0.5186757830088027,
+      "status": "failed",
+      "category": "fast"
+    },
     "tests/test_tile_observer.py": {
-      "duration": 0.6844776470097713,
+      "duration": 0.5314645380130969,
       "status": "passed",
       "category": "fast"
     },
     "tests/test_session_recovery.py": {
-      "duration": 0.5208105060155503,
+      "duration": 0.4535189439775422,
       "status": "passed",
       "category": "fast"
     },
     "tests/test_checkpoint_manager_concurrent.py": {
-      "duration": 0.475733366998611,
+      "duration": 0.4291570200002752,
       "status": "passed",
       "category": "fast"
     },
     "tests/test_emulator_pool_compatibility.py": {
-      "duration": 0.5264353700040374,
+      "duration": 0.46499226498417556,
       "status": "passed",
       "category": "fast"
     },
     "tests/test_refactoring_verification.py": {
-      "duration": 0.4765380389872007,
+      "duration": 0.4466882669948973,
       "status": "passed",
       "category": "fast"
     },
     "tests/test_pokemon_gym_adapter.py": {
-      "duration": 0.5645461550157052,
+      "duration": 0.5315415419754572,
       "status": "passed",
       "category": "fast"
     },
     "tests/test_setup.py": {
-      "duration": 0.4730602370109409,
+      "duration": 0.43577342404751107,
       "status": "passed",
       "category": "fast"
     },
     "tests/test_enhanced_client.py": {
-      "duration": 3.182193257001927,
+      "duration": 3.0831918860203587,
       "status": "passed",
       "category": "medium"
     },
     "tests/test_health_monitor.py": {
-      "duration": 1.0336339519999456,
+      "duration": 0.9672267709975131,
       "status": "passed",
       "category": "medium"
     },
     "tests/test_checkpoint_manager.py": {
-      "duration": 2.430938056000741,
+      "duration": 2.299089755048044,
       "status": "passed",
       "category": "medium"
     },
     "tests/test_pokemon_gym_adapter_integration.py": {
-      "duration": 4.518249231972732,
+      "duration": 4.513876708981115,
       "status": "failed",
       "category": "medium"
     },
     "tests/test_pokemon_gym_adapter_contracts.py": {
-      "duration": 2.9838447909860406,
+      "duration": 2.971046151011251,
       "status": "passed",
       "category": "medium"
     },
     "tests/test_emulator_pool.py": {
-      "duration": 1.6941856929915957,
+      "duration": 1.6735474570305087,
       "status": "passed",
       "category": "medium"
     },
     "tests/test_retry_manager.py": {
-      "duration": 1.8645979220164008,
+      "duration": 1.746922391001135,
       "status": "passed",
       "category": "medium"
     },
