@@ -82,6 +82,7 @@ def sample_script_result():
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestMemoryGraphCore:
     """Test core MemoryGraph functionality."""
 
@@ -107,6 +108,7 @@ class TestMemoryGraphCore:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestMemoryGraphStorageWithRelationships:
     """Test pattern storage with relationship tracking (Requirement 1)."""
 
@@ -159,6 +161,7 @@ class TestMemoryGraphStorageWithRelationships:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestMemoryGraphPatternQueries:
     """Test pattern query functionality with performance requirements (Requirement 2)."""
 
@@ -273,6 +276,7 @@ class TestMemoryGraphPatternQueries:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestMemoryGraphScriptMetrics:
     """Test script performance metrics tracking (Requirement 3)."""
 
@@ -317,6 +321,7 @@ class TestMemoryGraphScriptMetrics:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestMemoryGraphTileSemantics:
     """Test tile semantics storage per map context (Requirement 4)."""
 
@@ -367,6 +372,7 @@ class TestMemoryGraphTileSemantics:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestMemoryGraphCheckpointPaths:
     """Test checkpoint path finding functionality (Requirement 5)."""
 
@@ -395,6 +401,7 @@ class TestMemoryGraphCheckpointPaths:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestMemoryGraphFailureAnalysis:
     """Test failure pattern analysis functionality (Requirement 6)."""
 
@@ -437,6 +444,7 @@ class TestMemoryGraphFailureAnalysis:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestMemoryGraphTransactionHandling:
     """Test transaction rollback and error handling (Requirement 7)."""
 
@@ -493,6 +501,7 @@ class TestMemoryGraphTransactionHandling:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestMemoryGraphPatternCompaction:
     """Test pattern compaction and optimization (Requirement 8)."""
 
@@ -553,6 +562,7 @@ class TestMemoryGraphPatternCompaction:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestMemoryGraphConcurrentAccess:
     """Test concurrent access safety and performance."""
 
@@ -672,6 +682,7 @@ class TestMemoryGraphConcurrentAccess:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestMemoryGraphPerformance:
     """Test performance requirements and optimization."""
 
@@ -772,6 +783,7 @@ class TestMemoryGraphPerformance:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestMemoryGraphErrorHandling:
     """Test comprehensive error handling and edge cases."""
 
