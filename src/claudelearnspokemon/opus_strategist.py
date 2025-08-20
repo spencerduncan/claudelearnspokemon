@@ -409,6 +409,540 @@ class OpusStrategist:
             if response_time_ms > self.metrics["max_response_time_ms"]:
                 self.metrics["max_response_time_ms"] = response_time_ms
 
+    def format_game_state_for_context(
+        self,
+        game_state: dict[str, Any],
+        execution_results: list[dict[str, Any]] | None = None,
+        context_type: str = "strategic_analysis",
+    ) -> dict[str, Any]:
+        """
+        Format game state data for strategic analysis by Opus.
+
+        Performance target: <50ms for game state processing
+
+        Args:
+            game_state: Raw game state data from TileObserver or execution results
+            execution_results: Optional list of recent execution results for context
+            context_type: Type of strategic context needed ("strategic_analysis", "pattern_discovery", etc.)
+
+        Returns:
+            Dictionary containing formatted strategic context optimized for Opus consumption
+
+        Raises:
+            OpusStrategistError: If game state processing fails systematically
+        """
+        start_time = time.time()
+
+        try:
+            # Circuit breaker check for game state processing
+            if not self.circuit_breaker.is_available():
+                logger.warning("Circuit breaker open for game state processing")
+                return self._create_fallback_game_state_context(game_state, "circuit_breaker_open")
+
+            # Extract strategic context with error recovery
+            try:
+                strategic_context = self._extract_strategic_context(game_state, context_type)
+
+                # Add execution results analysis if provided
+                if execution_results:
+                    strategic_context["execution_analysis"] = self._analyze_execution_results(
+                        execution_results
+                    )
+
+                # Add temporal context for pattern analysis
+                strategic_context["temporal_context"] = {
+                    "timestamp": time.time(),
+                    "processing_time_ms": (time.time() - start_time) * 1000,
+                }
+
+                # Performance validation
+                processing_time = (time.time() - start_time) * 1000
+                if processing_time > 50:
+                    logger.warning(
+                        f"Game state processing took {processing_time:.2f}ms (target: <50ms)"
+                    )
+
+                # Record success for circuit breaker
+                self.circuit_breaker.metrics.record_success()
+
+                return strategic_context
+
+            except (ValueError, KeyError, TypeError) as e:
+                # Record failure but provide fallback
+                self.circuit_breaker.metrics.record_failure()
+                logger.warning(f"Game state processing degraded: {str(e)}")
+                return self._create_fallback_game_state_context(game_state, str(e))
+
+        except Exception as e:
+            # Catch-all for unexpected errors
+            logger.error(f"Critical error in game state formatting: {str(e)}")
+            self.circuit_breaker.metrics.record_failure()
+            return self._create_fallback_game_state_context(game_state, "critical_error")
+
+    def _extract_strategic_context(
+        self, game_state: dict[str, Any], context_type: str
+    ) -> dict[str, Any]:
+        """
+        Extract strategic information from game state with production error handling.
+
+        Args:
+            game_state: Raw game state data
+            context_type: Type of strategic analysis needed
+
+        Returns:
+            Dictionary with strategic context information
+        """
+        strategic_context: dict[str, Any] = {
+            "context_type": context_type,
+            "player_analysis": {},
+            "environmental_analysis": {},
+            "strategic_opportunities": [],
+            "risk_assessment": {},
+            "data_quality": {},
+        }
+
+        # Player position and movement analysis with error recovery
+        try:
+            strategic_context["player_analysis"] = self._analyze_player_position(game_state)
+        except (KeyError, ValueError, TypeError) as e:
+            logger.debug(f"Player analysis degraded: {e}")
+            strategic_context["player_analysis"] = {"status": "degraded", "error": str(e)}
+
+        # Tile grid analysis with graceful degradation
+        try:
+            strategic_context["environmental_analysis"] = self._analyze_tile_environment(game_state)
+        except (KeyError, ValueError, TypeError) as e:
+            logger.debug(f"Environmental analysis degraded: {e}")
+            strategic_context["environmental_analysis"] = {"status": "degraded", "error": str(e)}
+
+        # Progress and inventory analysis
+        try:
+            strategic_context["progress_analysis"] = self._analyze_game_progress(game_state)
+        except (KeyError, ValueError, TypeError) as e:
+            logger.debug(f"Progress analysis degraded: {e}")
+            strategic_context["progress_analysis"] = {"status": "degraded", "error": str(e)}
+
+        # Strategic decision points identification
+        try:
+            strategic_context["strategic_opportunities"] = self._identify_strategic_opportunities(
+                game_state
+            )
+        except Exception as e:
+            logger.debug(f"Strategic opportunity identification degraded: {e}")
+            strategic_context["strategic_opportunities"] = []
+
+        # Data quality assessment for reliability
+        strategic_context["data_quality"] = self._assess_data_quality(game_state)
+
+        return strategic_context
+
+    def _analyze_player_position(self, game_state: dict[str, Any]) -> dict[str, Any]:
+        """
+        Analyze player position and movement context for strategic planning.
+
+        Args:
+            game_state: Game state containing player position data
+
+        Returns:
+            Dictionary with player position analysis
+        """
+        player_analysis: dict[str, Any] = {
+            "position": {"x": 0, "y": 0},
+            "map_context": "unknown",
+            "facing_direction": "down",
+            "movement_constraints": [],
+            "strategic_location_type": "unknown",
+        }
+
+        # Extract position with multiple fallback strategies
+        if "position" in game_state:
+            pos_data = game_state["position"]
+            if hasattr(pos_data, "x") and hasattr(pos_data, "y"):
+                # GamePosition dataclass
+                player_analysis["position"] = {"x": pos_data.x, "y": pos_data.y}
+                player_analysis["map_context"] = getattr(pos_data, "map_id", "unknown")
+                player_analysis["facing_direction"] = getattr(pos_data, "facing_direction", "down")
+            elif isinstance(pos_data, tuple | list) and len(pos_data) >= 2:
+                # Tuple/list format
+                player_analysis["position"] = {"x": pos_data[0], "y": pos_data[1]}
+        elif "player_position" in game_state:
+            # Alternative format
+            pos_data = game_state["player_position"]
+            if isinstance(pos_data, tuple | list) and len(pos_data) >= 2:
+                player_analysis["position"] = {"x": pos_data[0], "y": pos_data[1]}
+
+        # Map context analysis
+        if "map_id" in game_state:
+            player_analysis["map_context"] = game_state["map_id"]
+
+        # Determine strategic location type based on map context
+        # Order matters - more specific locations should be checked first
+        map_id = player_analysis["map_context"]
+        if isinstance(map_id, str):
+            map_id_lower = map_id.lower()
+            if "gym" in map_id_lower:
+                player_analysis["strategic_location_type"] = "gym"
+            elif any(location in map_id_lower for location in ["center", "mart"]):
+                player_analysis["strategic_location_type"] = "facility"
+            elif "route" in map_id_lower:
+                player_analysis["strategic_location_type"] = "route"
+            elif any(city in map_id_lower for city in ["pallet", "viridian", "pewter", "cerulean"]):
+                player_analysis["strategic_location_type"] = "city"
+
+        return player_analysis
+
+    def _analyze_tile_environment(self, game_state: dict[str, Any]) -> dict[str, Any]:
+        """
+        Analyze tile grid environment for strategic opportunities and constraints.
+
+        Args:
+            game_state: Game state containing tile grid data
+
+        Returns:
+            Dictionary with environmental analysis
+        """
+        import numpy as np
+
+        environmental_analysis: dict[str, Any] = {
+            "grid_dimensions": {"width": 0, "height": 0},
+            "tile_diversity": 0,
+            "npc_positions": [],
+            "interactive_elements": [],
+            "walkable_area_ratio": 0.0,
+            "strategic_landmarks": [],
+            "complexity_score": 0.0,
+        }
+
+        # Extract tile grid with multiple format support
+        tiles = None
+        if "tiles" in game_state:
+            tile_data = game_state["tiles"]
+            if hasattr(tile_data, "shape"):  # numpy array
+                tiles = tile_data
+            elif isinstance(tile_data, list):
+                tiles = np.array(tile_data, dtype=np.uint8)
+        elif hasattr(game_state, "tiles"):  # GameState object
+            tiles = game_state.tiles
+
+        if tiles is not None and tiles.size > 0:
+            environmental_analysis["grid_dimensions"] = {
+                "height": tiles.shape[0],
+                "width": tiles.shape[1] if len(tiles.shape) > 1 else 1,
+            }
+
+            # Tile diversity analysis
+            unique_tiles = np.unique(tiles)
+            environmental_analysis["tile_diversity"] = len(unique_tiles)
+
+            # NPC detection (assuming NPC tile IDs are in 200-220 range)
+            npc_positions = np.where((tiles >= 200) & (tiles <= 220))
+            if len(npc_positions[0]) > 0:
+                environmental_analysis["npc_positions"] = [
+                    {"row": int(r), "col": int(c)}
+                    for r, c in zip(npc_positions[0], npc_positions[1], strict=False)
+                ]
+
+            # Walkable area estimation (exclude known obstacle tiles)
+            obstacle_tiles = {255, 254}  # Player and menu tiles
+            obstacle_tiles.update(range(200, 221))  # NPC tiles
+            total_tiles = tiles.size
+            obstacle_count = sum(
+                np.sum(tiles == tile_id) for tile_id in obstacle_tiles if tile_id in unique_tiles
+            )
+            environmental_analysis["walkable_area_ratio"] = max(
+                0.0, (total_tiles - obstacle_count) / total_tiles
+            )
+
+            # Complexity score based on tile diversity and layout patterns
+            environmental_analysis["complexity_score"] = min(
+                1.0, environmental_analysis["tile_diversity"] / 50.0
+            )
+
+        return environmental_analysis
+
+    def _analyze_game_progress(self, game_state: dict[str, Any]) -> dict[str, Any]:
+        """
+        Analyze game progress indicators for strategic context.
+
+        Args:
+            game_state: Game state containing progress information
+
+        Returns:
+            Dictionary with progress analysis
+        """
+        progress_analysis: dict[str, Any] = {
+            "inventory_status": {},
+            "badges_earned": 0,
+            "pokemon_count": 0,
+            "health_status": {"current": 0, "max": 0},
+            "level_progression": 1,
+            "strategic_resources": {},
+            "completion_indicators": {},
+        }
+
+        # Inventory analysis
+        if "inventory" in game_state:
+            inventory = game_state["inventory"]
+            if isinstance(inventory, dict):
+                progress_analysis["inventory_status"] = {
+                    "total_items": len(inventory),
+                    "key_items": {
+                        k: v for k, v in inventory.items() if k in ["pokeball", "potion", "badge"]
+                    },
+                    "item_diversity": len(inventory),
+                }
+                progress_analysis["strategic_resources"]["pokeballs"] = inventory.get("pokeball", 0)
+                progress_analysis["strategic_resources"]["healing_items"] = inventory.get(
+                    "potion", 0
+                )
+
+        # Direct progress indicators
+        progress_fields = {
+            "badges": "badges_earned",
+            "badge_count": "badges_earned",
+            "pokemon_count": "pokemon_count",
+            "level": "level_progression",
+            "health": "health_status",
+        }
+
+        for game_field, progress_field in progress_fields.items():
+            if game_field in game_state:
+                if progress_field == "health_status" and isinstance(game_state[game_field], dict):
+                    progress_analysis[progress_field] = game_state[game_field]
+                elif progress_field == "health_status":
+                    progress_analysis[progress_field]["current"] = game_state[game_field]
+                else:
+                    progress_analysis[progress_field] = game_state[game_field]
+
+        # Calculate completion percentage estimate
+        badges = progress_analysis["badges_earned"]
+        max_badges = 8  # Pokemon Red has 8 gym badges
+        progress_analysis["completion_indicators"]["badge_progress"] = (
+            badges / max_badges if badges <= max_badges else 1.0
+        )
+
+        return progress_analysis
+
+    def _identify_strategic_opportunities(self, game_state: dict[str, Any]) -> list[dict[str, Any]]:
+        """
+        Identify strategic opportunities and decision points from game state.
+
+        Args:
+            game_state: Game state data
+
+        Returns:
+            List of strategic opportunities
+        """
+        opportunities: list[dict[str, Any]] = []
+
+        # Analyze current context for opportunities
+        try:
+            # Training opportunities
+            if "npc_positions" in game_state or (hasattr(game_state, "npcs") and game_state.npcs):
+                opportunities.append(
+                    {
+                        "type": "training_opportunity",
+                        "description": "NPCs available for battle training",
+                        "priority": "medium",
+                        "risk_level": "low",
+                    }
+                )
+
+            # Resource optimization opportunities
+            if "inventory" in game_state:
+                inventory = game_state["inventory"]
+                if isinstance(inventory, dict):
+                    pokeball_count = inventory.get("pokeball", 0)
+                    if pokeball_count < 5:
+                        opportunities.append(
+                            {
+                                "type": "resource_acquisition",
+                                "description": "Low pokeball count - consider restocking",
+                                "priority": "high",
+                                "risk_level": "medium",
+                            }
+                        )
+
+                    potion_count = inventory.get("potion", 0)
+                    if potion_count < 3:
+                        opportunities.append(
+                            {
+                                "type": "healing_preparation",
+                                "description": "Low healing items - prepare for upcoming battles",
+                                "priority": "medium",
+                                "risk_level": "low",
+                            }
+                        )
+
+            # Location-based strategic opportunities
+            map_context = game_state.get("map_id", "")
+            if isinstance(map_context, str):
+                if "gym" in map_context.lower():
+                    opportunities.append(
+                        {
+                            "type": "gym_challenge",
+                            "description": "Gym battle opportunity - major progress potential",
+                            "priority": "critical",
+                            "risk_level": "high",
+                        }
+                    )
+                elif "route" in map_context.lower():
+                    opportunities.append(
+                        {
+                            "type": "exploration",
+                            "description": "Route exploration - potential for encounters and items",
+                            "priority": "medium",
+                            "risk_level": "medium",
+                        }
+                    )
+
+        except Exception as e:
+            logger.debug(f"Strategic opportunity identification failed gracefully: {e}")
+
+        return opportunities
+
+    def _analyze_execution_results(self, execution_results: list[dict[str, Any]]) -> dict[str, Any]:
+        """
+        Analyze recent execution results for strategic context.
+
+        Args:
+            execution_results: List of execution result dictionaries
+
+        Returns:
+            Dictionary with execution analysis
+        """
+        analysis: dict[str, Any] = {
+            "result_count": len(execution_results),
+            "success_rate": 0.0,
+            "performance_metrics": {},
+            "pattern_insights": [],
+            "failure_analysis": [],
+        }
+
+        if not execution_results:
+            return analysis
+
+        # Success rate calculation
+        successful_results = [r for r in execution_results if r.get("success", False)]
+        analysis["success_rate"] = len(successful_results) / len(execution_results)
+
+        # Performance aggregation
+        execution_times = [
+            r.get("execution_time", 0) for r in execution_results if "execution_time" in r
+        ]
+        if execution_times:
+            analysis["performance_metrics"] = {
+                "avg_execution_time": sum(execution_times) / len(execution_times),
+                "max_execution_time": max(execution_times),
+                "min_execution_time": min(execution_times),
+            }
+
+        # Pattern extraction from successful results
+        for result in successful_results:
+            if "discovered_patterns" in result:
+                patterns = result["discovered_patterns"]
+                if isinstance(patterns, list):
+                    analysis["pattern_insights"].extend(patterns)
+
+        # Failure mode analysis
+        failed_results = [r for r in execution_results if not r.get("success", True)]
+        for result in failed_results:
+            failure_info = {
+                "reason": result.get("error", "unknown"),
+                "context": result.get("final_state", {}),
+            }
+            analysis["failure_analysis"].append(failure_info)
+
+        return analysis
+
+    def _assess_data_quality(self, game_state: dict[str, Any]) -> dict[str, Any]:
+        """
+        Assess the quality and completeness of game state data.
+
+        Args:
+            game_state: Game state data to assess
+
+        Returns:
+            Dictionary with data quality metrics
+        """
+        quality_metrics: dict[str, Any] = {
+            "completeness_score": 0.0,
+            "data_integrity": "good",
+            "missing_fields": [],
+            "corrupted_fields": [],
+            "reliability_score": 1.0,
+        }
+
+        # Expected core fields for strategic analysis
+        expected_fields = [
+            "tiles",
+            "position",
+            "player_position",
+            "inventory",
+            "map_id",
+            "health",
+            "level",
+            "pokemon_count",
+        ]
+
+        present_fields = 0
+        for field in expected_fields:
+            if field in game_state:
+                present_fields += 1
+                # Basic integrity check
+                try:
+                    value = game_state[field]
+                    if value is None:
+                        quality_metrics["missing_fields"].append(field)
+                        quality_metrics["reliability_score"] *= 0.95
+                except Exception:
+                    quality_metrics["corrupted_fields"].append(field)
+                    quality_metrics["reliability_score"] *= 0.8
+            else:
+                quality_metrics["missing_fields"].append(field)
+
+        quality_metrics["completeness_score"] = present_fields / len(expected_fields)
+
+        # Data integrity assessment
+        if quality_metrics["completeness_score"] < 0.5:
+            quality_metrics["data_integrity"] = "poor"
+        elif quality_metrics["completeness_score"] < 0.8:
+            quality_metrics["data_integrity"] = "fair"
+        elif len(quality_metrics["corrupted_fields"]) > 0:
+            quality_metrics["data_integrity"] = "degraded"
+
+        return quality_metrics
+
+    def _create_fallback_game_state_context(
+        self, game_state: dict[str, Any], reason: str
+    ) -> dict[str, Any]:
+        """
+        Create fallback strategic context when game state processing fails.
+
+        Args:
+            game_state: Original game state data
+            reason: Reason for fallback
+
+        Returns:
+            Minimal strategic context for continued operation
+        """
+        return {
+            "context_type": "fallback",
+            "fallback_reason": reason,
+            "minimal_analysis": {
+                "has_position": "position" in game_state or "player_position" in game_state,
+                "has_tiles": "tiles" in game_state,
+                "has_inventory": "inventory" in game_state,
+                "data_size": len(game_state),
+            },
+            "strategic_recommendations": [
+                "Request fresh game state capture",
+                "Validate emulator connection stability",
+                "Check for data corruption at source",
+            ],
+            "reliability_warning": "Strategic analysis operating in degraded mode",
+        }
+
 
 # Re-export classes for easier imports
 __all__ = [

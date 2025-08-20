@@ -503,6 +503,507 @@ class TestPerformanceTargets(unittest.TestCase):
         )
 
 
+@pytest.mark.fast
+class TestGameStateProcessing(unittest.TestCase):
+    """Test game state processing functionality for strategic context formatting."""
+
+    def setUp(self):
+        """Set up test environment for game state processing."""
+        self.mock_manager = Mock()
+        self.mock_strategic_process = Mock()
+        self.mock_manager.get_strategic_process.return_value = self.mock_strategic_process
+
+        from claudelearnspokemon.opus_strategist import OpusStrategist
+
+        self.strategist = OpusStrategist(self.mock_manager)
+
+    def test_opus_strategist_formats_game_state_for_context(self):
+        """
+        Test core requirement: format game state data for strategic analysis by Opus.
+
+        This test validates the strategic context formatting meets production requirements:
+        1. Processes complex game state data efficiently (<50ms target)
+        2. Extracts strategic information for Opus consumption
+        3. Handles multiple game state representation formats
+        4. Provides comprehensive strategic context
+        """
+        # Create comprehensive game state with all expected fields
+        game_state = {
+            "tiles": [[1, 2, 3] * 6 for _ in range(20)],  # 20x18 grid
+            "position": {"x": 10, "y": 5},
+            "player_position": (10, 5),
+            "map_id": "route_1",
+            "inventory": {"pokeball": 5, "potion": 3, "badge": 2},
+            "health": 85,
+            "level": 12,
+            "pokemon_count": 3,
+            "frame_count": 1500,
+        }
+
+        execution_results = [
+            {
+                "success": True,
+                "execution_time": 1.2,
+                "discovered_patterns": ["menu_optimization", "movement_sequence"],
+                "final_state": {"x": 12, "y": 6},
+            }
+        ]
+
+        # Test strategic context formatting
+        start_time = time.time()
+        strategic_context = self.strategist.format_game_state_for_context(
+            game_state, execution_results, "strategic_analysis"
+        )
+        processing_time = (time.time() - start_time) * 1000
+
+        # Validate performance target
+        self.assertLess(
+            processing_time, 50, f"Processing took {processing_time:.2f}ms (target: <50ms)"
+        )
+
+        # Verify comprehensive strategic context structure
+        self.assertIsInstance(strategic_context, dict)
+        self.assertIn("context_type", strategic_context)
+        self.assertEqual(strategic_context["context_type"], "strategic_analysis")
+
+        # Validate strategic analysis components
+        required_sections = [
+            "player_analysis",
+            "environmental_analysis",
+            "progress_analysis",
+            "strategic_opportunities",
+            "execution_analysis",
+            "temporal_context",
+            "data_quality",
+        ]
+        for section in required_sections:
+            self.assertIn(section, strategic_context, f"Missing section: {section}")
+
+        # Verify player analysis details
+        player_analysis = strategic_context["player_analysis"]
+        self.assertIn("position", player_analysis)
+        self.assertIn("strategic_location_type", player_analysis)
+        self.assertEqual(player_analysis["strategic_location_type"], "route")
+
+        # Verify execution analysis integration
+        execution_analysis = strategic_context["execution_analysis"]
+        self.assertEqual(execution_analysis["result_count"], 1)
+        self.assertEqual(execution_analysis["success_rate"], 1.0)
+        self.assertIn("menu_optimization", execution_analysis["pattern_insights"])
+
+    def test_game_state_formatting_handles_multiple_formats(self):
+        """Test that game state formatting supports different representation formats."""
+
+        # Test with GameState-like object
+        class MockGameState:
+            def __init__(self):
+                self.tiles = [[1, 2] * 9 for _ in range(20)]
+                self.position = type("Position", (), {"x": 5, "y": 3, "map_id": "viridian_city"})()
+                self.inventory = {"pokeball": 2}
+
+        gamestate_obj = MockGameState()
+
+        strategic_context = self.strategist.format_game_state_for_context(
+            {"tiles": gamestate_obj.tiles, "position": gamestate_obj.position}
+        )
+
+        self.assertIsInstance(strategic_context, dict)
+        self.assertEqual(strategic_context["player_analysis"]["position"]["x"], 5)
+        self.assertEqual(strategic_context["player_analysis"]["strategic_location_type"], "city")
+
+    def test_game_state_formatting_handles_corrupted_data(self):
+        """Test robust error handling for corrupted game state data."""
+        # Test with corrupted tile data
+        corrupted_game_state = {
+            "tiles": "corrupted_data_not_array",
+            "position": None,
+            "inventory": {"corrupted": "data"},
+        }
+
+        strategic_context = self.strategist.format_game_state_for_context(corrupted_game_state)
+
+        # Should provide fallback context instead of crashing
+        self.assertIsInstance(strategic_context, dict)
+        self.assertIn("data_quality", strategic_context)
+
+        # Verify graceful degradation in analysis sections
+        if strategic_context["context_type"] != "fallback":
+            # Check for degraded status in analysis sections
+            analysis_sections = ["player_analysis", "environmental_analysis", "progress_analysis"]
+            for section in analysis_sections:
+                if section in strategic_context:
+                    # Either successful analysis or degraded with error info
+                    analysis = strategic_context[section]
+                    if "status" in analysis:
+                        self.assertEqual(analysis["status"], "degraded")
+
+    def test_game_state_formatting_handles_incomplete_data(self):
+        """Test handling of incomplete game state data gracefully."""
+        # Minimal game state with only basic information
+        minimal_game_state = {
+            "position": (8, 4),
+            "map_id": "unknown_location",
+        }
+
+        strategic_context = self.strategist.format_game_state_for_context(minimal_game_state)
+
+        self.assertIsInstance(strategic_context, dict)
+
+        # Verify data quality assessment reflects incomplete data
+        data_quality = strategic_context["data_quality"]
+        self.assertLess(data_quality["completeness_score"], 1.0)
+        self.assertGreater(len(data_quality["missing_fields"]), 0)
+
+    def test_strategic_context_extraction_components(self):
+        """Test individual strategic context extraction components."""
+        game_state = {
+            "tiles": [[50, 51, 200] * 6 for _ in range(20)],  # Include NPCs (tile 200)
+            "position": {"x": 10, "y": 5},
+            "map_id": "cerulean_gym",
+            "inventory": {"pokeball": 2, "potion": 1},  # Low resources
+            "health": 45,  # Low health
+            "badges": 3,
+        }
+
+        strategic_context = self.strategist._extract_strategic_context(
+            game_state, "pattern_discovery"
+        )
+
+        # Verify player analysis
+        player_analysis = strategic_context["player_analysis"]
+        self.assertEqual(player_analysis["strategic_location_type"], "gym")
+
+        # Verify environmental analysis detects NPCs
+        env_analysis = strategic_context["environmental_analysis"]
+        self.assertGreater(len(env_analysis["npc_positions"]), 0)
+        self.assertGreater(env_analysis["tile_diversity"], 1)
+
+        # Verify strategic opportunities detection
+        opportunities = strategic_context["strategic_opportunities"]
+        opportunity_types = [opp["type"] for opp in opportunities]
+        self.assertIn("gym_challenge", opportunity_types)
+        self.assertIn("resource_acquisition", opportunity_types)  # Due to low pokeball count
+
+    def test_player_position_analysis_multiple_formats(self):
+        """Test player position analysis handles various data formats."""
+        # Test with GamePosition-like object
+        game_state_obj = {
+            "position": type(
+                "Position", (), {"x": 15, "y": 8, "map_id": "route_22", "facing_direction": "north"}
+            )()
+        }
+
+        analysis = self.strategist._analyze_player_position(game_state_obj)
+
+        self.assertEqual(analysis["position"]["x"], 15)
+        self.assertEqual(analysis["position"]["y"], 8)
+        self.assertEqual(analysis["map_context"], "route_22")
+        self.assertEqual(analysis["facing_direction"], "north")
+        self.assertEqual(analysis["strategic_location_type"], "route")
+
+        # Test with tuple format
+        game_state_tuple = {"player_position": (7, 3)}
+        analysis_tuple = self.strategist._analyze_player_position(game_state_tuple)
+
+        self.assertEqual(analysis_tuple["position"]["x"], 7)
+        self.assertEqual(analysis_tuple["position"]["y"], 3)
+
+    def test_tile_environment_analysis_with_numpy_arrays(self):
+        """Test tile environment analysis with numpy arrays and various tile types."""
+        import numpy as np
+
+        # Create tile grid with strategic elements
+        tiles = np.zeros((20, 18), dtype=np.uint8)
+        tiles[5:7, 5:7] = 100  # Some terrain
+        tiles[10, 9] = 255  # Player tile
+        tiles[3, 3] = 205  # NPC tile
+        tiles[15, 15] = 210  # Another NPC
+
+        game_state = {"tiles": tiles}
+
+        analysis = self.strategist._analyze_tile_environment(game_state)
+
+        self.assertEqual(analysis["grid_dimensions"]["height"], 20)
+        self.assertEqual(analysis["grid_dimensions"]["width"], 18)
+        self.assertGreaterEqual(
+            analysis["tile_diversity"], 4
+        )  # At least background, terrain, player, NPCs
+        self.assertEqual(len(analysis["npc_positions"]), 2)  # Two NPCs placed
+        self.assertGreater(analysis["walkable_area_ratio"], 0.8)  # Most tiles should be walkable
+
+    def test_game_progress_analysis_comprehensive(self):
+        """Test comprehensive game progress analysis."""
+        game_state = {
+            "inventory": {
+                "pokeball": 8,
+                "potion": 5,
+                "super_potion": 2,
+                "badge": 4,
+                "rare_candy": 1,
+            },
+            "badges": 4,
+            "pokemon_count": 5,
+            "level": 28,
+            "health": {"current": 120, "max": 140},
+        }
+
+        analysis = self.strategist._analyze_game_progress(game_state)
+
+        # Verify inventory analysis
+        inventory_status = analysis["inventory_status"]
+        self.assertEqual(inventory_status["total_items"], 5)
+        self.assertEqual(inventory_status["item_diversity"], 5)
+
+        # Verify strategic resources tracking
+        strategic_resources = analysis["strategic_resources"]
+        self.assertEqual(strategic_resources["pokeballs"], 8)
+        self.assertEqual(strategic_resources["healing_items"], 5)
+
+        # Verify progress indicators
+        self.assertEqual(analysis["badges_earned"], 4)
+        self.assertEqual(analysis["pokemon_count"], 5)
+        self.assertEqual(analysis["level_progression"], 28)
+
+        # Verify completion tracking
+        completion = analysis["completion_indicators"]
+        self.assertEqual(completion["badge_progress"], 0.5)  # 4/8 badges
+
+    def test_execution_results_analysis(self):
+        """Test analysis of execution results for strategic context."""
+        execution_results = [
+            {
+                "success": True,
+                "execution_time": 1.1,
+                "discovered_patterns": ["fast_menu", "optimal_route"],
+                "final_state": {"x": 10, "y": 5},
+            },
+            {
+                "success": False,
+                "execution_time": 2.5,
+                "error": "timeout",
+                "final_state": {"x": 8, "y": 4},
+            },
+            {
+                "success": True,
+                "execution_time": 0.9,
+                "discovered_patterns": ["fast_menu", "speed_optimization"],
+                "final_state": {"x": 12, "y": 6},
+            },
+        ]
+
+        analysis = self.strategist._analyze_execution_results(execution_results)
+
+        self.assertEqual(analysis["result_count"], 3)
+        self.assertAlmostEqual(analysis["success_rate"], 2 / 3, places=2)
+
+        # Verify performance metrics
+        perf_metrics = analysis["performance_metrics"]
+        self.assertAlmostEqual(perf_metrics["avg_execution_time"], (1.1 + 2.5 + 0.9) / 3, places=2)
+        self.assertEqual(perf_metrics["max_execution_time"], 2.5)
+        self.assertEqual(perf_metrics["min_execution_time"], 0.9)
+
+        # Verify pattern insights extraction
+        pattern_insights = analysis["pattern_insights"]
+        self.assertIn("fast_menu", pattern_insights)
+        self.assertIn("optimal_route", pattern_insights)
+        self.assertIn("speed_optimization", pattern_insights)
+
+        # Verify failure analysis
+        failure_analysis = analysis["failure_analysis"]
+        self.assertEqual(len(failure_analysis), 1)
+        self.assertEqual(failure_analysis[0]["reason"], "timeout")
+
+    def test_data_quality_assessment(self):
+        """Test data quality assessment for reliability metrics."""
+        # High quality game state
+        complete_game_state = {
+            "tiles": [[1, 2] * 9 for _ in range(20)],
+            "position": (10, 5),
+            "inventory": {"pokeball": 5},
+            "map_id": "route_1",
+            "health": 100,
+            "level": 15,
+            "pokemon_count": 3,
+        }
+
+        quality = self.strategist._assess_data_quality(complete_game_state)
+
+        self.assertGreaterEqual(quality["completeness_score"], 0.8)
+        self.assertEqual(quality["data_integrity"], "good")
+        self.assertLessEqual(len(quality["missing_fields"]), 1)
+        self.assertGreaterEqual(quality["reliability_score"], 0.9)
+
+        # Poor quality game state
+        incomplete_game_state = {"position": (5, 3)}
+
+        quality_poor = self.strategist._assess_data_quality(incomplete_game_state)
+
+        self.assertLess(quality_poor["completeness_score"], 0.5)
+        self.assertEqual(quality_poor["data_integrity"], "poor")
+        self.assertGreater(len(quality_poor["missing_fields"]), 5)
+
+    def test_circuit_breaker_integration_with_game_state_processing(self):
+        """Test circuit breaker integration protects against systematic failures."""
+        # Import CircuitState from circuit_breaker module
+        import time
+
+        from claudelearnspokemon.circuit_breaker import CircuitState
+
+        # Simulate circuit breaker in open state with recent trip time
+        # This ensures the recovery timeout hasn't elapsed, so is_available() returns False
+        with self.strategist.circuit_breaker._lock:
+            self.strategist.circuit_breaker._state = CircuitState.OPEN
+            self.strategist.circuit_breaker._last_trip_time = time.time()  # Recent trip time
+
+        game_state = {"position": (10, 5), "map_id": "test"}
+
+        strategic_context = self.strategist.format_game_state_for_context(game_state)
+
+        # Should return fallback context when circuit breaker is open
+        self.assertEqual(strategic_context["context_type"], "fallback")
+        self.assertEqual(strategic_context["fallback_reason"], "circuit_breaker_open")
+        self.assertIn("strategic_recommendations", strategic_context)
+
+    def test_performance_under_load_game_state_processing(self):
+        """Test game state processing performance under load conditions."""
+        # Create large, complex game state
+        large_game_state = {
+            "tiles": [[i % 256 for i in range(18)] for _ in range(20)],
+            "position": {"x": 10, "y": 5},
+            "map_id": "complex_dungeon_level_5",
+            "inventory": {f"item_{i}": i for i in range(50)},  # Large inventory
+            "health": 150,
+            "level": 45,
+            "pokemon_count": 6,
+        }
+
+        # Large execution results set
+        execution_results = [
+            {
+                "success": i % 3 != 0,
+                "execution_time": 1.0 + (i * 0.1),
+                "discovered_patterns": [f"pattern_{i}", f"pattern_{i+1}"],
+                "final_state": {"x": 10 + i, "y": 5 + i},
+            }
+            for i in range(20)
+        ]
+
+        # Test performance under load
+        start_time = time.time()
+        strategic_context = self.strategist.format_game_state_for_context(
+            large_game_state, execution_results
+        )
+        processing_time = (time.time() - start_time) * 1000
+
+        # Should still meet performance target even with large data
+        self.assertLess(processing_time, 100, f"Load test took {processing_time:.2f}ms")
+
+        # Verify comprehensive analysis despite load
+        self.assertIsInstance(strategic_context, dict)
+        self.assertIn("execution_analysis", strategic_context)
+        self.assertEqual(strategic_context["execution_analysis"]["result_count"], 20)
+
+    def test_strategic_opportunities_identification(self):
+        """Test identification of various strategic opportunities from game state."""
+        # Gym scenario
+        gym_state = {
+            "map_id": "pewter_gym",
+            "inventory": {"pokeball": 3, "potion": 1},  # Low resources
+        }
+
+        opportunities_gym = self.strategist._identify_strategic_opportunities(gym_state)
+        opportunity_types = [opp["type"] for opp in opportunities_gym]
+
+        self.assertIn("gym_challenge", opportunity_types)
+        self.assertIn("resource_acquisition", opportunity_types)
+        self.assertIn("healing_preparation", opportunity_types)
+
+        # Verify priority and risk assessment
+        gym_opportunity = next(opp for opp in opportunities_gym if opp["type"] == "gym_challenge")
+        self.assertEqual(gym_opportunity["priority"], "critical")
+        self.assertEqual(gym_opportunity["risk_level"], "high")
+
+
+@pytest.mark.medium
+class TestGameStateProcessingIntegration(unittest.TestCase):
+    """Test integration of game state processing with existing OpusStrategist functionality."""
+
+    def setUp(self):
+        """Set up integration test environment."""
+        self.mock_manager = Mock()
+        self.mock_strategic_process = Mock()
+        self.mock_manager.get_strategic_process.return_value = self.mock_strategic_process
+
+        from claudelearnspokemon.opus_strategist import OpusStrategist
+
+        self.strategist = OpusStrategist(self.mock_manager)
+
+    def test_game_state_context_integrates_with_strategic_planning(self):
+        """Test that formatted game state context integrates with strategic planning workflow."""
+        # Set up game state and mock Opus response
+        game_state = {
+            "tiles": [[1, 2, 3] * 6 for _ in range(20)],
+            "position": (10, 5),
+            "map_id": "route_1",
+            "inventory": {"pokeball": 5, "potion": 3},
+            "level": 12,
+        }
+
+        # Mock Opus strategic response
+        mock_opus_response = {
+            "strategy_id": "route_1_optimization",
+            "experiments": [
+                {
+                    "id": "exp_1",
+                    "name": "Route optimization experiment",
+                    "checkpoint": "route_1_start",
+                    "script_dsl": "MOVE RIGHT; BATTLE; MOVE UP",
+                    "expected_outcome": "level progression",
+                    "priority": "high",
+                }
+            ],
+            "strategic_insights": [
+                "Current position optimal for training",
+                "Resource levels sufficient for extended exploration",
+            ],
+            "next_checkpoints": ["route_1_center", "route_1_exit"],
+        }
+
+        self.mock_strategic_process.send_message.return_value = str(mock_opus_response)
+
+        # Test integration: format game state then request strategy
+        formatted_context = self.strategist.format_game_state_for_context(game_state)
+
+        # Simulate using formatted context in strategy request
+        enhanced_game_state = dict(game_state)
+        enhanced_game_state.update({"strategic_context": formatted_context})
+
+        strategy_response = self.strategist.get_strategy(
+            enhanced_game_state, context={"analysis_type": "route_optimization"}
+        )
+
+        # Verify integration worked
+        self.assertIsNotNone(strategy_response)
+        self.mock_strategic_process.send_message.assert_called_once()
+
+        # Verify the prompt included strategic context
+        call_args = self.mock_strategic_process.send_message.call_args[0][0]
+        self.assertIn("strategic", call_args.lower())
+
+    def test_game_state_processing_metrics_integration(self):
+        """Test that game state processing integrates with OpusStrategist metrics."""
+        game_state = {"position": (5, 3), "map_id": "test_location"}
+
+        # Process game state multiple times
+        for _ in range(5):
+            self.strategist.format_game_state_for_context(game_state)
+
+        # Verify metrics are being tracked (circuit breaker should record successes)
+        metrics = self.strategist.get_metrics()
+        self.assertIsInstance(metrics, dict)
+        self.assertIn("circuit_breaker_state", metrics)
+
+
 if __name__ == "__main__":
     # Run with performance timing
     print("=== OpusStrategist Test Suite - Performance Focus ===")
