@@ -3,6 +3,7 @@
 import json
 import logging
 import statistics
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable
@@ -63,6 +64,9 @@ class OpusStrategist:
         self._experiment_counter = 0
         self._experiment_history: list[dict[str, Any]] = []
         self._validation_rules = self._initialize_validation_rules()
+
+        # Thread-safe counter for experiment IDs
+        self._counter_lock = threading.Lock()
 
     def request_strategy(
         self, game_state: dict[str, Any], recent_results: list[dict[str, Any]]
@@ -309,10 +313,12 @@ class OpusStrategist:
 
     def _parse_experiment_data(self, exp_data: dict[str, Any], index: int) -> ExperimentSpec:
         """Parse experiment data into ExperimentSpec."""
-        self._experiment_counter += 1
+        with self._counter_lock:
+            self._experiment_counter += 1
+            experiment_id = f"exp_{self._experiment_counter:04d}"
 
         return ExperimentSpec(
-            id=f"exp_{self._experiment_counter:04d}",
+            id=experiment_id,
             name=exp_data.get("name", f"Experiment {index + 1}"),
             description=exp_data.get("description", ""),
             strategy=exp_data.get("strategy", "general"),
@@ -338,11 +344,26 @@ class OpusStrategist:
             # Create variation with modified parameters
             new_params = base_experiment.parameters.copy()
 
-            # Modify numeric parameters by small amounts
+            # Modify parameters with appropriate variation strategies
             for param, value in new_params.items():
                 if isinstance(value, int | float):
                     variation_factor = 0.8 + (i * 0.1)  # 0.8, 0.9, 1.0, 1.1, 1.2
                     new_params[param] = value * variation_factor
+                elif isinstance(value, str) and len(value) > 0:
+                    # String variations: add prefixes/suffixes for variation
+                    string_prefixes = ["alt_", "mod_", "exp_", "var_", "test_"]
+                    if i < len(string_prefixes):
+                        new_params[param] = f"{string_prefixes[i]}{value}"
+                elif isinstance(value, bool):
+                    # Boolean variations: toggle for first variation only
+                    if i == 0:
+                        new_params[param] = not value
+                elif isinstance(value, list) and len(value) > 0:
+                    # List variations: modify order or add elements
+                    new_list = value.copy()
+                    if i % 2 == 0 and len(new_list) > 1:
+                        new_list.reverse()  # Reverse order
+                    new_params[param] = new_list
 
             variation = ExperimentSpec(
                 id=f"{base_experiment.id}_var_{i+1}",
@@ -531,12 +552,18 @@ class OpusStrategist:
         if significant_correlations:
             compressed.append({"type": "correlations", "data": significant_correlations})
 
-        # Compress patterns
+        # Compress patterns with bounds checking
         key_patterns = {
             "success_rate": patterns.get("success_rate", 0.0),
             "average_score": patterns.get("average_score", 0.0),
-            "top_strategy": patterns.get("common_strategies", [("unknown", 0)])[0][0],
         }
+
+        # Safe access to common strategies with bounds check
+        common_strategies = patterns.get("common_strategies", [("unknown", 0)])
+        if common_strategies and len(common_strategies) > 0 and len(common_strategies[0]) > 0:
+            key_patterns["top_strategy"] = common_strategies[0][0]
+        else:
+            key_patterns["top_strategy"] = "unknown"
 
         compressed.append({"type": "patterns", "data": key_patterns})
 
