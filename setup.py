@@ -11,6 +11,8 @@ setup(
         "pytest-asyncio>=0.21.0",
         "pytest-mock>=3.11.0",
         "docker>=6.1.0",
+        "testcontainers>=3.7.0",
+        "requests>=2.31.0",
         "numpy>=1.24.0",
         "httpx>=0.24.0",
         "lz4>=4.3.0",
