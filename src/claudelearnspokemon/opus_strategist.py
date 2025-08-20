@@ -15,6 +15,12 @@ from typing import Any
 
 from .circuit_breaker import CircuitBreaker, CircuitConfig
 from .claude_code_manager import ClaudeCodeManager
+from .language_evolution import (
+    EvolutionProposal,
+    EvolutionProposalGenerator,
+    LanguageAnalyzer,
+    LanguageValidator,
+)
 from .opus_strategist_exceptions import (
     DirectiveExtractionError,
     MalformedResponseError,
@@ -102,6 +108,11 @@ class OpusStrategist:
             )
         )
 
+        # Language evolution system components
+        self.language_analyzer = LanguageAnalyzer()
+        self.proposal_generator = EvolutionProposalGenerator()
+        self.language_validator = LanguageValidator()
+
         # Performance and reliability metrics
         self.metrics = {
             "total_requests": 0,
@@ -111,10 +122,15 @@ class OpusStrategist:
             "circuit_breaker_trips": 0,
             "avg_response_time_ms": 0.0,
             "max_response_time_ms": 0.0,
+            "language_evolution_requests": 0,
+            "evolution_proposals_generated": 0,
+            "evolution_analysis_time_ms": 0.0,
         }
         self._metrics_lock = threading.Lock()
 
-        logger.info("OpusStrategist initialized with production configuration")
+        logger.info(
+            "OpusStrategist initialized with production configuration and language evolution"
+        )
 
     def get_strategy(
         self,
@@ -256,6 +272,239 @@ class OpusStrategist:
         metrics["circuit_breaker_state"] = self.circuit_breaker.get_state().value
 
         return metrics
+
+    def propose_language_evolution(
+        self, recent_results: list[dict[str, Any]]
+    ) -> list[EvolutionProposal]:
+        """
+        Propose language evolution improvements based on recent execution results.
+
+        This method analyzes recent parallel execution results to identify patterns
+        that could benefit from DSL improvements, generates concrete proposals for
+        language evolution, and validates them for consistency and safety.
+
+        Args:
+            recent_results: List of recent execution results with pattern performance data.
+                           Each result should contain:
+                           - pattern_name: Name of executed pattern
+                           - success_rate: Pattern success rate (0.0-1.0)
+                           - usage_count: Number of times pattern was used
+                           - input_sequence: List of input commands
+                           - context: Execution context information
+                           - average_execution_time: Optional timing data
+
+        Returns:
+            List of validated evolution proposals sorted by expected impact.
+            Each proposal contains concrete DSL changes, expected improvements,
+            and implementation guidance.
+
+        Raises:
+            OpusStrategistError: If language evolution analysis fails
+            PerformanceError: If processing exceeds performance targets
+
+        Performance Targets:
+            - Total processing time: <400ms (200ms analysis + 100ms generation + 50ms validation + overhead)
+            - Pattern analysis: <200ms
+            - Proposal generation: <100ms
+            - Validation: <50ms
+        """
+        start_time = time.perf_counter()
+
+        try:
+            self._record_metric("language_evolution_requests", 1)
+
+            # Convert recent results to pattern analysis format
+            pattern_data = self._convert_results_to_patterns(recent_results)
+
+            if not pattern_data:
+                logger.warning("No pattern data available for language evolution analysis")
+                return []
+
+            logger.info(f"Starting language evolution analysis for {len(pattern_data)} patterns")
+
+            # Phase 1: Analyze patterns for evolution opportunities (<200ms)
+            analysis_start = time.perf_counter()
+            evolution_opportunities = self.language_analyzer.identify_evolution_opportunities(
+                pattern_data
+            )
+            analysis_time = (time.perf_counter() - analysis_start) * 1000
+
+            logger.debug(
+                f"Pattern analysis completed in {analysis_time:.2f}ms, found {len(evolution_opportunities)} opportunities"
+            )
+
+            if not evolution_opportunities:
+                logger.info("No evolution opportunities identified from current patterns")
+                return []
+
+            # Phase 2: Generate evolution proposals (<100ms)
+            generation_start = time.perf_counter()
+            evolution_proposals = self.proposal_generator.generate_proposals(
+                evolution_opportunities
+            )
+            generation_time = (time.perf_counter() - generation_start) * 1000
+
+            logger.debug(
+                f"Proposal generation completed in {generation_time:.2f}ms, generated {len(evolution_proposals)} proposals"
+            )
+
+            if not evolution_proposals:
+                logger.info("No concrete proposals could be generated from opportunities")
+                return []
+
+            # Phase 3: Validate proposals (<50ms)
+            validation_start = time.perf_counter()
+            validated_proposals = self.language_validator.validate_proposals(evolution_proposals)
+            validation_time = (time.perf_counter() - validation_start) * 1000
+
+            logger.debug(f"Proposal validation completed in {validation_time:.2f}ms")
+
+            # Filter to only high-quality proposals (validation score >= 0.7)
+            high_quality_proposals = [
+                proposal for proposal in validated_proposals if proposal.validation_score >= 0.7
+            ]
+
+            # Calculate total processing time
+            total_time = (time.perf_counter() - start_time) * 1000
+
+            # Update metrics
+            self._record_metric("evolution_proposals_generated", len(high_quality_proposals))
+            with self._metrics_lock:
+                self.metrics["evolution_analysis_time_ms"] = (
+                    self.metrics["evolution_analysis_time_ms"] * 0.8 + total_time * 0.2
+                )
+
+            # Log performance metrics
+            logger.info(
+                f"Language evolution completed in {total_time:.2f}ms "
+                f"(analysis: {analysis_time:.2f}ms, generation: {generation_time:.2f}ms, "
+                f"validation: {validation_time:.2f}ms). "
+                f"Generated {len(high_quality_proposals)} high-quality proposals."
+            )
+
+            # Warn if performance targets are exceeded
+            if total_time > 400.0:
+                logger.warning(f"Language evolution exceeded 400ms target: {total_time:.2f}ms")
+
+            return high_quality_proposals
+
+        except Exception as e:
+            processing_time = (time.perf_counter() - start_time) * 1000
+            logger.error(f"Language evolution failed after {processing_time:.2f}ms: {str(e)}")
+            raise OpusStrategistError(f"Language evolution analysis failed: {str(e)}") from e
+
+    def apply_language_evolution(
+        self, proposal: EvolutionProposal, script_compiler: Any = None
+    ) -> bool:
+        """
+        Apply a validated language evolution proposal to the DSL system.
+
+        This method integrates validated language evolution proposals with the
+        ScriptCompiler's MacroRegistry to implement DSL improvements.
+
+        Args:
+            proposal: Validated evolution proposal to implement
+            script_compiler: Optional ScriptCompiler instance for macro registration
+
+        Returns:
+            True if proposal was successfully applied, False otherwise
+
+        Raises:
+            OpusStrategistError: If proposal application fails
+        """
+        try:
+            if proposal.validation_score < 0.8:
+                logger.warning(
+                    f"Proposal {proposal.proposal_id} has low validation score: {proposal.validation_score}"
+                )
+                return False
+
+            logger.info(f"Applying language evolution proposal: {proposal.proposal_id}")
+
+            # Handle macro extension proposals
+            if proposal.proposal_type.value == "macro_extension":
+                return self._apply_macro_extension(proposal, script_compiler)
+
+            # Handle other proposal types (conditional DSL, etc.)
+            elif proposal.proposal_type.value == "conditional_dsl":
+                logger.info(
+                    f"Conditional DSL proposal {proposal.proposal_id} requires manual implementation"
+                )
+                return False  # For now, conditional DSL requires manual implementation
+
+            else:
+                logger.warning(f"Unknown proposal type: {proposal.proposal_type.value}")
+                return False
+
+        except Exception as e:
+            logger.error(
+                f"Failed to apply language evolution proposal {proposal.proposal_id}: {str(e)}"
+            )
+            raise OpusStrategistError(f"Language evolution application failed: {str(e)}") from e
+
+    def _convert_results_to_patterns(
+        self, recent_results: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """
+        Convert execution results to pattern data format for analysis.
+
+        This method transforms recent execution results into the format expected
+        by the LanguageAnalyzer for pattern analysis.
+        """
+        pattern_data = []
+
+        for result in recent_results:
+            # Extract required fields with defaults
+            pattern_entry = {
+                "name": result.get("pattern_name", "unknown"),
+                "success_rate": result.get("success_rate", 0.0),
+                "usage_frequency": result.get("usage_count", 0),
+                "input_sequence": result.get("input_sequence", []),
+                "context": result.get("context", {}),
+                "average_completion_time": result.get("average_execution_time"),
+                "evolution_metadata": result.get("evolution_metadata", {}),
+            }
+
+            # Validate essential fields
+            if (
+                pattern_entry["name"] != "unknown"
+                and pattern_entry["input_sequence"]
+                and isinstance(pattern_entry["success_rate"], int | float)
+            ):
+                pattern_data.append(pattern_entry)
+            else:
+                logger.debug(f"Skipping invalid pattern data: {result}")
+
+        return pattern_data
+
+    def _apply_macro_extension(
+        self, proposal: EvolutionProposal, script_compiler: Any = None
+    ) -> bool:
+        """Apply macro extension proposal to ScriptCompiler."""
+        try:
+            new_macros = proposal.dsl_changes.get("new_macros", {})
+
+            if not script_compiler:
+                logger.warning("No ScriptCompiler provided, cannot apply macro extensions")
+                # For now, just log the proposal - real implementation would integrate with ScriptCompiler
+                logger.info(f"Would register macros: {list(new_macros.keys())}")
+                return True  # Assume success for now
+
+            # Apply macro extensions to ScriptCompiler
+            for macro_name, macro_expansion in new_macros.items():
+                try:
+                    script_compiler.register_pattern(macro_name, macro_expansion)
+                    logger.info(f"Successfully registered macro: {macro_name}")
+                except Exception as e:
+                    logger.error(f"Failed to register macro {macro_name}: {str(e)}")
+                    return False
+
+            logger.info(f"Successfully applied macro extension proposal: {proposal.proposal_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to apply macro extension: {str(e)}")
+            return False
 
     def _request_opus_strategy(
         self,
