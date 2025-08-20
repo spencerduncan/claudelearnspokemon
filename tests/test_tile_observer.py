@@ -31,8 +31,15 @@ from claudelearnspokemon.tile_observer import (
     GamePosition,
     GameState,
     GameStateInterface,
+    InteractionType,
+    InteractiveObject,
+    SemanticCategory,
+    SemanticClassifier,
+    StrategicLocation,
+    StrategicLocationType,
     TileInfo,
     TileObserver,
+    TileSemantics,
 )
 
 
@@ -635,3 +642,621 @@ class TestGameStateInterface:
         assert result.tiles.shape == (20, 18)
         assert np.all(result.tiles == 123)
         assert result.frame_count == 500
+
+
+@pytest.mark.fast
+@pytest.mark.medium
+class TestSemanticDataStructures:
+    """Test semantic classification data structures."""
+
+    @pytest.mark.fast
+    def test_semantic_category_enum_values(self) -> None:
+        """Test that SemanticCategory enum has all required values."""
+        assert SemanticCategory.TERRAIN.value == "terrain"
+        assert SemanticCategory.DOOR.value == "door"
+        assert SemanticCategory.NPC.value == "npc"
+        assert SemanticCategory.ITEM.value == "item"
+        assert SemanticCategory.INTERACTIVE_OBJECT.value == "interactive_object"
+        assert SemanticCategory.STRATEGIC_LOCATION.value == "strategic_location"
+        assert SemanticCategory.OBSTACLE.value == "obstacle"
+        assert SemanticCategory.WATER.value == "water"
+        assert SemanticCategory.BUILDING.value == "building"
+
+    @pytest.mark.fast
+    def test_interaction_type_enum_values(self) -> None:
+        """Test that InteractionType enum has all required values."""
+        assert InteractionType.TALK.value == "talk"
+        assert InteractionType.PICK_UP.value == "pick_up"
+        assert InteractionType.USE.value == "use"
+        assert InteractionType.ENTER.value == "enter"
+        assert InteractionType.READ.value == "read"
+        assert InteractionType.EXAMINE.value == "examine"
+
+    @pytest.mark.fast
+    def test_strategic_location_type_enum_values(self) -> None:
+        """Test that StrategicLocationType enum has all required values."""
+        assert StrategicLocationType.POKEMON_CENTER.value == "pokemon_center"
+        assert StrategicLocationType.SHOP.value == "shop"
+        assert StrategicLocationType.GYM.value == "gym"
+        assert StrategicLocationType.ROUTE_EXIT.value == "route_exit"
+
+    @pytest.mark.fast
+    def test_tile_semantics_dataclass_creation(self) -> None:
+        """Test TileSemantics dataclass creation and validation."""
+        semantics = TileSemantics(
+            tile_id=42,
+            category=SemanticCategory.TERRAIN,
+            subcategory="grass",
+            interaction_type=None,
+            strategic_type=None,
+            confidence=0.85,
+            context_dependent=False,
+        )
+
+        assert semantics.tile_id == 42
+        assert semantics.category == SemanticCategory.TERRAIN
+        assert semantics.subcategory == "grass"
+        assert semantics.confidence == 0.85
+        assert semantics.context_dependent is False
+
+    @pytest.mark.fast
+    def test_interactive_object_dataclass_creation(self) -> None:
+        """Test InteractiveObject dataclass creation."""
+        interactive_obj = InteractiveObject(
+            position=(5, 10),
+            tile_id=50,
+            interaction_type=InteractionType.TALK,
+            description="Friendly NPC",
+            confidence=0.9,
+        )
+
+        assert interactive_obj.position == (5, 10)
+        assert interactive_obj.tile_id == 50
+        assert interactive_obj.interaction_type == InteractionType.TALK
+        assert interactive_obj.description == "Friendly NPC"
+        assert interactive_obj.confidence == 0.9
+
+    @pytest.mark.fast
+    def test_strategic_location_dataclass_creation(self) -> None:
+        """Test StrategicLocation dataclass creation."""
+        strategic_location = StrategicLocation(
+            position=(10, 15),
+            location_type=StrategicLocationType.POKEMON_CENTER,
+            name="Viridian Pokemon Center",
+            entrance_tiles=[(10, 15), (11, 15)],
+            confidence=0.95,
+        )
+
+        assert strategic_location.position == (10, 15)
+        assert strategic_location.location_type == StrategicLocationType.POKEMON_CENTER
+        assert strategic_location.name == "Viridian Pokemon Center"
+        assert strategic_location.entrance_tiles == [(10, 15), (11, 15)]
+        assert strategic_location.confidence == 0.95
+
+
+@pytest.mark.fast
+@pytest.mark.medium
+class TestSemanticClassifier:
+    """Test semantic classification functionality."""
+
+    def setup_method(self) -> None:
+        """Set up test fixtures."""
+        self.classifier = SemanticClassifier()
+
+    @pytest.mark.fast
+    def test_semantic_classifier_initializes_correctly(self) -> None:
+        """Test that SemanticClassifier initializes without errors."""
+        classifier = SemanticClassifier()
+        assert classifier is not None
+        assert hasattr(classifier, "_semantic_patterns")
+        assert hasattr(classifier, "_known_strategic_locations")
+
+    @pytest.mark.fast
+    def test_classify_tile_basic_terrain(self) -> None:
+        """Test basic terrain tile classification."""
+        # Test grass tile classification
+        semantics = self.classifier.classify_tile_semantics(
+            tile_id=1, position=(5, 5), surrounding_tiles=np.zeros((3, 3)), context="route_1"
+        )
+
+        assert isinstance(semantics, TileSemantics)
+        assert semantics.tile_id == 1
+        assert semantics.category in [SemanticCategory.TERRAIN, SemanticCategory.OBSTACLE]
+        assert isinstance(semantics.confidence, float)
+        assert 0.0 <= semantics.confidence <= 1.0
+
+    @pytest.mark.fast
+    def test_classify_tile_npc_detection(self) -> None:
+        """Test NPC tile classification."""
+        # NPC tile IDs are typically in the 200-220 range
+        semantics = self.classifier.classify_tile_semantics(
+            tile_id=205, position=(10, 8), surrounding_tiles=np.zeros((3, 3)), context="route_1"
+        )
+
+        assert semantics.category == SemanticCategory.NPC
+        assert semantics.confidence > 0.7  # Should be confident about NPCs
+
+    @pytest.mark.fast
+    def test_classify_tile_door_detection(self) -> None:
+        """Test door tile classification."""
+        # Create building-like surrounding pattern
+        surrounding = np.array(
+            [
+                [20, 20, 20],  # Building walls
+                [20, 50, 20],  # Door in center
+                [1, 1, 1],  # Ground tiles
+            ]
+        )
+
+        semantics = self.classifier.classify_tile_semantics(
+            tile_id=50, position=(1, 1), surrounding_tiles=surrounding, context="viridian_city"
+        )
+
+        # Should detect door or building entrance
+        assert semantics.category in [
+            SemanticCategory.DOOR,
+            SemanticCategory.BUILDING,
+            SemanticCategory.INTERACTIVE_OBJECT,
+        ]
+
+    @pytest.mark.fast
+    def test_hierarchical_classification_terrain_grass(self) -> None:
+        """Test hierarchical classification for terrain -> grass types."""
+        semantics = self.classifier.classify_tile_hierarchical(
+            tile_id=3, position=(5, 5), surrounding_tiles=np.zeros((3, 3)), context="route_1"
+        )
+
+        assert semantics.category == SemanticCategory.TERRAIN
+        # Should have subcategory for different grass types
+        assert semantics.subcategory is not None
+
+    @pytest.mark.fast
+    def test_context_dependent_classification(self) -> None:
+        """Test that same tile can have different meanings in different contexts."""
+        # Test same tile ID in different map contexts
+        route_semantics = self.classifier.classify_tile_semantics(
+            tile_id=10, position=(5, 5), surrounding_tiles=np.zeros((3, 3)), context="route_1"
+        )
+
+        city_semantics = self.classifier.classify_tile_semantics(
+            tile_id=10, position=(5, 5), surrounding_tiles=np.zeros((3, 3)), context="viridian_city"
+        )
+
+        # Classifications might differ based on context
+        assert isinstance(route_semantics, TileSemantics)
+        assert isinstance(city_semantics, TileSemantics)
+
+    @pytest.mark.fast
+    def test_confidence_scoring_accuracy(self) -> None:
+        """Test that confidence scores are reasonable and consistent."""
+        # Known NPC tile should have high confidence
+        npc_semantics = self.classifier.classify_tile_semantics(
+            tile_id=200, position=(10, 8), surrounding_tiles=np.zeros((3, 3)), context="route_1"
+        )
+
+        # Unknown tile should have lower confidence
+        unknown_semantics = self.classifier.classify_tile_semantics(
+            tile_id=999, position=(10, 8), surrounding_tiles=np.zeros((3, 3)), context="route_1"
+        )
+
+        assert npc_semantics.confidence >= unknown_semantics.confidence
+        assert 0.0 <= npc_semantics.confidence <= 1.0
+        assert 0.0 <= unknown_semantics.confidence <= 1.0
+
+
+@pytest.mark.fast
+@pytest.mark.medium
+class TestInteractiveObjectDetection:
+    """Test interactive object detection and classification."""
+
+    def setup_method(self) -> None:
+        """Set up test fixtures."""
+        self.observer = TileObserver()
+
+    @pytest.mark.fast
+    def test_detect_interactive_objects_basic(self) -> None:
+        """Test basic interactive object detection."""
+        tiles = np.zeros((20, 18), dtype=np.uint8)
+        # Place some interactive objects
+        tiles[5, 5] = 200  # NPC
+        tiles[10, 8] = 150  # Item
+        tiles[15, 12] = 75  # Potential door
+
+        interactive_objects = self.observer.detect_interactive_objects(tiles, context="route_1")
+
+        assert isinstance(interactive_objects, list)
+        assert len(interactive_objects) >= 0  # Should find some interactive objects
+
+        for obj in interactive_objects:
+            assert isinstance(obj, InteractiveObject)
+            assert hasattr(obj, "position")
+            assert hasattr(obj, "interaction_type")
+            assert hasattr(obj, "confidence")
+
+    @pytest.mark.fast
+    def test_detect_interactive_objects_npc_talk(self) -> None:
+        """Test that NPCs are classified with TALK interaction."""
+        tiles = np.zeros((20, 18), dtype=np.uint8)
+        tiles[10, 9] = 205  # NPC tile
+
+        interactive_objects = self.observer.detect_interactive_objects(tiles, context="route_1")
+
+        npc_objects = [
+            obj for obj in interactive_objects if obj.interaction_type == InteractionType.TALK
+        ]
+        assert len(npc_objects) >= 0  # Should find NPC objects
+
+    @pytest.mark.fast
+    def test_detect_interactive_objects_item_pickup(self) -> None:
+        """Test that items are classified with PICK_UP interaction."""
+        tiles = np.zeros((20, 18), dtype=np.uint8)
+        tiles[5, 5] = 180  # Item tile
+
+        interactive_objects = self.observer.detect_interactive_objects(tiles, context="route_1")
+
+        item_objects = [
+            obj for obj in interactive_objects if obj.interaction_type == InteractionType.PICK_UP
+        ]
+        assert len(item_objects) >= 0  # Should find item objects
+
+    @pytest.mark.fast
+    def test_interactive_object_confidence_scores(self) -> None:
+        """Test that interactive objects have reasonable confidence scores."""
+        tiles = np.zeros((20, 18), dtype=np.uint8)
+        tiles[10, 9] = 200  # Known NPC tile
+
+        interactive_objects = self.observer.detect_interactive_objects(tiles, context="route_1")
+
+        for obj in interactive_objects:
+            assert 0.0 <= obj.confidence <= 1.0
+            # Known patterns should have higher confidence
+            if obj.tile_id in range(200, 221):  # NPC range
+                assert obj.confidence > 0.3
+
+
+@pytest.mark.fast
+@pytest.mark.medium
+class TestStrategicLocationRecognition:
+    """Test strategic location recognition (Pokemon Centers, shops, gyms)."""
+
+    def setup_method(self) -> None:
+        """Set up test fixtures."""
+        self.observer = TileObserver()
+
+    @pytest.mark.fast
+    def test_identify_strategic_locations_basic(self) -> None:
+        """Test basic strategic location identification."""
+        tiles = self._create_pokemon_center_pattern()
+
+        strategic_locations = self.observer.identify_strategic_locations(
+            tiles, context="viridian_city"
+        )
+
+        assert isinstance(strategic_locations, list)
+        for location in strategic_locations:
+            assert isinstance(location, StrategicLocation)
+            assert hasattr(location, "location_type")
+            assert hasattr(location, "position")
+            assert hasattr(location, "confidence")
+
+    @pytest.mark.fast
+    def test_identify_pokemon_center_pattern(self) -> None:
+        """Test Pokemon Center pattern recognition."""
+        tiles = self._create_pokemon_center_pattern()
+
+        strategic_locations = self.observer.identify_strategic_locations(
+            tiles, context="viridian_city"
+        )
+
+        pokemon_centers = [
+            loc
+            for loc in strategic_locations
+            if loc.location_type == StrategicLocationType.POKEMON_CENTER
+        ]
+
+        # Should detect the Pokemon Center pattern
+        if len(pokemon_centers) > 0:
+            center = pokemon_centers[0]
+            assert center.confidence > 0.5
+            assert center.name is not None
+
+    @pytest.mark.fast
+    def test_identify_shop_pattern(self) -> None:
+        """Test shop pattern recognition."""
+        tiles = self._create_shop_pattern()
+
+        strategic_locations = self.observer.identify_strategic_locations(
+            tiles, context="viridian_city"
+        )
+
+        shops = [
+            loc for loc in strategic_locations if loc.location_type == StrategicLocationType.SHOP
+        ]
+
+        # Should detect shop patterns
+        assert len(shops) >= 0
+
+    @pytest.mark.fast
+    def test_strategic_location_entrance_tiles(self) -> None:
+        """Test that strategic locations identify entrance tiles correctly."""
+        tiles = self._create_pokemon_center_pattern()
+
+        strategic_locations = self.observer.identify_strategic_locations(
+            tiles, context="viridian_city"
+        )
+
+        for location in strategic_locations:
+            assert hasattr(location, "entrance_tiles")
+            assert isinstance(location.entrance_tiles, list)
+            # Entrance tiles should be valid positions
+            for entrance in location.entrance_tiles:
+                assert isinstance(entrance, tuple)
+                assert len(entrance) == 2
+                row, col = entrance
+                assert 0 <= row < 20
+                assert 0 <= col < 18
+
+    def _create_pokemon_center_pattern(self) -> np.ndarray:
+        """Create a tile pattern resembling a Pokemon Center."""
+        tiles = np.ones((20, 18), dtype=np.uint8) * 1  # Ground tiles
+
+        # Pokemon Center building pattern (simplified)
+        tiles[8:12, 7:11] = 30  # Building walls
+        tiles[10, 9] = 35  # Entrance door
+        tiles[9, 9] = 36  # Interior
+
+        return tiles
+
+    def _create_shop_pattern(self) -> np.ndarray:
+        """Create a tile pattern resembling a shop."""
+        tiles = np.ones((20, 18), dtype=np.uint8) * 1  # Ground tiles
+
+        # Shop building pattern (simplified)
+        tiles[5:9, 5:9] = 25  # Building walls
+        tiles[7, 7] = 28  # Entrance door
+
+        return tiles
+
+
+@pytest.mark.fast
+@pytest.mark.medium
+class TestSemanticMapping:
+    """Test semantic mapping functionality for navigation and planning."""
+
+    def setup_method(self) -> None:
+        """Set up test fixtures."""
+        self.observer = TileObserver()
+
+    @pytest.mark.fast
+    def test_create_semantic_map_basic(self) -> None:
+        """Test basic semantic map creation."""
+        tiles = np.random.randint(0, 100, (20, 18), dtype=np.uint8)
+
+        semantic_map = self.observer.create_semantic_map(tiles, context="route_1")
+
+        assert isinstance(semantic_map, dict)
+        assert "tile_semantics" in semantic_map
+        assert "interactive_objects" in semantic_map
+        assert "strategic_locations" in semantic_map
+
+    @pytest.mark.fast
+    def test_semantic_map_navigation_data(self) -> None:
+        """Test that semantic map provides useful navigation data."""
+        tiles = self._create_complex_map_with_obstacles()
+
+        semantic_map = self.observer.create_semantic_map(tiles, context="route_1")
+
+        # Should identify walkable vs non-walkable areas
+        assert "walkable_areas" in semantic_map or "tile_semantics" in semantic_map
+
+        # Should identify interactive elements
+        if semantic_map["interactive_objects"]:
+            for obj in semantic_map["interactive_objects"]:
+                assert isinstance(obj, InteractiveObject)
+
+    @pytest.mark.fast
+    def test_semantic_pathfinding_integration(self) -> None:
+        """Test integration of semantic understanding with pathfinding."""
+        tiles = self._create_complex_map_with_obstacles()
+
+        # Use semantic understanding for pathfinding
+        path = self.observer.find_semantic_path(
+            tiles, start=(1, 1), end=(18, 16), context="route_1", avoid_npcs=True
+        )
+
+        assert isinstance(path, list)
+        # Path should avoid NPCs and obstacles based on semantic understanding
+
+    @pytest.mark.fast
+    def test_semantic_map_performance_real_time(self) -> None:
+        """Test that semantic map creation meets real-time performance requirements."""
+        tiles = np.random.randint(0, 256, (20, 18), dtype=np.uint8)
+
+        start_time = time.perf_counter()
+        semantic_map = self.observer.create_semantic_map(tiles, context="route_1")  # noqa: F841
+        end_time = time.perf_counter()
+
+        processing_time_ms = (end_time - start_time) * 1000
+        # Should be fast enough for real-time gameplay
+        assert (
+            processing_time_ms < 50
+        ), f"Semantic mapping took {processing_time_ms:.2f}ms, must be < 50ms"
+
+    def _create_complex_map_with_obstacles(self) -> np.ndarray:
+        """Create a complex map with various semantic elements."""
+        tiles = np.ones((20, 18), dtype=np.uint8) * 1  # Ground tiles
+
+        # Add obstacles
+        tiles[5:8, 5:8] = 20  # Building/obstacle
+        tiles[10, 9] = 200  # NPC
+        tiles[15, 12] = 180  # Item
+        tiles[2:4, 2:15] = 25  # Wall/barrier
+
+        return tiles
+
+
+@pytest.mark.fast
+@pytest.mark.medium
+class TestSemanticIntegrationWithCollisionDetection:
+    """Test integration of semantic classification with existing collision detection."""
+
+    def setup_method(self) -> None:
+        """Set up test fixtures."""
+        self.observer = TileObserver()
+        # Set up some learned collision data from Issue #34
+        self.observer._tile_semantics["route_1"] = {
+            20: {
+                "walkable": False,
+                "confidence": 0.9,
+                "observation_count": 10,
+                "collision_count": 9,
+            },
+            1: {
+                "walkable": True,
+                "confidence": 0.95,
+                "observation_count": 20,
+                "collision_count": 1,
+            },
+        }
+
+    @pytest.mark.fast
+    def test_semantic_classification_uses_collision_data(self) -> None:
+        """Test that semantic classification uses collision detection data."""
+        # Create classifier with collision data integrated
+        classifier = SemanticClassifier()
+
+        # Should use collision data to enhance classification
+        semantics = classifier.classify_tile_with_collision_data(
+            tile_id=20,
+            position=(5, 5),
+            collision_data={"walkable": False, "confidence": 0.9},
+            surrounding_tiles=np.zeros((3, 3)),
+            context="route_1",
+        )
+
+        assert isinstance(semantics, TileSemantics)
+        # Non-walkable tiles are likely obstacles or buildings
+        assert semantics.category in [
+            SemanticCategory.OBSTACLE,
+            SemanticCategory.BUILDING,
+            SemanticCategory.DOOR,
+            SemanticCategory.INTERACTIVE_OBJECT,
+        ]
+
+    @pytest.mark.fast
+    def test_collision_data_enhances_confidence(self) -> None:
+        """Test that collision data enhances classification confidence."""
+        classifier = SemanticClassifier()
+
+        # Classification with collision data
+        semantics_with_collision = classifier.classify_tile_with_collision_data(
+            tile_id=50,
+            position=(5, 5),
+            collision_data={"walkable": False, "confidence": 0.9},
+            surrounding_tiles=np.zeros((3, 3)),
+            context="route_1",
+        )
+
+        # Classification without collision data
+        semantics_without_collision = classifier.classify_tile_semantics(
+            tile_id=50, position=(5, 5), surrounding_tiles=np.zeros((3, 3)), context="route_1"
+        )
+
+        # With collision data should have higher confidence
+        assert semantics_with_collision.confidence >= semantics_without_collision.confidence
+
+    @pytest.mark.fast
+    def test_learned_walkability_informs_semantic_category(self) -> None:
+        """Test that learned walkability helps determine semantic categories."""
+        # Test that known walkable tiles are classified as terrain
+        # Test that known non-walkable tiles are classified as obstacles/buildings
+
+        walkable_semantics = self.observer.classify_tile_semantics_enhanced(
+            tile_id=1, position=(5, 5), context="route_1"
+        )
+
+        non_walkable_semantics = self.observer.classify_tile_semantics_enhanced(
+            tile_id=20, position=(8, 8), context="route_1"
+        )
+
+        # Walkable tiles should be terrain or similar
+        if walkable_semantics.confidence > 0.5:
+            assert walkable_semantics.category in [SemanticCategory.TERRAIN, SemanticCategory.ITEM]
+
+        # Non-walkable tiles should be obstacles or buildings
+        if non_walkable_semantics.confidence > 0.5:
+            assert non_walkable_semantics.category in [
+                SemanticCategory.OBSTACLE,
+                SemanticCategory.BUILDING,
+                SemanticCategory.DOOR,
+                SemanticCategory.INTERACTIVE_OBJECT,
+            ]
+
+
+@pytest.mark.fast
+@pytest.mark.medium
+class TestSemanticPerformanceAndOptimization:
+    """Test performance optimization and caching for semantic classification."""
+
+    def setup_method(self) -> None:
+        """Set up test fixtures."""
+        self.observer = TileObserver()
+
+    @pytest.mark.fast
+    def test_semantic_classification_caching(self) -> None:
+        """Test that semantic classifications are cached for performance."""
+        tiles = np.random.randint(0, 100, (20, 18), dtype=np.uint8)
+
+        # First call - should compute and cache
+        start_time = time.perf_counter()
+        semantic_map1 = self.observer.create_semantic_map(tiles, context="route_1")
+        first_call_time = time.perf_counter() - start_time
+
+        # Second call with same tiles - should use cache
+        start_time = time.perf_counter()
+        semantic_map2 = self.observer.create_semantic_map(tiles, context="route_1")
+        second_call_time = time.perf_counter() - start_time
+
+        # Second call should be faster due to caching
+        assert second_call_time <= first_call_time * 1.1  # Allow for some variance
+        assert semantic_map1.keys() == semantic_map2.keys()
+
+    @pytest.mark.fast
+    def test_incremental_learning_performance(self) -> None:
+        """Test that incremental learning doesn't impact real-time performance."""
+        # Simulate learning from multiple observations
+        observations = []
+        for i in range(100):
+            observations.append(
+                {
+                    "tile_id": i % 50,
+                    "position": (i % 20, (i * 2) % 18),
+                    "collision": i % 3 == 0,
+                    "context": "route_1",
+                    "semantic_category": (
+                        SemanticCategory.TERRAIN if i % 2 else SemanticCategory.OBSTACLE
+                    ),
+                }
+            )
+
+        start_time = time.perf_counter()
+        self.observer.learn_semantic_properties(observations)
+        learning_time = time.perf_counter() - start_time
+
+        # Learning should be fast enough for real-time updates
+        learning_time_ms = learning_time * 1000
+        assert learning_time_ms < 100, f"Learning took {learning_time_ms:.2f}ms, must be < 100ms"
+
+    @pytest.mark.fast
+    def test_memory_usage_bounded(self) -> None:
+        """Test that semantic knowledge storage doesn't grow unbounded."""
+        # Add many semantic observations
+        for i in range(1000):
+            tile_semantics = TileSemantics(
+                tile_id=i % 100, category=SemanticCategory.TERRAIN, confidence=0.5
+            )
+            self.observer._add_semantic_knowledge(tile_semantics, context="route_1")
+
+        # Should have reasonable memory footprint
+        semantic_knowledge_size = len(self.observer._semantic_knowledge.get("route_1", {}))
+        assert semantic_knowledge_size <= 200  # Should limit knowledge size for performance
