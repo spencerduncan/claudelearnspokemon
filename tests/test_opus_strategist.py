@@ -18,6 +18,7 @@ Test Categories:
 import time
 import unittest
 from collections import namedtuple
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -500,6 +501,283 @@ class TestPerformanceTargets(unittest.TestCase):
             response_time * 1000,
             500,
             f"Strategic response took {response_time*1000:.1f}ms, target is <500ms",
+        )
+
+
+@pytest.mark.fast
+class TestOpusStrategistContextSummarization(unittest.TestCase):
+    """Test context summarization functionality for conversation continuity."""
+
+    def setUp(self):
+        """Set up test environment with mocked ClaudeCodeManager."""
+        # Mock ClaudeCodeManager with strategic process
+        self.mock_manager = Mock()
+        self.mock_strategic_process = Mock()
+        self.mock_manager.get_strategic_process.return_value = self.mock_strategic_process
+
+        # Import and create strategist
+        from claudelearnspokemon.opus_strategist import OpusStrategist, SummarizationStrategy
+
+        self.strategist = OpusStrategist(self.mock_manager)
+        self.SummarizationStrategy = SummarizationStrategy
+
+        # Create test conversation history
+        self.test_conversation = self._create_test_conversation_history()
+
+    def _create_test_conversation_history(self) -> list[dict[str, Any]]:
+        """Create realistic conversation history for testing."""
+        return [
+            {
+                "role": "user",
+                "content": "I need a strategic approach for the Pokemon Red speedrun. Current objective is to reach Pewter City efficiently.",
+                "timestamp": time.time() - 3600,
+            },
+            {
+                "role": "assistant",
+                "content": "Strategic plan: Focus on route optimization and menu management. Key pattern discovered: A+START sequence reduces menu time by 15%. Critical objective: minimize wild encounters on Route 1.",
+                "timestamp": time.time() - 3500,
+            },
+            {
+                "role": "user",
+                "content": "The menu optimization pattern works perfectly! Found another effective sequence: B+A+RIGHT for inventory navigation. Should we test parallel approaches?",
+                "timestamp": time.time() - 3400,
+            },
+            {
+                "role": "assistant",
+                "content": "Excellent discovery! The B+A+RIGHT pattern shows strong tactical value. Strategic insight: parallel execution can test route variations simultaneously. Goal is to identify fastest Viridian Forest path.",
+                "timestamp": time.time() - 3300,
+            },
+            {
+                "role": "user",
+                "content": "Implemented parallel testing and discovered critical speedrun optimization: diagonal movement saves 2 seconds per screen transition. This is essential for record attempts.",
+                "timestamp": time.time() - 3200,
+            },
+        ]
+
+    def test_opus_strategist_maintains_context_continuity_across_messages(self):
+        """
+        Test core requirement: maintain strategic context continuity across conversation restarts.
+
+        This validates the key test case from the design document that ensures
+        summarization preserves critical discoveries and strategic direction.
+        """
+        # Test different summarization strategies
+        for strategy in [
+            self.SummarizationStrategy.COMPREHENSIVE,
+            self.SummarizationStrategy.STRATEGIC,
+            self.SummarizationStrategy.TACTICAL,
+        ]:
+            with self.subTest(strategy=strategy):
+                # Execute summarization
+                summary = self.strategist.summarize_learnings(
+                    self.test_conversation, max_summary_length=800, strategy=strategy
+                )
+
+                # Validate summary structure
+                self.assertIsNotNone(summary)
+                self.assertEqual(summary.strategy, strategy)
+                self.assertEqual(summary.total_messages, len(self.test_conversation))
+
+                # Validate context continuity preservation
+                self.assertTrue(len(summary.compressed_content) > 0)
+                self.assertTrue(summary.compression_ratio > 0)
+
+                # Ensure critical information is preserved based on strategy
+                if strategy == self.SummarizationStrategy.COMPREHENSIVE:
+                    self.assertTrue(len(summary.preserved_insights) > 0)
+                    self.assertTrue(len(summary.critical_discoveries) > 0)
+                    self.assertTrue(len(summary.current_objectives) > 0)
+
+                elif strategy == self.SummarizationStrategy.STRATEGIC:
+                    self.assertTrue(len(summary.preserved_insights) > 0)
+                    # Strategic strategy focuses on high-level insights
+
+                elif strategy == self.SummarizationStrategy.TACTICAL:
+                    self.assertTrue(len(summary.successful_patterns) > 0)
+                    # Tactical strategy focuses on patterns and discoveries
+
+    def test_summarization_preserves_critical_discoveries(self):
+        """Test that summarization preserves critical strategic discoveries."""
+        summary = self.strategist.summarize_learnings(
+            self.test_conversation, strategy=self.SummarizationStrategy.COMPREHENSIVE
+        )
+
+        # Validate critical discoveries are captured
+        self.assertGreater(len(summary.critical_discoveries), 0)
+
+        # Check that specific discovered patterns are preserved
+        discoveries_text = " ".join(summary.critical_discoveries)
+        self.assertIn("menu", discoveries_text.lower())
+        self.assertIn("optimization", discoveries_text.lower())
+
+    def test_summarization_preserves_strategic_insights(self):
+        """Test that summarization preserves strategic insights and planning."""
+        summary = self.strategist.summarize_learnings(
+            self.test_conversation, strategy=self.SummarizationStrategy.STRATEGIC
+        )
+
+        # Validate strategic insights are captured
+        self.assertGreater(len(summary.preserved_insights), 0)
+
+        # Check that strategic content is preserved
+        insights_text = " ".join(summary.preserved_insights)
+        self.assertIn("strategic", insights_text.lower())
+
+    def test_summarization_preserves_current_objectives(self):
+        """Test that summarization preserves current objectives and goals."""
+        summary = self.strategist.summarize_learnings(
+            self.test_conversation, strategy=self.SummarizationStrategy.COMPREHENSIVE
+        )
+
+        # Validate objectives are captured
+        self.assertGreater(len(summary.current_objectives), 0)
+
+        # Check that objectives are preserved
+        objectives_text = " ".join(summary.current_objectives)
+        self.assertTrue(
+            any(
+                keyword in objectives_text.lower()
+                for keyword in ["objective", "goal", "reach", "pewter"]
+            )
+        )
+
+    def test_summarization_performance_target(self):
+        """Test that summarization meets <100ms performance target."""
+        # Create larger conversation for performance testing
+        large_conversation = []
+        for i in range(50):
+            large_conversation.extend(
+                [
+                    {
+                        "role": "user",
+                        "content": f"Message {i}: Strategic question about route optimization and pattern discovery in speedrun context.",
+                        "timestamp": time.time() - i,
+                    },
+                    {
+                        "role": "assistant",
+                        "content": f"Response {i}: Strategic analysis with discovered patterns and tactical insights for performance optimization. Key finding: pattern_{i} shows promise for speedrun improvement.",
+                        "timestamp": time.time() - i + 0.5,
+                    },
+                ]
+            )
+
+        # Measure summarization performance
+        start_time = time.time()
+        summary = self.strategist.summarize_learnings(
+            large_conversation, strategy=self.SummarizationStrategy.COMPREHENSIVE
+        )
+        processing_time = time.time() - start_time
+
+        # Validate performance target: <100ms
+        self.assertLess(
+            processing_time * 1000,
+            100,
+            f"Summarization took {processing_time*1000:.2f}ms, target is <100ms",
+        )
+
+        # Validate processing was successful
+        self.assertIsNotNone(summary)
+        self.assertGreater(summary.compression_ratio, 0.5)  # Significant compression
+
+    def test_summarization_size_constraints(self):
+        """Test that summarization respects configurable size constraints."""
+        max_lengths = [200, 500, 1000, 1500]
+
+        for max_length in max_lengths:
+            with self.subTest(max_length=max_length):
+                summary = self.strategist.summarize_learnings(
+                    self.test_conversation,
+                    max_summary_length=max_length,
+                    strategy=self.SummarizationStrategy.COMPREHENSIVE,
+                )
+
+                # Validate size constraint is respected
+                self.assertLessEqual(
+                    len(summary.compressed_content),
+                    max_length,
+                    f"Summary length {len(summary.compressed_content)} exceeds max {max_length}",
+                )
+
+                # Validate content is still meaningful
+                self.assertGreater(len(summary.compressed_content), 0)
+
+    def test_different_summarization_strategies(self):
+        """Test that different strategies produce appropriate focus."""
+        strategies_results = {}
+
+        for strategy in self.SummarizationStrategy:
+            summary = self.strategist.summarize_learnings(self.test_conversation, strategy=strategy)
+            strategies_results[strategy] = summary
+
+        # Validate strategy-specific behavior
+        comprehensive = strategies_results[self.SummarizationStrategy.COMPREHENSIVE]
+        strategic = strategies_results[self.SummarizationStrategy.STRATEGIC]
+        tactical = strategies_results[self.SummarizationStrategy.TACTICAL]
+        minimal = strategies_results[self.SummarizationStrategy.MINIMAL]
+
+        # Comprehensive should have the most preserved information
+        self.assertGreaterEqual(
+            len(comprehensive.preserved_insights) + len(comprehensive.critical_discoveries),
+            len(strategic.preserved_insights) + len(strategic.critical_discoveries),
+        )
+
+        # Strategic should focus on strategic insights
+        self.assertGreater(len(strategic.preserved_insights), 0)
+
+        # Tactical should focus on patterns
+        self.assertGreater(len(tactical.successful_patterns), 0)
+
+        # Minimal should have the most aggressive compression
+        self.assertLessEqual(len(minimal.compressed_content), len(comprehensive.compressed_content))
+
+    def test_summarization_with_empty_conversation(self):
+        """Test summarization handles edge case of empty conversation history."""
+        empty_conversation = []
+
+        summary = self.strategist.summarize_learnings(
+            empty_conversation, strategy=self.SummarizationStrategy.COMPREHENSIVE
+        )
+
+        # Validate graceful handling of empty input
+        self.assertEqual(summary.total_messages, 0)
+        self.assertGreater(len(summary.compressed_content), 0)  # Should have header info
+        self.assertEqual(len(summary.preserved_insights), 0)
+        self.assertEqual(len(summary.critical_discoveries), 0)
+
+    def test_summary_immutability(self):
+        """Test that ConversationSummary objects are truly immutable."""
+        summary = self.strategist.summarize_learnings(
+            self.test_conversation, strategy=self.SummarizationStrategy.COMPREHENSIVE
+        )
+
+        # Attempt to modify frozen dataclass should raise AttributeError
+        with self.assertRaises(AttributeError):
+            summary.total_messages = 999  # type: ignore
+
+        with self.assertRaises(AttributeError):
+            summary.compressed_content = "modified"  # type: ignore
+
+    def test_summary_serialization(self):
+        """Test that ConversationSummary can be serialized and deserialized."""
+        from claudelearnspokemon.opus_strategist import ConversationSummary
+
+        original_summary = self.strategist.summarize_learnings(
+            self.test_conversation, strategy=self.SummarizationStrategy.COMPREHENSIVE
+        )
+
+        # Test to_dict conversion
+        summary_dict = original_summary.to_dict()
+        self.assertIsInstance(summary_dict, dict)
+        self.assertEqual(summary_dict["total_messages"], original_summary.total_messages)
+        self.assertEqual(summary_dict["strategy"], original_summary.strategy.value)
+
+        # Test from_dict reconstruction
+        reconstructed_summary = ConversationSummary.from_dict(summary_dict)
+        self.assertEqual(reconstructed_summary.summary_id, original_summary.summary_id)
+        self.assertEqual(reconstructed_summary.strategy, original_summary.strategy)
+        self.assertEqual(reconstructed_summary.total_messages, original_summary.total_messages)
+        self.assertEqual(
+            reconstructed_summary.compressed_content, original_summary.compressed_content
         )
 
 

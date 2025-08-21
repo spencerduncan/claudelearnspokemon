@@ -11,7 +11,7 @@ import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from .circuit_breaker import CircuitBreaker, CircuitConfig
 from .claude_code_manager import ClaudeCodeManager
@@ -38,6 +38,15 @@ class StrategyPriority(Enum):
     CRITICAL = 4
 
 
+class SummarizationStrategy(Enum):
+    """Strategy types for conversation context summarization."""
+
+    COMPREHENSIVE = "comprehensive"  # Maximum detail preservation
+    STRATEGIC = "strategic"  # Focus on strategic insights only
+    TACTICAL = "tactical"  # Focus on tactical patterns only
+    MINIMAL = "minimal"  # Aggressive compression for space constraints
+
+
 @dataclass
 class StrategyRequest:
     """Structured request for strategic planning."""
@@ -47,6 +56,70 @@ class StrategyRequest:
     priority: StrategyPriority = StrategyPriority.NORMAL
     timeout_override: float | None = None
     cache_ttl_override: float | None = None
+
+
+@dataclass(frozen=True)
+class ConversationSummary:
+    """Immutable conversation summary for context compression."""
+
+    summary_id: str
+    strategy: SummarizationStrategy
+    total_messages: int
+    preserved_insights: list[str]
+    critical_discoveries: list[str]
+    current_objectives: list[str]
+    successful_patterns: list[str]
+    compressed_content: str
+    compression_ratio: float
+    timestamp: float
+    metadata: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert summary to dictionary for serialization."""
+        return {
+            "summary_id": self.summary_id,
+            "strategy": self.strategy.value,
+            "total_messages": self.total_messages,
+            "preserved_insights": self.preserved_insights,
+            "critical_discoveries": self.critical_discoveries,
+            "current_objectives": self.current_objectives,
+            "successful_patterns": self.successful_patterns,
+            "compressed_content": self.compressed_content,
+            "compression_ratio": self.compression_ratio,
+            "timestamp": self.timestamp,
+            "metadata": self.metadata,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ConversationSummary":
+        """Create summary from dictionary."""
+        return cls(
+            summary_id=data["summary_id"],
+            strategy=SummarizationStrategy(data["strategy"]),
+            total_messages=data["total_messages"],
+            preserved_insights=data["preserved_insights"],
+            critical_discoveries=data["critical_discoveries"],
+            current_objectives=data["current_objectives"],
+            successful_patterns=data["successful_patterns"],
+            compressed_content=data["compressed_content"],
+            compression_ratio=data["compression_ratio"],
+            timestamp=data["timestamp"],
+            metadata=data["metadata"],
+        )
+
+
+@runtime_checkable
+class SummarizationProvider(Protocol):
+    """Protocol for conversation summarization providers."""
+
+    def summarize_learnings(
+        self,
+        conversation_history: list[dict[str, Any]],
+        max_summary_length: int = 1000,
+        strategy: SummarizationStrategy = SummarizationStrategy.COMPREHENSIVE,
+    ) -> ConversationSummary:
+        """Create comprehensive summary preserving critical strategic discoveries."""
+        ...
 
 
 class OpusStrategist:
@@ -257,6 +330,86 @@ class OpusStrategist:
 
         return metrics
 
+    def summarize_learnings(
+        self,
+        conversation_history: list[dict[str, Any]],
+        max_summary_length: int = 1000,
+        strategy: SummarizationStrategy = SummarizationStrategy.COMPREHENSIVE,
+    ) -> ConversationSummary:
+        """
+        Create comprehensive summary preserving critical strategic discoveries.
+
+        Analyzes conversation history to extract and preserve essential context
+        for conversation continuity across restarts. Applies SOLID principles
+        with strategy pattern for different compression approaches.
+
+        Args:
+            conversation_history: List of conversation messages with metadata
+            max_summary_length: Maximum length of compressed content
+            strategy: Summarization strategy to apply
+
+        Returns:
+            ConversationSummary with preserved context for continuity
+
+        Raises:
+            OpusStrategistError: On summarization failures
+        """
+        start_time = time.time()
+
+        try:
+            # Generate unique summary ID
+            summary_id = self._generate_summary_id(conversation_history, strategy)
+
+            # Extract critical information based on strategy
+            extracted_info = self._extract_critical_information(conversation_history, strategy)
+
+            # Compress content while preserving essential context
+            compressed_content = self._compress_conversation_content(
+                conversation_history, extracted_info, max_summary_length, strategy
+            )
+
+            # Calculate compression metrics
+            original_length = self._calculate_conversation_length(conversation_history)
+            compression_ratio = 1 - (len(compressed_content) / max(original_length, 1))
+
+            # Create immutable summary
+            summary = ConversationSummary(
+                summary_id=summary_id,
+                strategy=strategy,
+                total_messages=len(conversation_history),
+                preserved_insights=extracted_info["strategic_insights"],
+                critical_discoveries=extracted_info["discoveries"],
+                current_objectives=extracted_info["objectives"],
+                successful_patterns=extracted_info["patterns"],
+                compressed_content=compressed_content,
+                compression_ratio=compression_ratio,
+                timestamp=time.time(),
+                metadata={
+                    "processing_time_ms": (time.time() - start_time) * 1000,
+                    "original_length": original_length,
+                    "strategy_applied": strategy.value,
+                    "compression_effective": compression_ratio > 0.5,
+                },
+            )
+
+            # Validate summary completeness
+            self._validate_summary_completeness(summary, extracted_info)
+
+            # Record metrics
+            processing_time = (time.time() - start_time) * 1000
+            self._record_summarization_metrics(processing_time, compression_ratio)
+
+            logger.info(
+                f"Successfully created {strategy.value} summary "
+                f"with {compression_ratio:.2%} compression in {processing_time:.2f}ms"
+            )
+
+            return summary
+
+        except Exception as e:
+            logger.error(f"Failed to summarize conversation history: {str(e)}")
+            raise OpusStrategistError(f"Summarization failed: {str(e)}") from e
+
     def _request_opus_strategy(
         self,
         game_state: dict[str, Any],
@@ -409,6 +562,301 @@ class OpusStrategist:
             if response_time_ms > self.metrics["max_response_time_ms"]:
                 self.metrics["max_response_time_ms"] = response_time_ms
 
+    # Context Summarization Private Methods - Clean Code Architecture
+
+    def _generate_summary_id(
+        self, conversation_history: list[dict[str, Any]], strategy: SummarizationStrategy
+    ) -> str:
+        """Generate unique identifier for conversation summary."""
+        import hashlib
+
+        # Create deterministic hash based on content and strategy
+        content_hash = hashlib.sha256()
+        content_hash.update(f"{len(conversation_history)}{strategy.value}".encode())
+        content_hash.update(str(time.time()).encode())
+
+        return f"summary_{content_hash.hexdigest()[:12]}"
+
+    def _extract_critical_information(
+        self, conversation_history: list[dict[str, Any]], strategy: SummarizationStrategy
+    ) -> dict[str, list[str]]:
+        """Extract critical information based on summarization strategy."""
+        extracted: dict[str, list[str]] = {
+            "strategic_insights": [],
+            "discoveries": [],
+            "objectives": [],
+            "patterns": [],
+        }
+
+        # Apply strategy-specific extraction patterns
+        for message in conversation_history:
+            content = message.get("content", "")
+            role = message.get("role", "")
+
+            if strategy == SummarizationStrategy.COMPREHENSIVE:
+                extracted = self._extract_comprehensive_info(content, role, extracted)
+            elif strategy == SummarizationStrategy.STRATEGIC:
+                extracted = self._extract_strategic_info(content, role, extracted)
+            elif strategy == SummarizationStrategy.TACTICAL:
+                extracted = self._extract_tactical_info(content, role, extracted)
+            elif strategy == SummarizationStrategy.MINIMAL:
+                extracted = self._extract_minimal_info(content, role, extracted)
+
+        # Remove duplicates while preserving order
+        for key in extracted:
+            extracted[key] = self._remove_duplicates_preserve_order(extracted[key])
+
+        return extracted
+
+    def _extract_comprehensive_info(
+        self, content: str, role: str, extracted: dict[str, list[str]]
+    ) -> dict[str, list[str]]:
+        """Extract comprehensive information from message content."""
+        content_lower = content.lower()
+
+        # Strategic insights patterns
+        if any(
+            keyword in content_lower for keyword in ["strategy", "strategic", "plan", "approach"]
+        ):
+            if len(content) > 50:  # Substantial strategic content
+                extracted["strategic_insights"].append(
+                    content[:200] + "..." if len(content) > 200 else content
+                )
+
+        # Discovery patterns
+        if any(
+            keyword in content_lower for keyword in ["discovered", "found", "identified", "learned"]
+        ):
+            extracted["discoveries"].append(
+                content[:150] + "..." if len(content) > 150 else content
+            )
+
+        # Objective patterns
+        if any(
+            keyword in content_lower
+            for keyword in ["objective", "goal", "target", "should", "need to"]
+        ):
+            extracted["objectives"].append(content[:150] + "..." if len(content) > 150 else content)
+
+        # Pattern identification
+        if any(
+            keyword in content_lower
+            for keyword in ["pattern", "sequence", "optimization", "speedrun"]
+        ):
+            extracted["patterns"].append(content[:150] + "..." if len(content) > 150 else content)
+
+        return extracted
+
+    def _extract_strategic_info(
+        self, content: str, role: str, extracted: dict[str, list[str]]
+    ) -> dict[str, list[str]]:
+        """Extract strategic-focused information from message content."""
+        content_lower = content.lower()
+
+        # Focus only on high-level strategic content
+        if any(
+            keyword in content_lower
+            for keyword in ["strategy", "strategic", "plan", "approach", "direction"]
+        ):
+            extracted["strategic_insights"].append(
+                content[:200] + "..." if len(content) > 200 else content
+            )
+
+        if any(keyword in content_lower for keyword in ["objective", "goal", "target"]):
+            extracted["objectives"].append(content[:150] + "..." if len(content) > 150 else content)
+
+        return extracted
+
+    def _extract_tactical_info(
+        self, content: str, role: str, extracted: dict[str, list[str]]
+    ) -> dict[str, list[str]]:
+        """Extract tactical-focused information from message content."""
+        content_lower = content.lower()
+
+        # Focus on tactical patterns and discoveries
+        if any(
+            keyword in content_lower
+            for keyword in ["pattern", "sequence", "optimization", "execution"]
+        ):
+            extracted["patterns"].append(content[:150] + "..." if len(content) > 150 else content)
+
+        if any(
+            keyword in content_lower for keyword in ["discovered", "found", "works", "effective"]
+        ):
+            extracted["discoveries"].append(
+                content[:150] + "..." if len(content) > 150 else content
+            )
+
+        return extracted
+
+    def _extract_minimal_info(
+        self, content: str, role: str, extracted: dict[str, list[str]]
+    ) -> dict[str, list[str]]:
+        """Extract minimal critical information for aggressive compression."""
+        content_lower = content.lower()
+
+        # Only preserve most critical discoveries and objectives
+        if any(
+            keyword in content_lower for keyword in ["critical", "important", "key", "essential"]
+        ):
+            if any(keyword in content_lower for keyword in ["discovered", "found"]):
+                extracted["discoveries"].append(
+                    content[:100] + "..." if len(content) > 100 else content
+                )
+            elif any(keyword in content_lower for keyword in ["objective", "goal"]):
+                extracted["objectives"].append(
+                    content[:100] + "..." if len(content) > 100 else content
+                )
+
+        return extracted
+
+    def _compress_conversation_content(
+        self,
+        conversation_history: list[dict[str, Any]],
+        extracted_info: dict[str, list[str]],
+        max_length: int,
+        strategy: SummarizationStrategy,
+    ) -> str:
+        """Compress conversation content while preserving essential information."""
+
+        # Build structured summary
+        summary_parts = [
+            "CONVERSATION SUMMARY",
+            f"Strategy: {strategy.value.upper()}",
+            f"Total Messages: {len(conversation_history)}",
+            "",
+        ]
+
+        # Add extracted information sections
+        if extracted_info["strategic_insights"]:
+            summary_parts.extend(
+                [
+                    "STRATEGIC INSIGHTS:",
+                    *[f"- {insight}" for insight in extracted_info["strategic_insights"][:5]],
+                    "",
+                ]
+            )
+
+        if extracted_info["discoveries"]:
+            summary_parts.extend(
+                [
+                    "CRITICAL DISCOVERIES:",
+                    *[f"- {discovery}" for discovery in extracted_info["discoveries"][:5]],
+                    "",
+                ]
+            )
+
+        if extracted_info["objectives"]:
+            summary_parts.extend(
+                [
+                    "CURRENT OBJECTIVES:",
+                    *[f"- {objective}" for objective in extracted_info["objectives"][:3]],
+                    "",
+                ]
+            )
+
+        if extracted_info["patterns"]:
+            summary_parts.extend(
+                [
+                    "SUCCESSFUL PATTERNS:",
+                    *[f"- {pattern}" for pattern in extracted_info["patterns"][:3]],
+                    "",
+                ]
+            )
+
+        # Join and truncate if needed
+        full_summary = "\n".join(summary_parts)
+
+        if len(full_summary) <= max_length:
+            return full_summary
+
+        # Truncate while preserving structure
+        return full_summary[: max_length - 3] + "..."
+
+    def _calculate_conversation_length(self, conversation_history: list[dict[str, Any]]) -> int:
+        """Calculate total character length of conversation history."""
+        total_length = 0
+        for message in conversation_history:
+            content = message.get("content", "")
+            total_length += len(content)
+        return total_length
+
+    def _validate_summary_completeness(
+        self, summary: ConversationSummary, extracted_info: dict[str, list[str]]
+    ) -> None:
+        """Validate that summary preserves essential information."""
+        # Ensure critical information is preserved
+        if not summary.compressed_content:
+            raise OpusStrategistError("Summary compression produced empty content")
+
+        # Validate compression is effective but not destructive
+        if summary.compression_ratio < 0.1:
+            logger.warning(
+                f"Low compression ratio ({summary.compression_ratio:.2%}) may indicate ineffective summarization"
+            )
+
+        # Ensure strategy-specific requirements are met (except for empty conversations)
+        if summary.total_messages > 0:
+            if summary.strategy == SummarizationStrategy.COMPREHENSIVE:
+                if not (summary.preserved_insights or summary.critical_discoveries):
+                    raise OpusStrategistError(
+                        "Comprehensive strategy must preserve insights or discoveries"
+                    )
+
+            elif summary.strategy == SummarizationStrategy.STRATEGIC:
+                if not summary.preserved_insights:
+                    raise OpusStrategistError("Strategic strategy must preserve strategic insights")
+
+            elif summary.strategy == SummarizationStrategy.TACTICAL:
+                if not summary.successful_patterns:
+                    raise OpusStrategistError("Tactical strategy must preserve successful patterns")
+
+    def _record_summarization_metrics(
+        self, processing_time_ms: float, compression_ratio: float
+    ) -> None:
+        """Record summarization performance metrics."""
+        with self._metrics_lock:
+            # Initialize summarization metrics if not present
+            if "summarization_requests" not in self.metrics:
+                self.metrics.update(
+                    {
+                        "summarization_requests": 0,
+                        "avg_summarization_time_ms": 0.0,
+                        "avg_compression_ratio": 0.0,
+                        "max_summarization_time_ms": 0.0,
+                    }
+                )
+
+            # Update counts
+            self.metrics["summarization_requests"] += 1
+            count = self.metrics["summarization_requests"]
+
+            # Update rolling averages
+            current_avg_time = self.metrics["avg_summarization_time_ms"]
+            self.metrics["avg_summarization_time_ms"] = (
+                current_avg_time * (count - 1) + processing_time_ms
+            ) / count
+
+            current_avg_compression = self.metrics["avg_compression_ratio"]
+            self.metrics["avg_compression_ratio"] = (
+                current_avg_compression * (count - 1) + compression_ratio
+            ) / count
+
+            # Update max time
+            if processing_time_ms > self.metrics["max_summarization_time_ms"]:
+                self.metrics["max_summarization_time_ms"] = processing_time_ms
+
+    def _remove_duplicates_preserve_order(self, items: list[str]) -> list[str]:
+        """Remove duplicates from list while preserving order."""
+        seen = set()
+        result = []
+        for item in items:
+            item_lower = item.lower()
+            if item_lower not in seen:
+                result.append(item)
+                seen.add(item_lower)
+        return result
+
 
 # Re-export classes for easier imports
 __all__ = [
@@ -419,4 +867,7 @@ __all__ = [
     "StrategyResponseParser",
     "ResponseCache",
     "FallbackStrategy",
+    "SummarizationStrategy",
+    "ConversationSummary",
+    "SummarizationProvider",
 ]
