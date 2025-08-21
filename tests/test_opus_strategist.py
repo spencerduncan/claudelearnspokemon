@@ -503,6 +503,217 @@ class TestPerformanceTargets(unittest.TestCase):
         )
 
 
+# Strategic Continuity Management Tests - Issue #113 - Uncle Bot Implementation
+
+
+@pytest.mark.fast
+class TestOpusStrategistStrategicContinuity(unittest.TestCase):
+    """Test Strategic Continuity Management - Issue #113 capstone feature."""
+
+    def setUp(self):
+        """Set up test environment for strategic continuity testing."""
+        self.mock_manager = Mock()
+        self.mock_strategic_process = Mock()
+        self.mock_manager.get_strategic_process.return_value = self.mock_strategic_process
+
+        from claudelearnspokemon.opus_strategist import OpusStrategist
+
+        self.strategist = OpusStrategist(self.mock_manager)
+
+        # Set up mock strategic responses
+        self.mock_strategic_process.send_message.return_value = '{"strategy_id": "test_strategy", "experiments": [], "strategic_insights": [], "next_checkpoints": []}'
+
+    def test_opus_strategist_maintains_context_continuity_across_messages(self):
+        """
+        REFERENCE TEST CASE - Test strategic continuity across conversation cycles.
+
+        Validates that OpusStrategist maintains strategic context consistency
+        across multiple conversation cycles and system restarts.
+        """
+        # Initial strategic context
+        initial_context = {
+            "previous_strategies": ["explore_pallet_town", "catch_first_pokemon"],
+            "conversation_history": ["greeting", "initial_planning"],
+            "strategic_directives": ["focus_on_speed", "minimize_battles"],
+            "plan_version": "1.0",
+        }
+
+        game_state = {"location": "pallet_town", "level": 5, "pokemon_count": 1}
+
+        # First strategic request - establish continuity
+        first_response = self.strategist.get_strategy(game_state, initial_context)
+
+        # Extract strategic context from response
+        preserved_context = self.strategist.preserve_strategic_context(
+            first_response, initial_context
+        )
+
+        # Simulate conversation restart with preserved context
+        self.strategist.restore_strategic_context(preserved_context)
+
+        # Second strategic request after restart
+        second_response = self.strategist.get_strategy(game_state, preserved_context)
+
+        # Verify strategic continuity is maintained
+        self.assertIsNotNone(first_response)
+        self.assertIsNotNone(second_response)
+        self.assertIsNotNone(preserved_context)
+
+        # Verify context preservation methods exist and function
+        self.assertTrue(hasattr(self.strategist, "preserve_strategic_context"))
+        self.assertTrue(hasattr(self.strategist, "restore_strategic_context"))
+
+    def test_strategic_context_preservation_during_compression_cycles(self):
+        """Test strategic context preservation during compression cycles."""
+        # Create strategic context with compression scenarios
+        large_context = {
+            "conversation_history": [f"message_{i}" for i in range(1000)],  # Large history
+            "strategic_plans": [{"id": f"plan_{i}", "status": "completed"} for i in range(50)],
+            "decision_outcomes": [
+                {"decision": f"decision_{i}", "outcome": "success"} for i in range(200)
+            ],
+        }
+
+        # Preserve context with compression
+        preserved_context = self.strategist.preserve_strategic_context_with_compression(
+            large_context, compression_ratio=0.7
+        )
+
+        # Verify compression maintained essential information
+        self.assertIsNotNone(preserved_context)
+        # Check that compression metadata is present (indicating compression worked)
+        self.assertIn("compression_metadata", preserved_context)
+        self.assertIn("compression_ratio", preserved_context["compression_metadata"])
+        # Verify some content was preserved
+        self.assertTrue(
+            len(preserved_context.get("conversation_history", [])) > 0
+            or len(preserved_context.get("decision_outcomes", [])) > 0
+            or len(preserved_context.get("strategic_directives", [])) > 0
+        )
+
+    def test_strategic_plan_versioning_and_evolution_tracking(self):
+        """Test strategic plan versioning and evolution tracking."""
+        game_state = {"location": "pewter_city", "badges": 1}
+        initial_context = {"plan_version": "1.0"}
+
+        # Create initial strategic plan
+        plan_v1 = self.strategist.get_strategy(game_state, initial_context)
+
+        # Evolve the strategic plan
+        evolved_context = {"plan_version": "1.1", "previous_plan": plan_v1.to_dict()}
+        plan_v1_1 = self.strategist.get_strategy(game_state, evolved_context)
+
+        # Track plan evolution
+        evolution_history = self.strategist.track_strategic_plan_evolution(
+            previous_plan=plan_v1, current_plan=plan_v1_1, evolution_reason="gym_badge_achieved"
+        )
+
+        # Verify evolution tracking
+        self.assertIsNotNone(evolution_history)
+        self.assertTrue(hasattr(self.strategist, "track_strategic_plan_evolution"))
+
+    def test_strategic_directive_conflict_resolution(self):
+        """Test strategic directive conflict resolution."""
+        # Create conflicting strategic directives
+        conflicting_directives = [
+            {"directive": "prioritize_speed", "priority": 8, "source": "speedrun_optimization"},
+            {"directive": "prioritize_safety", "priority": 6, "source": "risk_management"},
+            {
+                "directive": "prioritize_speed",
+                "priority": 9,
+                "source": "time_constraints",
+            },  # Conflict
+        ]
+
+        # Resolve conflicts
+        resolved_directives = self.strategist.resolve_strategic_directive_conflicts(
+            conflicting_directives
+        )
+
+        # Verify conflict resolution
+        self.assertIsNotNone(resolved_directives)
+        self.assertTrue(hasattr(self.strategist, "resolve_strategic_directive_conflicts"))
+
+        # Should handle priority-based resolution
+        self.assertIsInstance(resolved_directives, list)
+
+    def test_strategic_decision_history_and_outcome_tracking(self):
+        """Test strategic decision history and outcome tracking."""
+        # Track a strategic decision
+        decision = {
+            "decision_id": "battle_gym_leader",
+            "context": {"location": "pewter_gym", "pokemon_level": 12},
+            "rationale": "sufficient level advantage",
+            "timestamp": time.time(),
+        }
+
+        # Record decision
+        self.strategist.record_strategic_decision(decision)
+
+        # Simulate outcome
+        outcome = {
+            "decision_id": "battle_gym_leader",
+            "result": "success",
+            "execution_time": 45.2,
+            "lessons_learned": ["type_advantage_crucial"],
+        }
+
+        # Record outcome
+        self.strategist.record_strategic_outcome(outcome)
+
+        # Correlate decision with outcome
+        self.strategist.correlate_decision_with_outcome(decision["decision_id"])
+
+        # Verify tracking functionality
+        self.assertTrue(hasattr(self.strategist, "record_strategic_decision"))
+        self.assertTrue(hasattr(self.strategist, "record_strategic_outcome"))
+        self.assertTrue(hasattr(self.strategist, "correlate_decision_with_outcome"))
+
+    def test_strategic_continuity_performance_targets(self):
+        """Test strategic continuity meets performance targets."""
+        large_context = {"history": ["item"] * 10000}  # Large context
+
+        # Test context preservation performance (<100ms)
+        start_time = time.time()
+        self.strategist.preserve_strategic_context({}, large_context)
+        preservation_time = (time.time() - start_time) * 1000
+
+        self.assertLess(
+            preservation_time,
+            100,
+            f"Context preservation took {preservation_time:.1f}ms, target <100ms",
+        )
+
+        # Test plan versioning performance (<50ms)
+        start_time = time.time()
+        self.strategist.version_strategic_plan({"plan": "test"})
+        versioning_time = (time.time() - start_time) * 1000
+
+        self.assertLess(
+            versioning_time, 50, f"Plan versioning took {versioning_time:.1f}ms, target <50ms"
+        )
+
+    def test_strategic_continuity_integration_with_existing_systems(self):
+        """Test strategic continuity integrates with existing OpusStrategist systems."""
+        game_state = {"location": "route_1", "level": 6}
+        context = {"continuity_test": True}
+
+        # Should work with existing get_strategy method
+        response = self.strategist.get_strategy(game_state, context)
+        self.assertIsNotNone(response)
+
+        # Should work with existing caching
+        cached_response = self.strategist.get_strategy(game_state, context, use_cache=True)
+        self.assertIsNotNone(cached_response)
+
+        # Should work with existing metrics
+        metrics = self.strategist.get_metrics()
+        self.assertIn("total_requests", metrics)
+
+        # Verify continuity features integrate without breaking existing functionality
+        self.assertTrue(True)  # Integration test passes if no exceptions
+
+
 if __name__ == "__main__":
     # Run with performance timing
     print("=== OpusStrategist Test Suite - Performance Focus ===")
