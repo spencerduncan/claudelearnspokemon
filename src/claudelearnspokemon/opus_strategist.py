@@ -22,6 +22,13 @@ from .opus_strategist_exceptions import (
     ResponseTimeoutError,
     StrategyValidationError,
 )
+from .predictive_planning import (
+    BayesianPredictor,
+    ContingencyGenerator,
+    ExecutionPatternAnalyzer,
+    PredictionCache,
+    PredictivePlanningResult,
+)
 from .strategy_response import FallbackStrategy, StrategyResponse
 from .strategy_response_cache import ResponseCache
 from .strategy_response_parser import StrategyResponseParser, ValidationRule
@@ -69,6 +76,9 @@ class OpusStrategist:
         cache_ttl: float = 300.0,
         circuit_breaker_threshold: float = 0.5,
         circuit_breaker_timeout: float = 60.0,
+        enable_predictive_planning: bool = True,
+        prediction_cache_size: int = 500,
+        pattern_analyzer_max_patterns: int = 1000,
     ):
         """
         Initialize OpusStrategist with production configuration.
@@ -80,6 +90,9 @@ class OpusStrategist:
             cache_ttl: Cache TTL in seconds
             circuit_breaker_threshold: Failure rate threshold (0.0-1.0)
             circuit_breaker_timeout: Circuit breaker timeout in seconds
+            enable_predictive_planning: Enable predictive planning capabilities
+            prediction_cache_size: Maximum cached prediction results
+            pattern_analyzer_max_patterns: Maximum patterns in pattern analyzer
         """
         self.claude_manager = claude_manager
 
@@ -102,6 +115,39 @@ class OpusStrategist:
             )
         )
 
+        # Predictive planning components (optional)
+        self.enable_predictive_planning = enable_predictive_planning
+        if self.enable_predictive_planning:
+            self.pattern_analyzer = ExecutionPatternAnalyzer(
+                max_patterns=pattern_analyzer_max_patterns,
+                similarity_threshold=0.75,
+                min_frequency_threshold=3,
+            )
+
+            self.bayesian_predictor = BayesianPredictor(
+                alpha_prior=1.0,
+                beta_prior=1.0,
+                forgetting_factor=0.95,
+                min_samples=5,
+            )
+
+            self.contingency_generator = ContingencyGenerator(
+                fallback_strategy_pool_size=20,
+                scenario_coverage_threshold=0.8,
+                strategy_template_cache_size=100,
+            )
+
+            self.prediction_cache = PredictionCache(
+                max_entries=prediction_cache_size,
+                default_ttl=180.0,  # 3 minutes for predictions
+                cleanup_interval=50,
+            )
+        else:
+            self.pattern_analyzer = None  # type: ignore
+            self.bayesian_predictor = None  # type: ignore
+            self.contingency_generator = None  # type: ignore
+            self.prediction_cache = None  # type: ignore
+
         # Performance and reliability metrics
         self.metrics = {
             "total_requests": 0,
@@ -111,10 +157,14 @@ class OpusStrategist:
             "circuit_breaker_trips": 0,
             "avg_response_time_ms": 0.0,
             "max_response_time_ms": 0.0,
+            "predictive_planning_requests": 0,
+            "predictive_planning_cache_hits": 0,
         }
         self._metrics_lock = threading.Lock()
 
-        logger.info("OpusStrategist initialized with production configuration")
+        logger.info(
+            f"OpusStrategist initialized with production configuration (predictive planning: {enable_predictive_planning})"
+        )
 
     def get_strategy(
         self,
@@ -321,6 +371,265 @@ class OpusStrategist:
                 f"Failed to extract directives: {str(e)}", strategy_response.to_dict()
             ) from e
 
+    def think_ahead(
+        self,
+        current_experiments: list[dict[str, Any]],
+        execution_patterns: dict[str, Any],
+        horizon: int = 3,
+    ) -> PredictivePlanningResult:
+        """
+        Generate predictive planning analysis with contingency strategies - Target <100ms.
+
+        Analyzes current experiments and execution patterns to predict outcomes
+        and generate contingency strategies for different scenarios.
+
+        Args:
+            current_experiments: Currently executing or planned experiments
+            execution_patterns: Patterns from recent execution history
+            horizon: Planning horizon (number of steps to look ahead)
+
+        Returns:
+            PredictivePlanningResult with predictions and contingencies
+
+        Raises:
+            OpusStrategistError: If predictive planning is disabled or fails
+        """
+        if not self.enable_predictive_planning:
+            raise OpusStrategistError("Predictive planning is disabled")
+
+        start_time = time.time()
+
+        try:
+            self._record_metric("predictive_planning_requests", 1)
+
+            # Generate cache key for prediction result
+            cache_key = self.prediction_cache.generate_cache_key(
+                current_experiments, execution_patterns, horizon
+            )
+
+            # Try cache first for sub-10ms retrieval
+            cached_result = self.prediction_cache.get(cache_key)
+            if cached_result:
+                self._record_metric("predictive_planning_cache_hits", 1)
+                logger.info(f"Predictive planning cache hit: {cache_key[:16]}...")
+                return cached_result
+
+            # Perform pattern analysis
+            pattern_analysis = self.pattern_analyzer.analyze_execution_patterns(
+                current_experiments, execution_patterns.get("historical_results")
+            )
+
+            if pattern_analysis.get("error"):
+                logger.warning(f"Pattern analysis failed: {pattern_analysis['error']}")
+                # Continue with fallback analysis
+                pattern_analysis = {"fallback_analysis": True, "similar_patterns": []}
+
+            # Generate outcome predictions for each experiment
+            outcome_predictions = {}
+            similar_patterns = pattern_analysis.get("similar_patterns", [])
+
+            for experiment in current_experiments:
+                exp_id = experiment.get("id", f"exp_{int(time.time())}")
+
+                try:
+                    prediction = self.bayesian_predictor.predict_outcome(
+                        experiment_id=exp_id,
+                        experiment_features=experiment,
+                        similar_patterns=similar_patterns,
+                    )
+                    outcome_predictions[exp_id] = prediction
+
+                except Exception as e:
+                    logger.warning(f"Failed to predict outcome for {exp_id}: {e}")
+                    # Continue with other predictions
+
+            # Create primary strategy (simplified for this context)
+            primary_strategy = self._create_primary_strategy_from_experiments(current_experiments)
+
+            # Generate contingency strategies
+            contingencies = self.contingency_generator.generate_contingencies(
+                primary_strategy=primary_strategy,
+                execution_patterns=pattern_analysis,
+                outcome_predictions=outcome_predictions,
+                horizon=horizon,
+            )
+
+            # Calculate confidence scores
+            confidence_scores = self._calculate_confidence_scores(
+                pattern_analysis, outcome_predictions, contingencies
+            )
+
+            # Record execution time
+            execution_time = (time.time() - start_time) * 1000
+
+            # Create prediction result
+            planning_id = f"planning_{int(time.time())}"
+            result = PredictivePlanningResult(
+                planning_id=planning_id,
+                primary_strategy=primary_strategy,
+                contingencies=contingencies,
+                outcome_predictions=outcome_predictions,
+                confidence_scores=confidence_scores,
+                execution_time_ms=execution_time,
+                cache_metadata={
+                    "cache_key": cache_key,
+                    "pattern_analysis_time_ms": pattern_analysis.get("analysis_time_ms", 0),
+                    "contingency_count": len(contingencies),
+                    "prediction_count": len(outcome_predictions),
+                },
+            )
+
+            # Cache result for future use
+            self.prediction_cache.put(cache_key, result, ttl=180.0)  # 3-minute TTL
+
+            logger.info(
+                f"Predictive planning completed in {execution_time:.2f}ms: "
+                f"{len(contingencies)} contingencies, {len(outcome_predictions)} predictions"
+            )
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Predictive planning failed: {str(e)}")
+
+            # Graceful degradation with minimal result
+            return self._create_minimal_prediction_result(current_experiments, str(e))
+
+    def update_prediction_results(
+        self,
+        experiment_id: str,
+        actual_success: bool,
+        actual_execution_time: float,
+        actual_performance_score: float,
+    ) -> None:
+        """
+        Update prediction algorithms with actual results for learning.
+
+        This method should be called after experiments complete to improve
+        prediction accuracy over time.
+        """
+        if not self.enable_predictive_planning:
+            return
+
+        try:
+            self.bayesian_predictor.update_with_result(
+                experiment_id=experiment_id,
+                actual_success=actual_success,
+                actual_execution_time=actual_execution_time,
+                actual_performance_score=actual_performance_score,
+            )
+
+            logger.debug(f"Updated prediction models with results for {experiment_id}")
+
+        except Exception as e:
+            logger.warning(f"Failed to update prediction results: {str(e)}")
+
+    def _create_primary_strategy_from_experiments(
+        self, experiments: list[dict[str, Any]]
+    ) -> StrategyResponse:
+        """
+        Create primary strategy response from current experiments.
+
+        This is a simplified conversion for predictive planning purposes.
+        """
+        from .strategy_response import ExperimentSpec
+
+        # Convert experiments to ExperimentSpec objects
+        experiment_specs = []
+        for exp in experiments:
+            try:
+                spec = ExperimentSpec(
+                    id=exp.get("id", f"exp_{int(time.time())}"),
+                    name=exp.get("name", "Unnamed Experiment"),
+                    checkpoint=exp.get("checkpoint", "current_checkpoint"),
+                    script_dsl=exp.get("script_dsl", "EXPLORE; SAVE"),
+                    expected_outcome=exp.get("expected_outcome", "progress"),
+                    priority=exp.get("priority", 2),
+                    directives=exp.get("directives", []),
+                    metadata=exp.get("metadata", {}),
+                )
+                experiment_specs.append(spec)
+
+            except Exception as e:
+                logger.warning(f"Failed to convert experiment to spec: {e}")
+                continue
+
+        return StrategyResponse(
+            strategy_id=f"primary_{int(time.time())}",
+            experiments=experiment_specs,
+            strategic_insights=["Primary strategy from current experiments"],
+            next_checkpoints=[exp.get("checkpoint", "current") for exp in experiments],
+            metadata={"source": "predictive_planning", "type": "primary_strategy"},
+        )
+
+    def _calculate_confidence_scores(
+        self,
+        pattern_analysis: dict[str, Any],
+        outcome_predictions: dict[str, Any],
+        contingencies: list,
+    ) -> dict[str, float]:
+        """Calculate overall confidence scores for prediction components."""
+        confidence_scores = {}
+
+        # Pattern analysis confidence
+        pattern_confidence = pattern_analysis.get("confidence_metrics", {}).get(
+            "overall_confidence", 0.5
+        )
+        confidence_scores["pattern_analysis"] = pattern_confidence
+
+        # Outcome prediction confidence (average across predictions)
+        if outcome_predictions:
+            prediction_confidences = [
+                pred.confidence.value for pred in outcome_predictions.values()
+            ]
+            avg_prediction_confidence = sum(prediction_confidences) / len(prediction_confidences)
+            confidence_scores["outcome_predictions"] = avg_prediction_confidence
+        else:
+            confidence_scores["outcome_predictions"] = 0.0
+
+        # Contingency confidence (average across contingencies)
+        if contingencies:
+            contingency_confidences = [c.confidence.value for c in contingencies]
+            avg_contingency_confidence = sum(contingency_confidences) / len(contingency_confidences)
+            confidence_scores["contingencies"] = avg_contingency_confidence
+        else:
+            confidence_scores["contingencies"] = 0.0
+
+        # Primary strategy confidence (based on pattern analysis)
+        confidence_scores["primary_strategy"] = (
+            pattern_confidence * 0.8
+        )  # Slightly lower than pattern
+
+        return confidence_scores
+
+    def _create_minimal_prediction_result(
+        self, experiments: list[dict[str, Any]], error_reason: str
+    ) -> PredictivePlanningResult:
+        """Create minimal prediction result for graceful degradation."""
+        from .strategy_response import FallbackStrategy
+
+        # Create minimal primary strategy
+        primary_strategy = FallbackStrategy.create_default_fallback(
+            {
+                "location": "unknown",
+                "current_checkpoint": "fallback",
+            }
+        )
+
+        return PredictivePlanningResult(
+            planning_id=f"minimal_{int(time.time())}",
+            primary_strategy=primary_strategy,
+            contingencies=[],
+            outcome_predictions={},
+            confidence_scores={"overall": 0.1, "error": 1.0},
+            execution_time_ms=1.0,
+            cache_metadata={
+                "error": error_reason,
+                "fallback_mode": True,
+                "minimal_result": True,
+            },
+        )
+
     def get_metrics(self) -> dict[str, Any]:
         """Get strategist performance metrics."""
         with self._metrics_lock:
@@ -333,6 +642,20 @@ class OpusStrategist:
         metrics["parser_metrics"] = self.parser.get_metrics()
         metrics["cache_metrics"] = self.response_cache.get_stats()
         metrics["circuit_breaker_state"] = self.circuit_breaker.get_state().value
+
+        # Add predictive planning metrics if enabled
+        if self.enable_predictive_planning:
+            metrics["predictive_planning_enabled"] = True
+            metrics["pattern_analyzer_metrics"] = self.pattern_analyzer.get_performance_metrics()
+            metrics["bayesian_predictor_metrics"] = (
+                self.bayesian_predictor.get_performance_metrics()
+            )
+            metrics["contingency_generator_metrics"] = (
+                self.contingency_generator.get_performance_metrics()
+            )
+            metrics["prediction_cache_metrics"] = self.prediction_cache.get_statistics()
+        else:
+            metrics["predictive_planning_enabled"] = False
 
         return metrics
 
