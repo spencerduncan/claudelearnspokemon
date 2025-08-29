@@ -28,7 +28,7 @@ import uuid
 from typing import Any
 
 from .claude_code_manager import ClaudeCodeManager
-from .mcp_data_patterns import PokemonStrategy
+from .mcp_data_patterns import PokemonStrategy, QueryBuilder
 
 logger = logging.getLogger(__name__)
 

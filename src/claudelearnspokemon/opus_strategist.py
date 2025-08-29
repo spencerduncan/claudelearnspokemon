@@ -1072,13 +1072,15 @@ class OpusStrategist:
                     for r, c in zip(npc_positions[0], npc_positions[1], strict=False)
                 ]
 
-            # Walkable area estimation (exclude known obstacle tiles)
+            # Walkable area estimation (exclude known obstacle tiles) - Optimized for <50ms performance
             obstacle_tiles = {self.PLAYER_TILE_ID, self.MENU_TILE_ID}  # Player and menu tiles
             obstacle_tiles.update(range(self.NPC_TILE_MIN, self.NPC_TILE_MAX + 1))  # NPC tiles
             total_tiles = tiles.size
-            obstacle_count = sum(
-                np.sum(tiles == tile_id) for tile_id in obstacle_tiles if tile_id in unique_tiles
-            )
+            
+            # Vectorized obstacle counting - much faster than looping through each tile_id
+            obstacle_tiles_array = np.array(list(obstacle_tiles), dtype=np.uint8)
+            obstacle_mask = np.isin(tiles, obstacle_tiles_array)
+            obstacle_count = np.sum(obstacle_mask)
             environmental_analysis["walkable_area_ratio"] = max(
                 0.0, (total_tiles - obstacle_count) / total_tiles
             )
