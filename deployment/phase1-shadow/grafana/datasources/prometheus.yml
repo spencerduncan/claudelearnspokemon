@@ -1,0 +1,33 @@
+# Grafana datasource configuration for Prometheus
+# Automatically configures Prometheus as the primary data source
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: "15s"
+      httpMethod: "GET"
+      queryTimeout: "60s"
+      tlsAuth: false
+      tlsAuthWithCACert: false
+      tlsSkipVerify: true
+    version: 1
+
+  - name: Prometheus-Legacy
+    type: prometheus  
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: false
+    editable: false
+    jsonData:
+      timeInterval: "15s"
+      httpMethod: "GET"
+      queryTimeout: "60s"
+      customQueryParameters: 'system=legacy_system'
+    version: 1

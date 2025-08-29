@@ -1,0 +1,50 @@
+# Performance Testing Dockerfile for Shadow Deployment Validation
+# Runs comprehensive load testing and metrics collection
+
+FROM python:3.11-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    wget \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies for load testing
+RUN pip install --no-cache-dir \
+    requests \
+    aiohttp \
+    asyncio \
+    prometheus_client \
+    click \
+    pydantic
+
+# Create application directory
+WORKDIR /app
+
+# Copy performance testing script
+COPY deployment/phase1-shadow/performance_tester.py /app/performance_tester.py
+
+# Create results directory
+RUN mkdir -p /app/results
+
+# Create non-root user
+RUN useradd -r -s /bin/false tester && \
+    chown -R tester:tester /app
+
+USER tester
+
+# Environment variables
+ENV PYTHONUNBUFFERED=1 \
+    TARGET_HOST=traffic-splitter \
+    TARGET_PORT=80 \
+    TEST_DURATION_HOURS=48 \
+    RPS_TARGET=50 \
+    SHADOW_VALIDATION=true
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD python -c "import os; exit(0 if os.path.exists('/app/results/health') else 1)"
+
+# Default command
+CMD ["python", "/app/performance_tester.py"]

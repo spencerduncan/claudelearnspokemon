@@ -1,0 +1,277 @@
+# Phase 3: Full Production Deployment
+# 100% traffic to Message Routing Engine with legacy system decommissioned
+
+version: '3.8'
+
+services:
+  # Message Routing Engine - Full Production (Multiple Instances)
+  message-routing-engine:
+    build:
+      context: ../../
+      dockerfile: deployment/phase1-shadow/Dockerfile.routing
+    image: message-routing-engine:v2.0.0-production
+    ports:
+      - "8080-8083:8080"
+    environment:
+      - SERVICE_NAME=message-routing-engine
+      - ROUTING_MODE=full
+      - CIRCUIT_BREAKER_THRESHOLD=10
+      - CIRCUIT_BREAKER_TIMEOUT=60
+      - LOG_LEVEL=info
+      - METRICS_ENABLED=true
+      - TRACING_ENABLED=true
+      - MAX_WORKERS=4
+      - REDIS_URL=redis://redis:6379/0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/routing"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+    networks:
+      - pokemon-network
+    depends_on:
+      - redis
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+        reservations:
+          memory: 256M
+          cpus: '0.5'
+      restart_policy:
+        condition: unless-stopped
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+
+  # Production Load Balancer (Nginx)
+  load-balancer:
+    image: nginx:alpine
+    container_name: production-load-balancer
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx-production.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl-certs:/etc/nginx/ssl:ro
+    depends_on:
+      - message-routing-engine
+    networks:
+      - pokemon-network
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      restart_policy:
+        condition: unless-stopped
+
+  # Redis Cluster for Production
+  redis:
+    image: redis:7-alpine
+    container_name: redis-production
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 1gb
+      --maxmemory-policy allkeys-lru
+      --tcp-keepalive 60
+      --timeout 0
+      --databases 16
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+    volumes:
+      - redis-data:/data
+      - ./redis-production.conf:/etc/redis/redis.conf:ro
+    networks:
+      - pokemon-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 1200M
+          cpus: '0.5'
+        reservations:
+          memory: 1024M
+          cpus: '0.2'
+      restart_policy:
+        condition: unless-stopped
+
+  # Production Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus-production
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus-production.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=720h'  # 30 days retention
+      - '--storage.tsdb.retention.size=50GB'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+      - '--alertmanager.timeout=10s'
+    networks:
+      - pokemon-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+
+  # Production Grafana
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana-production
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=production_admin_password_change_me
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SECURITY_SECRET_KEY=production_secret_key_change_me
+      - GF_INSTALL_PLUGINS=redis-datasource,prometheus-alertmanager-datasource
+      - GF_ALERTING_ENABLED=true
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/alerting:/etc/grafana/provisioning/alerting:ro
+    networks:
+      - pokemon-network
+    depends_on:
+      - prometheus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+
+  # Alertmanager for Production Alerts
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: alertmanager-production
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/data
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/data'
+      - '--web.external-url=http://localhost:9093'
+      - '--cluster.advertise-address=0.0.0.0:9093'
+    networks:
+      - pokemon-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9093/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Log Aggregation (Optional)
+  loki:
+    image: grafana/loki:latest
+    container_name: loki-production
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki-data:/tmp/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - pokemon-network
+    profiles:
+      - logging
+
+  # Production Health Checker
+  health-checker:
+    build:
+      context: ../../
+      dockerfile: deployment/phase3-full/Dockerfile.health-checker
+    container_name: health-checker
+    environment:
+      - CHECK_INTERVAL=30
+      - ALERT_THRESHOLD=3
+      - SERVICES=message-routing-engine:8080,redis:6379,prometheus:9090
+    volumes:
+      - ./health-reports:/app/reports
+    networks:
+      - pokemon-network
+    depends_on:
+      - message-routing-engine
+    profiles:
+      - monitoring
+
+networks:
+  pokemon-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+    driver_opts:
+      com.docker.network.bridge.name: pokemon-prod-br0
+
+volumes:
+  redis-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /var/lib/pokemon-routing/redis
+  prometheus-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /var/lib/pokemon-routing/prometheus
+  grafana-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /var/lib/pokemon-routing/grafana
+  alertmanager-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /var/lib/pokemon-routing/alertmanager
+  loki-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /var/lib/pokemon-routing/loki

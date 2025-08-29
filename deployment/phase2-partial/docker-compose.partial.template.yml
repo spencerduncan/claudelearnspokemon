@@ -1,0 +1,196 @@
+# Phase 2: Partial Rollout Configuration Template
+# Progressive traffic increases: 25% → 50% → 75%
+
+version: '3.8'
+
+services:
+  # Legacy Pokemon Gym Service (reduced traffic)
+  pokemon-gym-legacy:
+    build:
+      context: ../../docker/pokemon-gym
+      dockerfile: Dockerfile
+    image: pokemon-gym-legacy:stable
+    container_name: pokemon-gym-legacy
+    ports:
+      - "8080:8080"
+    environment:
+      - SERVICE_NAME=pokemon-gym-legacy
+      - ROUTING_MODE=legacy
+      - LOG_LEVEL=info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - pokemon-network
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+
+  # Message Routing Engine - Scaled for partial rollout
+  message-routing-engine:
+    build:
+      context: ../../
+      dockerfile: deployment/phase1-shadow/Dockerfile.routing
+    image: message-routing-engine:v2.0.0-partial
+    ports:
+      - "8081-8083:8080"  # Multiple instances
+    environment:
+      - SERVICE_NAME=message-routing-engine
+      - ROUTING_MODE=partial
+      - PARTIAL_PERCENTAGE=${TRAFFIC_PERCENTAGE}
+      - CIRCUIT_BREAKER_THRESHOLD=5
+      - CIRCUIT_BREAKER_TIMEOUT=30
+      - LOG_LEVEL=info
+      - METRICS_ENABLED=true
+      - TRACING_ENABLED=true
+      - MAX_WORKERS=3
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/routing"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+    networks:
+      - pokemon-network
+    depends_on:
+      - redis
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+          cpus: '0.25'
+
+  # Traffic Splitter for Partial Rollout
+  traffic-splitter:
+    image: nginx:alpine
+    container_name: traffic-splitter
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx-partial.conf.template:/etc/nginx/templates/nginx.conf.template:ro
+    environment:
+      - TRAFFIC_PERCENTAGE=${TRAFFIC_PERCENTAGE}
+      - LEGACY_PERCENTAGE=$$(echo "100 - ${TRAFFIC_PERCENTAGE}" | bc)
+    depends_on:
+      - pokemon-gym-legacy
+      - message-routing-engine
+    networks:
+      - pokemon-network
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Redis for session state and caching
+  redis:
+    image: redis:7-alpine
+    container_name: redis-cache
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    networks:
+      - pokemon-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus-partial.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=168h'  # 1 week retention
+      - '--web.enable-lifecycle'
+    networks:
+      - pokemon-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Grafana for monitoring dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_INSTALL_PLUGINS=redis-datasource
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ../phase1-shadow/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ../phase1-shadow/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    networks:
+      - pokemon-network
+    depends_on:
+      - prometheus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Load Testing for Validation
+  load-tester:
+    build:
+      context: ../../
+      dockerfile: deployment/phase2-partial/Dockerfile.load-tester
+    container_name: load-tester
+    environment:
+      - TARGET_HOST=traffic-splitter
+      - TARGET_PORT=80
+      - TEST_DURATION_HOURS=1
+      - RPS_TARGET=100
+      - PARTIAL_VALIDATION=true
+      - TRAFFIC_PERCENTAGE=${TRAFFIC_PERCENTAGE}
+    volumes:
+      - ./test-results:/app/results
+    networks:
+      - pokemon-network
+    depends_on:
+      - traffic-splitter
+    profiles:
+      - testing
+
+networks:
+  pokemon-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  redis-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local

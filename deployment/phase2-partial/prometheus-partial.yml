@@ -1,0 +1,84 @@
+# Prometheus configuration for Message Routing Engine Partial Rollout
+# Enhanced monitoring for production traffic split validation
+
+global:
+  scrape_interval: 10s  # More frequent monitoring for production traffic
+  evaluation_interval: 10s
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
+# Rules for alerting
+rule_files:
+  - "alert_rules_partial.yml"
+
+# Scrape configurations for partial rollout
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Message Routing Engine - Multiple instances for partial rollout
+  - job_name: 'message-routing-engine-partial'
+    static_configs:
+      - targets: 
+          - 'message-routing-engine:8080'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    scrape_timeout: 5s
+    labels:
+      system: 'new_routing_engine'
+      phase: 'partial'
+      deployment: 'live_traffic'
+
+  # Pokemon Gym Legacy Service - Reduced but still active
+  - job_name: 'pokemon-gym-legacy-partial'
+    static_configs:
+      - targets: ['pokemon-gym-legacy:8080']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    labels:
+      system: 'legacy_system'
+      phase: 'partial'
+      deployment: 'fallback'
+
+  # Traffic Splitter - Critical monitoring during partial rollout
+  - job_name: 'traffic-splitter-partial'
+    static_configs:
+      - targets: ['traffic-splitter:80']
+    metrics_path: '/nginx_status'
+    scrape_interval: 5s  # High frequency for load balancer
+    labels:
+      component: 'load_balancer'
+      phase: 'partial'
+      critical: 'true'
+
+  # Redis Cache - Enhanced monitoring
+  - job_name: 'redis-partial'
+    static_configs:
+      - targets: ['redis:6379']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+    labels:
+      component: 'cache'
+      phase: 'partial'
+
+  # Load Tester for validation
+  - job_name: 'load-tester-partial'
+    static_configs:
+      - targets: ['load-tester:8080']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+    labels:
+      component: 'validation'
+      phase: 'partial'
+
+  # Container metrics (if available)
+  - job_name: 'container-metrics'
+    static_configs:
+      - targets: []  # Would be populated with cAdvisor in full deployment

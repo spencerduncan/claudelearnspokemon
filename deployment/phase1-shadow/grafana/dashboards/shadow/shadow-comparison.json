@@ -1,0 +1,391 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": "-- Grafana --",
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "gnetId": null,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Shadow Testing - Legacy vs New Routing Engine",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "collapsed": false
+    },
+    {
+      "title": "Response Time Comparison",
+      "type": "graph",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, routing_duration_seconds_bucket{system=\"new_routing_engine\"})",
+          "legendFormat": "New Engine P95",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, routing_duration_seconds_bucket{system=\"legacy_system\"})",
+          "legendFormat": "Legacy System P95",
+          "refId": "B"
+        },
+        {
+          "expr": "45",
+          "legendFormat": "Shadow SLA (45ms)",
+          "refId": "C"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "id": 2,
+      "yAxes": [
+        {
+          "label": "Milliseconds",
+          "min": 0,
+          "max": 100
+        },
+        {
+          "show": false
+        }
+      ],
+      "thresholds": [
+        {
+          "value": 45,
+          "colorMode": "critical",
+          "op": "gt",
+          "fill": true,
+          "line": true
+        }
+      ]
+    },
+    {
+      "title": "Success Rate Comparison",
+      "type": "graph",
+      "targets": [
+        {
+          "expr": "rate(routing_requests_total{status=\"success\",system=\"new_routing_engine\"}[5m]) / rate(routing_requests_total{system=\"new_routing_engine\"}[5m]) * 100",
+          "legendFormat": "New Engine Success Rate",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(routing_requests_total{status=\"success\",system=\"legacy_system\"}[5m]) / rate(routing_requests_total{system=\"legacy_system\"}[5m]) * 100",
+          "legendFormat": "Legacy System Success Rate",
+          "refId": "B"
+        },
+        {
+          "expr": "98.5",
+          "legendFormat": "Minimum SLA (98.5%)",
+          "refId": "C"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "id": 3,
+      "yAxes": [
+        {
+          "label": "Percentage",
+          "min": 95,
+          "max": 100
+        },
+        {
+          "show": false
+        }
+      ],
+      "thresholds": [
+        {
+          "value": 98.5,
+          "colorMode": "critical",
+          "op": "lt",
+          "fill": true,
+          "line": true
+        }
+      ]
+    },
+    {
+      "title": "New Engine Metrics",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "id": 4,
+      "collapsed": false
+    },
+    {
+      "title": "New Engine - Current P95 Latency",
+      "type": "singlestat",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, routing_duration_seconds_bucket{system=\"new_routing_engine\"})",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 0,
+        "y": 10
+      },
+      "id": 5,
+      "thresholds": "40,45",
+      "colorBackground": true,
+      "format": "ms",
+      "valueName": "current"
+    },
+    {
+      "title": "New Engine - Success Rate",
+      "type": "singlestat",
+      "targets": [
+        {
+          "expr": "rate(routing_requests_total{status=\"success\",system=\"new_routing_engine\"}[5m]) / rate(routing_requests_total{system=\"new_routing_engine\"}[5m]) * 100",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 4,
+        "y": 10
+      },
+      "id": 6,
+      "thresholds": "98.5,99",
+      "colorBackground": true,
+      "format": "percent",
+      "valueName": "current"
+    },
+    {
+      "title": "New Engine - Requests/sec",
+      "type": "singlestat",
+      "targets": [
+        {
+          "expr": "rate(routing_requests_total{system=\"new_routing_engine\"}[5m])",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 8,
+        "y": 10
+      },
+      "id": 7,
+      "format": "short",
+      "colorBackground": false,
+      "valueName": "current"
+    },
+    {
+      "title": "Legacy System Metrics",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "id": 8,
+      "collapsed": false
+    },
+    {
+      "title": "Legacy - Current P95 Latency",
+      "type": "singlestat",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, routing_duration_seconds_bucket{system=\"legacy_system\"})",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 0,
+        "y": 17
+      },
+      "id": 9,
+      "thresholds": "40,50",
+      "colorBackground": true,
+      "format": "ms",
+      "valueName": "current"
+    },
+    {
+      "title": "Legacy - Success Rate", 
+      "type": "singlestat",
+      "targets": [
+        {
+          "expr": "rate(routing_requests_total{status=\"success\",system=\"legacy_system\"}[5m]) / rate(routing_requests_total{system=\"legacy_system\"}[5m]) * 100",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 4,
+        "y": 17
+      },
+      "id": 10,
+      "thresholds": "98.5,99",
+      "colorBackground": true,
+      "format": "percent",
+      "valueName": "current"
+    },
+    {
+      "title": "Legacy - Requests/sec",
+      "type": "singlestat",
+      "targets": [
+        {
+          "expr": "rate(routing_requests_total{system=\"legacy_system\"}[5m])",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 8,
+        "y": 17
+      },
+      "id": 11,
+      "format": "short",
+      "colorBackground": false,
+      "valueName": "current"
+    },
+    {
+      "title": "Traffic Distribution",
+      "type": "graph",
+      "targets": [
+        {
+          "expr": "rate(routing_requests_total{system=\"new_routing_engine\"}[5m])",
+          "legendFormat": "New Engine Traffic",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(routing_requests_total{system=\"legacy_system\"}[5m])",
+          "legendFormat": "Legacy System Traffic",
+          "refId": "B"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 17
+      },
+      "id": 12,
+      "yAxes": [
+        {
+          "label": "Requests/sec",
+          "min": 0
+        },
+        {
+          "show": false
+        }
+      ]
+    },
+    {
+      "title": "Shadow Testing Validation",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 25
+      },
+      "id": 13,
+      "collapsed": false
+    },
+    {
+      "title": "SLA Compliance Status",
+      "type": "table",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, routing_duration_seconds_bucket{system=\"new_routing_engine\"})",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "id": 14,
+      "transform": "table",
+      "columns": [
+        {
+          "text": "Metric",
+          "value": "metric"
+        },
+        {
+          "text": "Current Value",
+          "value": "Value"
+        },
+        {
+          "text": "SLA Target",
+          "value": "sla"
+        },
+        {
+          "text": "Status",
+          "value": "status"
+        }
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 16,
+  "style": "dark",
+  "tags": [
+    "shadow-testing",
+    "comparison",
+    "routing-engine"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "5s",
+      "10s",
+      "30s",
+      "1m",
+      "5m",
+      "15m",
+      "30m",
+      "1h",
+      "2h",
+      "1d"
+    ]
+  },
+  "timezone": "",
+  "title": "Shadow Testing - Legacy vs New Engine",
+  "uid": "shadow-comparison",
+  "version": 1
+}

@@ -1,0 +1,88 @@
+# Prometheus configuration for Message Routing Engine Shadow Deployment
+# Monitors both legacy and new routing systems for comparison
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+# Rules for alerting
+rule_files:
+  - "alert_rules.yml"
+
+# Scrape configurations
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Message Routing Engine - New System
+  - job_name: 'message-routing-engine'
+    static_configs:
+      - targets: ['message-routing-engine:8080']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    labels:
+      system: 'new_routing_engine'
+      phase: 'shadow'
+
+  # Pokemon Gym Legacy Service
+  - job_name: 'pokemon-gym-legacy'
+    static_configs:
+      - targets: ['pokemon-gym-legacy:8080']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    labels:
+      system: 'legacy_system'
+      phase: 'shadow'
+
+  # Traffic Splitter (Nginx)
+  - job_name: 'traffic-splitter'
+    static_configs:
+      - targets: ['traffic-splitter:80']
+    metrics_path: '/nginx_status'
+    scrape_interval: 30s
+    labels:
+      component: 'load_balancer'
+      phase: 'shadow'
+
+  # Redis Cache
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:6379']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+    labels:
+      component: 'cache'
+      phase: 'shadow'
+
+  # Performance Tester
+  - job_name: 'performance-tester'
+    static_configs:
+      - targets: ['performance-tester:8080']
+    metrics_path: '/metrics'
+    scrape_interval: 60s
+    labels:
+      component: 'test_harness'
+      phase: 'shadow'
+
+  # System metrics from containers
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: []  # Would be populated in full deployment
+
+# Remote write configuration for long-term storage (optional)
+# remote_write:
+#   - url: "https://your-monitoring-system/api/v1/write"
+
+# Remote read configuration (optional)
+# remote_read:
+#   - url: "https://your-monitoring-system/api/v1/read"
