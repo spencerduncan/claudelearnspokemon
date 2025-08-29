@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+import numpy as np
+
 from .circuit_breaker import CircuitBreaker, CircuitConfig
 from .claude_code_manager import ClaudeCodeManager
 from .opus_strategist_exceptions import (
@@ -61,6 +63,33 @@ class OpusStrategist:
     - Comprehensive error recovery
     """
 
+    # Named constants for magic numbers
+    # NPC and obstacle tile constants
+    NPC_TILE_MIN = 200
+    NPC_TILE_MAX = 220
+    PLAYER_TILE_ID = 255
+    MENU_TILE_ID = 254
+    
+    # Environment analysis constants
+    TILE_COMPLEXITY_DIVISOR = 50.0  # For normalizing tile diversity to complexity score
+    MAX_POKEMON_BADGES = 8  # Total gym badges in Pokemon Red
+    
+    # Response size limits
+    MAX_RESPONSE_SIZE_BYTES = 10 * 1024 * 1024  # 10MB response size limit
+    
+    # Performance targets (in milliseconds)
+    PERFORMANCE_TARGET_MS = 50  # Target for game state processing
+    
+    # Cache TTL constants (in seconds)
+    CACHE_TTL_LOW_PRIORITY = 600.0      # 10 minutes
+    CACHE_TTL_NORMAL_PRIORITY = 300.0   # 5 minutes
+    CACHE_TTL_HIGH_PRIORITY = 120.0     # 2 minutes
+    CACHE_TTL_CRITICAL_PRIORITY = 60.0  # 1 minute
+    
+    # Resource thresholds
+    LOW_POKEBALL_THRESHOLD = 5
+    LOW_POTION_THRESHOLD = 3
+
     def __init__(
         self,
         claude_manager: ClaudeCodeManager,
@@ -86,7 +115,7 @@ class OpusStrategist:
         # Initialize components
         self.parser = StrategyResponseParser(
             validation_timeout=5.0,
-            max_response_size=10 * 1024 * 1024,  # 10MB
+            max_response_size=self.MAX_RESPONSE_SIZE_BYTES,
             validation_rules=parser_config,
         )
 
@@ -344,12 +373,12 @@ class OpusStrategist:
     def _get_cache_ttl_for_priority(self, priority: StrategyPriority) -> float:
         """Get appropriate cache TTL based on request priority."""
         ttl_map = {
-            StrategyPriority.LOW: 600.0,  # 10 minutes
-            StrategyPriority.NORMAL: 300.0,  # 5 minutes
-            StrategyPriority.HIGH: 120.0,  # 2 minutes
-            StrategyPriority.CRITICAL: 60.0,  # 1 minute
+            StrategyPriority.LOW: self.CACHE_TTL_LOW_PRIORITY,
+            StrategyPriority.NORMAL: self.CACHE_TTL_NORMAL_PRIORITY,
+            StrategyPriority.HIGH: self.CACHE_TTL_HIGH_PRIORITY,
+            StrategyPriority.CRITICAL: self.CACHE_TTL_CRITICAL_PRIORITY,
         }
-        return ttl_map.get(priority, 300.0)
+        return ttl_map.get(priority, self.CACHE_TTL_NORMAL_PRIORITY)
 
     def _create_fallback_strategy(
         self, game_state: dict[str, Any], reason: str
@@ -457,9 +486,9 @@ class OpusStrategist:
 
                 # Performance validation
                 processing_time = (time.time() - start_time) * 1000
-                if processing_time > 50:
+                if processing_time > self.PERFORMANCE_TARGET_MS:
                     logger.warning(
-                        f"Game state processing took {processing_time:.2f}ms (target: <50ms)"
+                        f"Game state processing took {processing_time:.2f}ms (target: <{self.PERFORMANCE_TARGET_MS}ms)"
                     )
 
                 # Record success for circuit breaker
@@ -601,7 +630,6 @@ class OpusStrategist:
         Returns:
             Dictionary with environmental analysis
         """
-        import numpy as np
 
         environmental_analysis: dict[str, Any] = {
             "grid_dimensions": {"width": 0, "height": 0},
@@ -634,8 +662,8 @@ class OpusStrategist:
             unique_tiles = np.unique(tiles)
             environmental_analysis["tile_diversity"] = len(unique_tiles)
 
-            # NPC detection (assuming NPC tile IDs are in 200-220 range)
-            npc_positions = np.where((tiles >= 200) & (tiles <= 220))
+            # NPC detection using defined tile ID ranges
+            npc_positions = np.where((tiles >= self.NPC_TILE_MIN) & (tiles <= self.NPC_TILE_MAX))
             if len(npc_positions[0]) > 0:
                 environmental_analysis["npc_positions"] = [
                     {"row": int(r), "col": int(c)}
@@ -643,8 +671,8 @@ class OpusStrategist:
                 ]
 
             # Walkable area estimation (exclude known obstacle tiles)
-            obstacle_tiles = {255, 254}  # Player and menu tiles
-            obstacle_tiles.update(range(200, 221))  # NPC tiles
+            obstacle_tiles = {self.PLAYER_TILE_ID, self.MENU_TILE_ID}  # Player and menu tiles
+            obstacle_tiles.update(range(self.NPC_TILE_MIN, self.NPC_TILE_MAX + 1))  # NPC tiles
             total_tiles = tiles.size
             obstacle_count = sum(
                 np.sum(tiles == tile_id) for tile_id in obstacle_tiles if tile_id in unique_tiles
@@ -655,7 +683,7 @@ class OpusStrategist:
 
             # Complexity score based on tile diversity and layout patterns
             environmental_analysis["complexity_score"] = min(
-                1.0, environmental_analysis["tile_diversity"] / 50.0
+                1.0, environmental_analysis["tile_diversity"] / self.TILE_COMPLEXITY_DIVISOR
             )
 
         return environmental_analysis
@@ -716,9 +744,8 @@ class OpusStrategist:
 
         # Calculate completion percentage estimate
         badges = progress_analysis["badges_earned"]
-        max_badges = 8  # Pokemon Red has 8 gym badges
         progress_analysis["completion_indicators"]["badge_progress"] = (
-            badges / max_badges if badges <= max_badges else 1.0
+            badges / self.MAX_POKEMON_BADGES if badges <= self.MAX_POKEMON_BADGES else 1.0
         )
 
         return progress_analysis
@@ -753,7 +780,7 @@ class OpusStrategist:
                 inventory = game_state["inventory"]
                 if isinstance(inventory, dict):
                     pokeball_count = inventory.get("pokeball", 0)
-                    if pokeball_count < 5:
+                    if pokeball_count < self.LOW_POKEBALL_THRESHOLD:
                         opportunities.append(
                             {
                                 "type": "resource_acquisition",
@@ -764,7 +791,7 @@ class OpusStrategist:
                         )
 
                     potion_count = inventory.get("potion", 0)
-                    if potion_count < 3:
+                    if potion_count < self.LOW_POTION_THRESHOLD:
                         opportunities.append(
                             {
                                 "type": "healing_preparation",
