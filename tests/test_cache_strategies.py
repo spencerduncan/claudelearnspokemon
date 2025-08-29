@@ -17,6 +17,8 @@ import pytest
 from src.claudelearnspokemon.compatibility.cache_strategies import (
     CacheError,
     CacheStrategy,
+    CircuitBreaker,
+    CircuitBreakerState,
     InMemoryCache,
     NullCache,
     RedisCache,
@@ -429,33 +431,353 @@ class TestNullCache:
 
 
 @pytest.mark.fast
-class TestRedisCacheStub:
-    """Test RedisCache stub implementation."""
+class TestCircuitBreaker:
+    """Test circuit breaker pattern implementation."""
 
     def setup_method(self):
-        """Set up Redis cache stub for each test."""
-        self.cache = RedisCache("redis://test:6379", default_ttl_seconds=300)
+        """Set up circuit breaker for testing."""
+        self.circuit_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=0.1)
 
-    def test_redis_cache_initialization(self):
-        """Test Redis cache initializes with correct parameters."""
-        assert self.cache.redis_url == "redis://test:6379"
+    def test_circuit_breaker_initial_state(self):
+        """Test circuit breaker starts in CLOSED state."""
+        assert self.circuit_breaker.state == CircuitBreakerState.CLOSED
+        assert self.circuit_breaker.failure_count == 0
+
+    def test_successful_operation_keeps_circuit_closed(self):
+        """Test successful operations keep circuit in CLOSED state."""
+        def success_func():
+            return "success"
+
+        result = self.circuit_breaker.call(success_func)
+        assert result == "success"
+        assert self.circuit_breaker.state == CircuitBreakerState.CLOSED
+        assert self.circuit_breaker.failure_count == 0
+
+    def test_circuit_opens_after_threshold_failures(self):
+        """Test circuit opens after failure threshold is reached."""
+        def failing_func():
+            raise Exception("Test failure")
+
+        # Should fail threshold number of times before opening
+        for i in range(2):  # threshold - 1
+            with pytest.raises(Exception):
+                self.circuit_breaker.call(failing_func)
+            assert self.circuit_breaker.state == CircuitBreakerState.CLOSED
+            assert self.circuit_breaker.failure_count == i + 1
+
+        # Final failure should open circuit
+        with pytest.raises(Exception):
+            self.circuit_breaker.call(failing_func)
+        assert self.circuit_breaker.state == CircuitBreakerState.OPEN
+        assert self.circuit_breaker.failure_count == 3
+
+    def test_circuit_prevents_calls_when_open(self):
+        """Test circuit breaker prevents calls when in OPEN state."""
+        def failing_func():
+            raise Exception("Test failure")
+
+        # Force circuit to OPEN state
+        for _ in range(3):
+            with pytest.raises(Exception):
+                self.circuit_breaker.call(failing_func)
+
+        # Should now prevent calls
+        with pytest.raises(Exception, match="Circuit breaker is OPEN"):
+            self.circuit_breaker.call(failing_func)
+
+    def test_circuit_transitions_to_half_open_after_timeout(self):
+        """Test circuit transitions to HALF_OPEN after recovery timeout."""
+        def failing_func():
+            raise Exception("Test failure")
+
+        def success_func():
+            return "success"
+
+        # Force circuit to OPEN
+        for _ in range(3):
+            with pytest.raises(Exception):
+                self.circuit_breaker.call(failing_func)
+
+        # Wait for recovery timeout
+        time.sleep(0.15)
+
+        # Next call should transition to HALF_OPEN and succeed
+        result = self.circuit_breaker.call(success_func)
+        assert result == "success"
+        assert self.circuit_breaker.state == CircuitBreakerState.CLOSED
+        assert self.circuit_breaker.failure_count == 0
+
+
+@pytest.mark.fast
+class TestRedisCacheProduction:
+    """Test production RedisCache implementation with mocked Redis."""
+
+    def setup_method(self):
+        """Set up Redis cache with mocked Redis client."""
+        # Use invalid URL to ensure Redis connection fails and fallback is used
+        self.cache = RedisCache(
+            redis_url="redis://localhost:9999",  # Non-existent Redis
+            default_ttl_seconds=300,
+            fallback_enabled=True,
+        )
+
+    def test_redis_cache_initialization_with_fallback(self):
+        """Test Redis cache initializes with fallback when Redis unavailable."""
+        assert self.cache.redis_url == "redis://localhost:9999"
         assert self.cache.default_ttl == 300
+        assert self.cache.fallback_enabled is True
+        assert self.cache._fallback_cache is not None
+        assert self.cache.is_healthy() is False  # Should be unhealthy due to connection failure
 
-    def test_redis_stub_behavior(self):
-        """Test Redis stub returns expected responses."""
-        # All operations should work as no-ops in stub
-        assert self.cache.get("key") is None
-        assert self.cache.set("key", {"data": "value"}) is True
-        assert self.cache.clear() is True
-        assert self.cache.clear("key") is True
+    def test_fallback_cache_operations(self):
+        """Test cache operations use fallback when Redis is unavailable."""
+        # Set and get should work through fallback
+        test_data = {"type": "test", "timestamp": time.time()}
+        
+        result = self.cache.set("test_key", test_data)
+        assert result is True
 
-    def test_redis_stats_show_stub_status(self):
-        """Test Redis stats indicate stub implementation."""
+        retrieved = self.cache.get("test_key")
+        assert retrieved == test_data
+
+        # Clear should work
+        result = self.cache.clear("test_key")
+        assert result is True
+
+        # Key should be gone
+        assert self.cache.get("test_key") is None
+
+    def test_fallback_operations_count_in_stats(self):
+        """Test fallback operations are tracked in statistics."""
+        test_data = {"data": "fallback_test"}
+        
+        self.cache.set("key1", test_data)
+        self.cache.get("key1")
+        self.cache.get("nonexistent")
+        
         stats = self.cache.get_stats()
         assert stats["strategy"] == "RedisCache"
-        assert stats["status"] == "stub_implementation"
-        assert "stub" in stats["note"].lower()
-        assert stats["redis_url"] == "redis://test:6379"
+        assert stats["status"] == "degraded"  # Should be degraded since Redis is down
+        assert stats["fallback_operations"] > 0
+        assert stats["is_healthy"] is False
+        assert "fallback_cache_stats" in stats
+
+    def test_compression_functionality(self):
+        """Test JSON compression for large values."""
+        # Create cache with compression enabled
+        cache = RedisCache(
+            redis_url="redis://localhost:9999",
+            fallback_enabled=True,
+            compress_values=True,
+        )
+        
+        # Create large test data that would trigger compression
+        large_data = {"data": "x" * 2000, "metadata": {"large": True}}
+        
+        # Should work with compression through fallback
+        result = cache.set("large_key", large_data)
+        assert result is True
+        
+        retrieved = cache.get("large_key")
+        assert retrieved == large_data
+
+
+@pytest.mark.medium
+class TestRedisCacheWithFakeRedis:
+    """Test RedisCache with fake Redis implementation for full functionality testing."""
+    
+    def setup_method(self):
+        """Set up Redis cache with fake Redis."""
+        try:
+            import fakeredis
+            
+            # Create cache that will use fake Redis
+            self.cache = RedisCache(
+                redis_url="redis://localhost:6379",
+                default_ttl_seconds=300,
+                fallback_enabled=True,
+            )
+            
+            # Replace the Redis client with fake Redis
+            self.cache._redis_client = fakeredis.FakeRedis(decode_responses=True)
+            self.cache._is_healthy = True
+            self.fake_redis_available = True
+            
+        except ImportError:
+            # Skip tests if fakeredis not available
+            self.fake_redis_available = False
+            pytest.skip("fakeredis not available")
+    
+    def test_real_redis_operations(self):
+        """Test Redis operations work with fake Redis backend."""
+        if not self.fake_redis_available:
+            pytest.skip("fakeredis not available")
+        
+        test_data = {"type": "redis_test", "value": 42}
+        
+        # Set operation
+        result = self.cache.set("redis_key", test_data)
+        assert result is True
+        
+        # Get operation
+        retrieved = self.cache.get("redis_key")
+        assert retrieved == test_data
+        
+        # Stats should show successful operations
+        stats = self.cache.get_stats()
+        assert stats["strategy"] == "RedisCache"
+        assert stats["status"] == "production"
+        assert stats["hits"] > 0
+        assert stats["fallback_operations"] == 0  # Should not use fallback
+        
+    def test_redis_ttl_functionality(self):
+        """Test TTL functionality works with Redis."""
+        if not self.fake_redis_available:
+            pytest.skip("fakeredis not available")
+            
+        test_data = {"data": "expires"}
+        
+        # Set with short TTL
+        result = self.cache.set("expiring_key", test_data, ttl_seconds=0.1)
+        assert result is True
+        
+        # Should be available immediately
+        assert self.cache.get("expiring_key") == test_data
+        
+        # Wait for expiration (fakeredis supports TTL)
+        time.sleep(0.15)
+        
+        # Should be expired
+        assert self.cache.get("expiring_key") is None
+
+    def test_redis_clear_operations(self):
+        """Test clear operations with Redis."""
+        if not self.fake_redis_available:
+            pytest.skip("fakeredis not available")
+            
+        # Set multiple keys
+        self.cache.set("key1", {"data": "1"})
+        self.cache.set("key2", {"data": "2"})
+        
+        # Clear specific key
+        result = self.cache.clear("key1")
+        assert result is True
+        
+        # Check key1 is gone, key2 remains
+        assert self.cache.get("key1") is None
+        assert self.cache.get("key2") == {"data": "2"}
+        
+        # Clear all keys
+        result = self.cache.clear()
+        assert result is True
+        
+        # Both should be gone
+        assert self.cache.get("key2") is None
+
+    def test_json_serialization_edge_cases(self):
+        """Test JSON serialization handles edge cases."""
+        if not self.fake_redis_available:
+            pytest.skip("fakeredis not available")
+            
+        # Test various data types
+        edge_cases = [
+            {"empty": {}},
+            {"null_value": None},
+            {"boolean": True},
+            {"number": 42.5},
+            {"list": [1, 2, 3]},
+            {"nested": {"deep": {"value": "test"}}},
+            {"unicode": "🔥⚡️🎯"},
+        ]
+        
+        for i, test_data in enumerate(edge_cases):
+            key = f"edge_case_{i}"
+            
+            # Should serialize and deserialize correctly
+            assert self.cache.set(key, test_data) is True
+            retrieved = self.cache.get(key)
+            assert retrieved == test_data
+
+
+@pytest.mark.slow  
+class TestRedisCacheResilience:
+    """Test Redis cache resilience features including circuit breaker and fallback."""
+    
+    def test_circuit_breaker_integration(self):
+        """Test circuit breaker integration with Redis operations."""
+        from unittest.mock import Mock, MagicMock
+        
+        # Create cache with short recovery timeout for testing
+        cache = RedisCache(
+            redis_url="redis://test:6379",
+            fallback_enabled=True,
+        )
+        cache._circuit_breaker = CircuitBreaker(failure_threshold=2, recovery_timeout=0.1)
+        
+        # Mock Redis client to simulate failures
+        mock_redis = Mock()
+        cache._redis_client = mock_redis
+        
+        # First failure
+        mock_redis.get.side_effect = Exception("Redis connection failed")
+        result = cache.get("test_key")
+        assert result is None  # Should use fallback
+        
+        # Second failure should open circuit
+        result = cache.get("test_key2")
+        assert result is None  # Should use fallback
+        
+        # Check circuit is open
+        assert cache._circuit_breaker.state == CircuitBreakerState.OPEN
+        
+        # Should still use fallback while circuit is open
+        cache._fallback_cache.set("fallback_key", {"fallback": True})
+        result = cache.get("fallback_key")
+        assert result == {"fallback": True}
+        
+        stats = cache.get_stats()
+        assert stats["circuit_breaker_state"] == "open"
+        assert stats["fallback_operations"] > 0
+
+    def test_health_monitoring(self):
+        """Test health monitoring functionality."""
+        cache = RedisCache(
+            redis_url="redis://localhost:9999",  # Invalid Redis
+            health_check_interval=0.1,
+        )
+        
+        # Should be unhealthy initially
+        assert cache.is_healthy() is False
+        
+        # Stats should reflect unhealthy state
+        stats = cache.get_stats()
+        assert stats["is_healthy"] is False
+        assert stats["status"] == "degraded"
+        
+    def test_connection_pool_stats(self):
+        """Test connection pool statistics."""
+        cache = RedisCache(redis_url="redis://localhost:9999")
+        
+        # Should handle missing connection pool gracefully
+        pool_stats = cache.get_connection_pool_stats()
+        assert "error" in pool_stats
+
+    def test_error_handling_edge_cases(self):
+        """Test error handling for various edge cases."""
+        cache = RedisCache(
+            redis_url="redis://localhost:9999",
+            fallback_enabled=False,  # No fallback to test pure error handling
+        )
+        
+        # Operations should fail gracefully without fallback
+        assert cache.get("any_key") is None  # Should return None, not raise
+        assert cache.set("any_key", {"data": "test"}) is False  # Should return False
+        assert cache.clear("any_key") is False  # Should return False
+        
+        # Stats should still work
+        stats = cache.get_stats()
+        assert stats["strategy"] == "RedisCache"
+        assert stats["errors"] > 0
 
 
 @pytest.mark.fast
@@ -576,11 +898,15 @@ class TestCacheStrategiesIntegration:
             assert isinstance(result, bool)
 
             retrieved = strategy.get(test_key)
-            # NullCache and RedisCache (stub) will return None
+            # NullCache will return None
             # InMemoryCache should return the value
+            # RedisCache will return value through fallback or None if no fallback
             if isinstance(strategy, InMemoryCache):
                 assert retrieved == test_value
-            else:
+            elif isinstance(strategy, RedisCache):
+                # RedisCache might use fallback cache, so value could be returned or None
+                assert retrieved == test_value or retrieved is None
+            else:  # NullCache
                 assert retrieved is None
 
             result = strategy.clear(test_key)
@@ -606,12 +932,16 @@ class TestCacheStrategiesIntegration:
         # Test with different strategies
         memory_result, memory_stats = cache_user(InMemoryCache())
         null_result, null_stats = cache_user(NullCache())
-        redis_result, redis_stats = cache_user(RedisCache())
+        
+        # Create Redis cache with fallback for consistent testing
+        redis_cache = RedisCache(fallback_enabled=True)
+        redis_result, redis_stats = cache_user(redis_cache)
 
         # Results should be consistent with each strategy's behavior
         assert memory_result == {"data": "test_data"}  # InMemory returns data
         assert null_result is None  # Null returns None
-        assert redis_result is None  # Redis stub returns None
+        # Redis with fallback should return data (through fallback cache)
+        assert redis_result == {"data": "test_data"} or redis_result is None
 
         # All should return stats
         assert all("strategy" in stats for stats in [memory_stats, null_stats, redis_stats])

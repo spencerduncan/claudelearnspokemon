@@ -200,9 +200,10 @@ class TestCacheStrategySubstitution:
             assert stats["strategy"] == "NullCache"
             assert "no-ops" in stats["note"].lower()
 
-    def test_redis_cache_stub_behavior(self):
-        """Test RedisCache stub behaves consistently."""
-        redis_cache = RedisCache("redis://test:6379")
+    def test_redis_cache_production_behavior(self):
+        """Test RedisCache production behavior with fallback caching."""
+        # Use fallback_enabled=True (default) to test production behavior
+        redis_cache = RedisCache("redis://test:6379", fallback_enabled=True)
 
         with patch(
             "src.claudelearnspokemon.pokemon_gym_factory.requests.Session"
@@ -216,21 +217,57 @@ class TestCacheStrategySubstitution:
             mock_response.json.return_value = {"session_active": True}
             mock_session.get.return_value = mock_response
 
-            # Detection with Redis stub
+            # Detection with Redis cache (will use fallback)
             result = detect_server_type(8081, cache_strategy=redis_cache)
             assert result == "benchflow"
 
-            # Redis stub should not cache (always returns None on get)
+            # Second call should use cached value from fallback cache
             result2 = detect_server_type(8081, cache_strategy=redis_cache)
             assert result2 == "benchflow"
 
-            # Each call makes HTTP request (stub doesn't cache)
-            assert mock_session.get.call_count == 2
+            # Only one HTTP request should be made (second is cached)
+            assert mock_session.get.call_count == 1
 
-            # Verify Redis stub stats
+            # Verify Redis cache stats show fallback usage
             stats = redis_cache.get_stats()
             assert stats["strategy"] == "RedisCache"
-            assert stats["status"] == "stub_implementation"
+            assert stats["status"] == "degraded"  # Redis unavailable, using fallback
+            assert stats["fallback_operations"] > 0
+
+    def test_redis_cache_no_fallback_behavior(self):
+        """Test RedisCache without fallback behaves like old stub."""
+        # Disable fallback to test "no caching" behavior
+        redis_cache = RedisCache("redis://test:6379", fallback_enabled=False)
+
+        with patch(
+            "src.claudelearnspokemon.pokemon_gym_factory.requests.Session"
+        ) as mock_session_class:
+            mock_session = Mock()
+            mock_session_class.return_value = mock_session
+
+            # Mock server response
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {"session_active": True}
+            mock_session.get.return_value = mock_response
+
+            # Detection with Redis cache (no fallback)
+            result = detect_server_type(8081, cache_strategy=redis_cache)
+            assert result == "benchflow"
+
+            # Second call should also make HTTP request (no caching without fallback)
+            result2 = detect_server_type(8081, cache_strategy=redis_cache)
+            assert result2 == "benchflow"
+
+            # Each call makes HTTP request (no caching without Redis or fallback)
+            assert mock_session.get.call_count == 2
+
+            # Verify Redis cache stats show errors but no fallback
+            stats = redis_cache.get_stats()
+            assert stats["strategy"] == "RedisCache"
+            assert stats["status"] == "degraded"
+            assert stats["fallback_operations"] == 0  # No fallback configured
+            assert stats["errors"] > 0
 
 
 @pytest.mark.fast

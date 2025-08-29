@@ -29,6 +29,7 @@ dependencies = [
     "types-psutil>=5.9.0",
     "python-Levenshtein>=0.21.1",
     "responses>=0.25.0",
+    "redis>=5.0.0",
 ]
 
 [project.optional-dependencies]
@@ -41,6 +42,7 @@ dev = [
     "types-requests>=2.31.0",
     "types-docker>=6.1.0",
     "testcontainers>=4.0.0",
+    "fakeredis>=2.21.0",
 ]
 
 [tool.setuptools.packages.find]
