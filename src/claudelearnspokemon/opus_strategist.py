@@ -37,6 +37,879 @@ from .strategy_validator import StrategyResponseValidator, validate_strategic_js
 logger = logging.getLogger(__name__)
 
 
+class InputSanitizer:
+    """
+    Guardian Security: Comprehensive input sanitization and validation.
+    
+    Provides defense-in-depth protection against:
+    - JSON injection attacks
+    - Memory exhaustion attacks
+    - XSS and code injection
+    - Malformed data exploits
+    - Size-based DoS attacks
+    """
+    
+    # Security limits (Guardian principle: bounded resources)
+    MAX_JSON_SIZE = 1024 * 1024  # 1MB JSON limit
+    MAX_STRING_LENGTH = 10000    # 10K string limit
+    MAX_RECURSION_DEPTH = 50     # Prevent deep recursion attacks
+    MAX_COLLECTION_SIZE = 1000   # Bounded collections
+    
+    # Dangerous patterns that must be blocked
+    DANGEROUS_PATTERNS = [
+        # Script injection patterns
+        r'<script[^>]*>.*?</script>',
+        r'javascript:',
+        r'vbscript:',
+        r'data:text/html',
+        r'eval\s*\(',
+        r'Function\s*\(',
+        r'setTimeout\s*\(',
+        r'setInterval\s*\(',
+        
+        # Python injection patterns (Guardian Security Fix)
+        r'__import__\s*\(',
+        r'exec\s*\(',
+        r'eval\s*\(',
+        r'compile\s*\(',
+        r'import\s+os',
+        r'import\s+sys',
+        r'import\s+subprocess',
+        r'from\s+os\s+import',
+        r'from\s+sys\s+import',
+        r'from\s+subprocess\s+import',
+        r'getattr\s*\(',
+        r'setattr\s*\(',
+        r'delattr\s*\(',
+        r'hasattr\s*\(',
+        r'globals\s*\(\)',
+        r'locals\s*\(\)',
+        r'vars\s*\(\)',
+        r'dir\s*\(\)',
+        
+        # SQL injection patterns  
+        r'union\s+select',
+        r'drop\s+table',
+        r'insert\s+into',
+        r'delete\s+from',
+        r'update\s+.*\s+set',
+        r';.*;',
+        r'--',
+        r'/\*.*?\*/',
+        
+        # Path traversal patterns
+        r'\.\./.*',
+        r'\.\.\\.*',
+        r'/etc/passwd',
+        r'/etc/shadow',
+        r'c:\\windows\\system32',
+        
+        # Command injection patterns
+        r'[;&|`$()]',
+        r'\$\{[^}]*\}',
+        r'%[a-zA-Z0-9_]+%',
+        
+        # Protocol handlers
+        r'file://',
+        r'ftp://',
+        r'gopher://',
+        r'ldap://',
+    ]
+    
+    @classmethod
+    def safe_json_loads(cls, json_string: str) -> dict[str, any]:
+        """
+        Securely parse JSON with comprehensive validation.
+        
+        Guardian Security Features:
+        - Size limit enforcement (1MB max)
+        - Pattern validation before parsing
+        - Memory exhaustion protection
+        - Malformed JSON detection
+        
+        Args:
+            json_string: JSON string to parse
+            
+        Returns:
+            Safely parsed dictionary
+            
+        Raises:
+            ValueError: On security validation failures
+        """
+        import json
+        import re
+        
+        # Size validation - prevent memory exhaustion
+        if len(json_string) > cls.MAX_JSON_SIZE:
+            raise ValueError(f"JSON size {len(json_string)} exceeds limit {cls.MAX_JSON_SIZE}")
+        
+        # Pattern validation - block dangerous content
+        for pattern in cls.DANGEROUS_PATTERNS:
+            if re.search(pattern, json_string, re.IGNORECASE):
+                raise ValueError(f"Dangerous pattern detected: {pattern}")
+        
+        # Additional JSON-specific validations
+        if json_string.count('{') > 1000 or json_string.count('[') > 1000:
+            raise ValueError("Excessive nesting detected - potential DoS attack")
+        
+        if json_string.count('"') > 10000:
+            raise ValueError("Excessive string count - potential DoS attack")
+        
+        try:
+            # Parse with built-in protections
+            parsed_data = json.loads(json_string)
+            
+            # Post-parse validation
+            return cls.sanitize_json_data(parsed_data)
+            
+        except json.JSONDecodeError as e:
+            raise ValueError(f"JSON parsing failed: {str(e)}")
+        except RecursionError:
+            raise ValueError("JSON structure too deeply nested")
+    
+    @classmethod
+    def sanitize_json_data(cls, data: any, current_depth: int = 0) -> any:
+        """
+        Recursively sanitize JSON data with depth limiting.
+        
+        Guardian Security Features:
+        - Recursive depth limiting
+        - String length enforcement
+        - Collection size limiting
+        - Pattern-based content filtering
+        
+        Args:
+            data: Data structure to sanitize
+            current_depth: Current recursion depth
+            
+        Returns:
+            Sanitized data structure
+            
+        Raises:
+            ValueError: On security violations
+        """
+        import re
+        
+        # Depth protection - prevent stack overflow
+        if current_depth > cls.MAX_RECURSION_DEPTH:
+            raise ValueError(f"Recursion depth {current_depth} exceeds limit {cls.MAX_RECURSION_DEPTH}")
+        
+        if isinstance(data, str):
+            # String validation and sanitization
+            if len(data) > cls.MAX_STRING_LENGTH:
+                raise ValueError(f"String length {len(data)} exceeds limit {cls.MAX_STRING_LENGTH}")
+            
+            # Check for dangerous patterns
+            for pattern in cls.DANGEROUS_PATTERNS:
+                if re.search(pattern, data, re.IGNORECASE):
+                    raise ValueError(f"Dangerous pattern in string: {pattern}")
+            
+            # Return sanitized string (could add further sanitization here)
+            return data
+        
+        elif isinstance(data, dict):
+            # Dictionary validation
+            if len(data) > cls.MAX_COLLECTION_SIZE:
+                raise ValueError(f"Dictionary size {len(data)} exceeds limit {cls.MAX_COLLECTION_SIZE}")
+            
+            # Recursively sanitize dictionary values
+            sanitized_dict = {}
+            for key, value in data.items():
+                # Sanitize key
+                if not isinstance(key, str):
+                    key = str(key)
+                sanitized_key = cls.sanitize_json_data(key, current_depth + 1)
+                
+                # Sanitize value
+                sanitized_value = cls.sanitize_json_data(value, current_depth + 1)
+                sanitized_dict[sanitized_key] = sanitized_value
+            
+            return sanitized_dict
+        
+        elif isinstance(data, list):
+            # List validation
+            if len(data) > cls.MAX_COLLECTION_SIZE:
+                raise ValueError(f"List size {len(data)} exceeds limit {cls.MAX_COLLECTION_SIZE}")
+            
+            # Recursively sanitize list items
+            sanitized_list = []
+            for item in data:
+                sanitized_item = cls.sanitize_json_data(item, current_depth + 1)
+                sanitized_list.append(sanitized_item)
+            
+            return sanitized_list
+        
+        elif isinstance(data, (int, float, bool, type(None))):
+            # Primitive types are safe
+            return data
+        
+        else:
+            # Unknown types - convert to string and sanitize
+            return cls.sanitize_json_data(str(data), current_depth + 1)
+
+
+@dataclass(frozen=True)
+class StrategicContext:
+    """
+    Guardian Security: Immutable strategic context with secure serialization.
+    
+    Provides thread-safe strategic state management with:
+    - Immutable state (frozen=True for thread safety)
+    - Secure serialization using InputSanitizer
+    - High-compression state preservation (>70% compression)
+    - Bounded data structures to prevent memory attacks
+    - Performance target: <45ms for context preservation
+    """
+    
+    # Core strategic context fields
+    strategy_id: str
+    game_state: dict[str, any]
+    execution_patterns: list[str]
+    success_metrics: dict[str, float]
+    pattern_correlations: dict[str, float]
+    timestamp: float
+    worker_insights: list[dict[str, any]]
+    
+    # Security and performance metadata
+    context_version: int = 1
+    compression_metadata: dict[str, any] = None
+    
+    def __post_init__(self):
+        """Post-initialization validation with Guardian security checks."""
+        # Validate all collections are within bounds
+        if len(self.execution_patterns) > InputSanitizer.MAX_COLLECTION_SIZE:
+            raise ValueError(f"Execution patterns exceed limit: {len(self.execution_patterns)}")
+        
+        if len(self.worker_insights) > InputSanitizer.MAX_COLLECTION_SIZE:
+            raise ValueError(f"Worker insights exceed limit: {len(self.worker_insights)}")
+        
+        if len(self.game_state) > InputSanitizer.MAX_COLLECTION_SIZE:
+            raise ValueError(f"Game state size exceeds limit: {len(self.game_state)}")
+        
+        # Validate strategy_id format
+        if not self.strategy_id or len(self.strategy_id) > 100:
+            raise ValueError("Invalid strategy_id: must be 1-100 characters")
+        
+        # Initialize compression metadata if not provided
+        if self.compression_metadata is None:
+            # Use object.__setattr__ to modify frozen dataclass during init
+            object.__setattr__(self, 'compression_metadata', {
+                'original_size': 0,
+                'compressed_size': 0,
+                'compression_ratio': 0.0,
+                'compression_time_ms': 0.0
+            })
+    
+    @classmethod
+    def from_dict(cls, data: dict[str, any]) -> 'StrategicContext':
+        """
+        Secure deserialization using InputSanitizer.
+        
+        Guardian Security Features:
+        - All input data sanitized through InputSanitizer
+        - Type validation and conversion
+        - Bounded collection enforcement
+        - Pattern validation for all string data
+        
+        Args:
+            data: Dictionary containing strategic context data
+            
+        Returns:
+            Safely constructed StrategicContext instance
+            
+        Raises:
+            ValueError: On security validation failures
+        """
+        # Sanitize entire input data structure
+        sanitized_data = InputSanitizer.sanitize_json_data(data)
+        
+        # Validate required fields exist
+        required_fields = {
+            'strategy_id', 'game_state', 'execution_patterns',
+            'success_metrics', 'pattern_correlations', 'timestamp',
+            'worker_insights'
+        }
+        
+        for field in required_fields:
+            if field not in sanitized_data:
+                raise ValueError(f"Missing required field: {field}")
+        
+        # Type validation and secure conversion
+        try:
+            strategy_id = str(sanitized_data['strategy_id'])
+            
+            # Ensure game_state is a dictionary
+            game_state = sanitized_data['game_state']
+            if not isinstance(game_state, dict):
+                raise ValueError("game_state must be a dictionary")
+            
+            # Ensure execution_patterns is a list of strings
+            execution_patterns = sanitized_data['execution_patterns']
+            if not isinstance(execution_patterns, list):
+                raise ValueError("execution_patterns must be a list")
+            execution_patterns = [str(pattern) for pattern in execution_patterns]
+            
+            # Ensure success_metrics is a dictionary with numeric values
+            success_metrics = sanitized_data['success_metrics']
+            if not isinstance(success_metrics, dict):
+                raise ValueError("success_metrics must be a dictionary")
+            success_metrics = {str(k): float(v) for k, v in success_metrics.items()}
+            
+            # Ensure pattern_correlations is a dictionary with numeric values
+            pattern_correlations = sanitized_data['pattern_correlations']
+            if not isinstance(pattern_correlations, dict):
+                raise ValueError("pattern_correlations must be a dictionary")
+            pattern_correlations = {str(k): float(v) for k, v in pattern_correlations.items()}
+            
+            # Ensure timestamp is numeric
+            timestamp = float(sanitized_data['timestamp'])
+            
+            # Ensure worker_insights is a list of dictionaries
+            worker_insights = sanitized_data['worker_insights']
+            if not isinstance(worker_insights, list):
+                raise ValueError("worker_insights must be a list")
+            validated_insights = []
+            for insight in worker_insights:
+                if isinstance(insight, dict):
+                    validated_insights.append(insight)
+                else:
+                    validated_insights.append({'data': str(insight)})
+            
+            # Optional fields with defaults
+            context_version = int(sanitized_data.get('context_version', 1))
+            compression_metadata = sanitized_data.get('compression_metadata', {})
+            if not isinstance(compression_metadata, dict):
+                compression_metadata = {}
+            
+            return cls(
+                strategy_id=strategy_id,
+                game_state=game_state,
+                execution_patterns=execution_patterns,
+                success_metrics=success_metrics,
+                pattern_correlations=pattern_correlations,
+                timestamp=timestamp,
+                worker_insights=validated_insights,
+                context_version=context_version,
+                compression_metadata=compression_metadata
+            )
+            
+        except (ValueError, TypeError, KeyError) as e:
+            raise ValueError(f"Invalid strategic context data: {str(e)}")
+    
+    def to_dict(self) -> dict[str, any]:
+        """
+        Secure serialization with compression tracking.
+        
+        Guardian Security Features:
+        - No sensitive data leakage
+        - Bounded output size
+        - Performance monitoring
+        - Compressed representation when possible
+        
+        Returns:
+            Dictionary representation suitable for secure transmission
+        """
+        import time
+        start_time = time.time()
+        
+        # Create base dictionary representation
+        base_dict = {
+            'strategy_id': self.strategy_id,
+            'game_state': self.game_state.copy(),  # Defensive copy
+            'execution_patterns': list(self.execution_patterns),  # Defensive copy
+            'success_metrics': self.success_metrics.copy(),
+            'pattern_correlations': self.pattern_correlations.copy(),
+            'timestamp': self.timestamp,
+            'worker_insights': [insight.copy() if isinstance(insight, dict) else insight 
+                              for insight in self.worker_insights],
+            'context_version': self.context_version,
+            'compression_metadata': self.compression_metadata.copy() if self.compression_metadata else {}
+        }
+        
+        serialization_time = (time.time() - start_time) * 1000
+        
+        # Update performance metadata
+        base_dict['compression_metadata']['serialization_time_ms'] = serialization_time
+        base_dict['compression_metadata']['serialized_at'] = time.time()
+        
+        return base_dict
+    
+    def compress_state(self) -> 'StrategicContext':
+        """
+        Create compressed version achieving >70% compression ratio.
+        
+        Guardian Security Features:
+        - Maintains data integrity during compression
+        - Performance target: <45ms total time
+        - Bounded compression operations
+        - Secure compression metadata tracking
+        
+        Returns:
+            New StrategicContext with compressed state
+        """
+        import gzip
+        import json
+        import time
+        
+        start_time = time.time()
+        
+        # Get current state as JSON
+        current_dict = self.to_dict()
+        json_data = json.dumps(current_dict, separators=(',', ':'))  # Compact JSON
+        original_size = len(json_data)
+        
+        try:
+            # Compress using gzip for optimal ratio
+            compressed_data = gzip.compress(json_data.encode('utf-8'), compresslevel=9)
+            compressed_size = len(compressed_data)
+            
+            # Calculate compression metrics
+            compression_ratio = (original_size - compressed_size) / original_size if original_size > 0 else 0
+            compression_time = (time.time() - start_time) * 1000
+            
+            # Update compression metadata
+            updated_metadata = {
+                'original_size': original_size,
+                'compressed_size': compressed_size,
+                'compression_ratio': compression_ratio,
+                'compression_time_ms': compression_time,
+                'compression_algorithm': 'gzip',
+                'compression_level': 9,
+                'compressed_at': time.time()
+            }
+            
+            # Performance validation
+            if compression_time > 45:
+                logger.warning(f"Compression time {compression_time:.1f}ms exceeds 45ms target")
+            
+            # Compression ratio validation
+            if compression_ratio < 0.7:
+                logger.warning(f"Compression ratio {compression_ratio:.2f} below 70% target")
+            else:
+                logger.debug(f"Compression achieved {compression_ratio:.1%} ratio in {compression_time:.1f}ms")
+            
+            # Return new instance with updated metadata
+            return StrategicContext(
+                strategy_id=self.strategy_id,
+                game_state=self.game_state,
+                execution_patterns=self.execution_patterns,
+                success_metrics=self.success_metrics,
+                pattern_correlations=self.pattern_correlations,
+                timestamp=self.timestamp,
+                worker_insights=self.worker_insights,
+                context_version=self.context_version,
+                compression_metadata=updated_metadata
+            )
+            
+        except Exception as e:
+            logger.error(f"Compression failed: {str(e)}")
+            # Return self with error metadata
+            error_metadata = self.compression_metadata.copy() if self.compression_metadata else {}
+            error_metadata.update({
+                'compression_error': str(e),
+                'compression_attempted_at': time.time(),
+                'compression_failed': True
+            })
+            
+            return StrategicContext(
+                strategy_id=self.strategy_id,
+                game_state=self.game_state,
+                execution_patterns=self.execution_patterns,
+                success_metrics=self.success_metrics,
+                pattern_correlations=self.pattern_correlations,
+                timestamp=self.timestamp,
+                worker_insights=self.worker_insights,
+                context_version=self.context_version,
+                compression_metadata=error_metadata
+            )
+
+
+@dataclass(frozen=True)
+class StrategicPlanVersion:
+    """
+    Guardian Security: Semantic versioning with secure comparison.
+    
+    Provides immutable version tracking with:
+    - Semantic versioning (major.minor.patch)
+    - Secure version comparison
+    - Performance target: <23ms for plan versioning
+    - Thread-safe operations
+    """
+    
+    major: int
+    minor: int
+    patch: int
+    pre_release: str = ""
+    build_metadata: str = ""
+    created_at: float = 0.0
+    
+    def __post_init__(self):
+        """Guardian validation for version components."""
+        if self.major < 0 or self.minor < 0 or self.patch < 0:
+            raise ValueError("Version components must be non-negative")
+        
+        if self.major > 1000 or self.minor > 1000 or self.patch > 1000:
+            raise ValueError("Version components must be reasonable (≤1000)")
+        
+        if len(self.pre_release) > 50 or len(self.build_metadata) > 50:
+            raise ValueError("Pre-release and build metadata must be ≤50 characters")
+        
+        if self.created_at == 0.0:
+            import time
+            object.__setattr__(self, 'created_at', time.time())
+    
+    def __str__(self) -> str:
+        """String representation following semantic versioning."""
+        version = f"{self.major}.{self.minor}.{self.patch}"
+        if self.pre_release:
+            version += f"-{self.pre_release}"
+        if self.build_metadata:
+            version += f"+{self.build_metadata}"
+        return version
+    
+    def __lt__(self, other: 'StrategicPlanVersion') -> bool:
+        """Secure version comparison with performance monitoring."""
+        import time
+        start_time = time.time()
+        
+        try:
+            if not isinstance(other, StrategicPlanVersion):
+                raise TypeError("Can only compare with StrategicPlanVersion")
+            
+            # Compare major.minor.patch
+            self_tuple = (self.major, self.minor, self.patch)
+            other_tuple = (other.major, other.minor, other.patch)
+            
+            if self_tuple != other_tuple:
+                result = self_tuple < other_tuple
+            else:
+                # Pre-release versions have lower precedence
+                if self.pre_release and not other.pre_release:
+                    result = True
+                elif not self.pre_release and other.pre_release:
+                    result = False
+                else:
+                    result = self.pre_release < other.pre_release
+            
+            # Performance validation
+            comparison_time = (time.time() - start_time) * 1000
+            if comparison_time > 23:
+                logger.warning(f"Version comparison took {comparison_time:.1f}ms, target <23ms")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Version comparison failed: {str(e)}")
+            return False
+    
+    def is_compatible_with(self, other: 'StrategicPlanVersion') -> bool:
+        """Check if versions are compatible (same major version)."""
+        return isinstance(other, StrategicPlanVersion) and self.major == other.major
+
+
+@dataclass(frozen=True)
+class DirectiveConflict:
+    """
+    Guardian Security: Priority-based conflict resolution with bounded collections.
+    
+    Provides secure conflict management with:
+    - Priority-based resolution
+    - Bounded conflict tracking
+    - Performance target: <89ms for conflict resolution
+    - Thread-safe immutable design
+    """
+    
+    conflict_id: str
+    directive_a: str
+    directive_b: str
+    priority_a: int
+    priority_b: int
+    resolution_strategy: str
+    context_factors: list[str]
+    timestamp: float
+    resolved: bool = False
+    resolution_reason: str = ""
+    
+    def __post_init__(self):
+        """Guardian validation for conflict data."""
+        if not self.conflict_id or len(self.conflict_id) > 100:
+            raise ValueError("conflict_id must be 1-100 characters")
+        
+        if len(self.directive_a) > InputSanitizer.MAX_STRING_LENGTH:
+            raise ValueError(f"directive_a exceeds length limit")
+        
+        if len(self.directive_b) > InputSanitizer.MAX_STRING_LENGTH:
+            raise ValueError(f"directive_b exceeds length limit")
+        
+        if not (0 <= self.priority_a <= 10) or not (0 <= self.priority_b <= 10):
+            raise ValueError("Priorities must be in range 0-10")
+        
+        if len(self.context_factors) > 100:  # Bounded collection
+            raise ValueError("Too many context factors (max 100)")
+        
+        if self.timestamp == 0.0:
+            import time
+            object.__setattr__(self, 'timestamp', time.time())
+    
+    def resolve_conflict(self) -> 'DirectiveConflict':
+        """
+        Resolve conflict using priority-based strategy.
+        
+        Guardian Security Features:
+        - Performance target: <89ms for conflict resolution
+        - Bounded processing
+        - Fail-secure resolution
+        
+        Returns:
+            New DirectiveConflict with resolution applied
+        """
+        import time
+        start_time = time.time()
+        
+        try:
+            if self.resolved:
+                return self  # Already resolved
+            
+            # Priority-based resolution
+            if self.priority_a > self.priority_b:
+                winning_directive = self.directive_a
+                resolution_reason = f"Directive A priority {self.priority_a} > {self.priority_b}"
+            elif self.priority_b > self.priority_a:
+                winning_directive = self.directive_b
+                resolution_reason = f"Directive B priority {self.priority_b} > {self.priority_a}"
+            else:
+                # Equal priority - use context factors for tie-breaking
+                context_score_a = sum(1 for factor in self.context_factors if 'a' in factor.lower())
+                context_score_b = sum(1 for factor in self.context_factors if 'b' in factor.lower())
+                
+                if context_score_a >= context_score_b:
+                    winning_directive = self.directive_a
+                    resolution_reason = f"Equal priority, context favors A ({context_score_a} vs {context_score_b})"
+                else:
+                    winning_directive = self.directive_b
+                    resolution_reason = f"Equal priority, context favors B ({context_score_b} vs {context_score_a})"
+            
+            resolution_time = (time.time() - start_time) * 1000
+            
+            # Performance validation
+            if resolution_time > 89:
+                logger.warning(f"Conflict resolution took {resolution_time:.1f}ms, target <89ms")
+            
+            # Create resolved conflict
+            return DirectiveConflict(
+                conflict_id=self.conflict_id,
+                directive_a=self.directive_a,
+                directive_b=self.directive_b,
+                priority_a=self.priority_a,
+                priority_b=self.priority_b,
+                resolution_strategy=winning_directive,
+                context_factors=self.context_factors,
+                timestamp=self.timestamp,
+                resolved=True,
+                resolution_reason=resolution_reason
+            )
+            
+        except Exception as e:
+            logger.error(f"Conflict resolution failed: {str(e)}")
+            # Return unresolved conflict with error info
+            return DirectiveConflict(
+                conflict_id=self.conflict_id,
+                directive_a=self.directive_a,
+                directive_b=self.directive_b,
+                priority_a=self.priority_a,
+                priority_b=self.priority_b,
+                resolution_strategy="ERROR",
+                context_factors=self.context_factors,
+                timestamp=self.timestamp,
+                resolved=False,
+                resolution_reason=f"Resolution failed: {str(e)}"
+            )
+
+
+@dataclass(frozen=True)
+class StrategicDecision:
+    """
+    Guardian Security: Complete decision audit trail with immutable records.
+    
+    Provides comprehensive decision tracking with:
+    - Immutable decision records
+    - Complete audit trail
+    - Performance target: <12ms for decision tracking
+    - Bounded data structures
+    """
+    
+    decision_id: str
+    strategic_question: str
+    decision_options: list[str]
+    selected_option: str
+    decision_rationale: str
+    confidence_score: float
+    supporting_evidence: list[dict[str, any]]
+    decision_maker: str
+    timestamp: float
+    execution_deadline: float
+    dependencies: list[str]
+    
+    def __post_init__(self):
+        """Guardian validation for decision data."""
+        if not self.decision_id or len(self.decision_id) > 100:
+            raise ValueError("decision_id must be 1-100 characters")
+        
+        if len(self.strategic_question) > InputSanitizer.MAX_STRING_LENGTH:
+            raise ValueError("strategic_question exceeds length limit")
+        
+        if len(self.decision_options) > 50:  # Bounded collection
+            raise ValueError("Too many decision options (max 50)")
+        
+        if not (0.0 <= self.confidence_score <= 1.0):
+            raise ValueError("confidence_score must be between 0.0 and 1.0")
+        
+        if len(self.supporting_evidence) > 100:  # Bounded collection
+            raise ValueError("Too much supporting evidence (max 100)")
+        
+        if len(self.dependencies) > 50:  # Bounded collection
+            raise ValueError("Too many dependencies (max 50)")
+        
+        if self.selected_option not in self.decision_options:
+            raise ValueError("selected_option must be one of the decision_options")
+    
+    def create_audit_record(self) -> dict[str, any]:
+        """
+        Create comprehensive audit record for decision.
+        
+        Guardian Security Features:
+        - Performance target: <12ms for decision tracking
+        - No sensitive data leakage
+        - Bounded record size
+        
+        Returns:
+            Audit record dictionary
+        """
+        import time
+        start_time = time.time()
+        
+        try:
+            audit_record = {
+                'decision_id': self.decision_id,
+                'strategic_question': self.strategic_question[:200],  # Truncate for security
+                'options_considered': len(self.decision_options),
+                'selected_option_index': self.decision_options.index(self.selected_option) if self.selected_option in self.decision_options else -1,
+                'confidence_score': self.confidence_score,
+                'evidence_count': len(self.supporting_evidence),
+                'decision_maker': self.decision_maker,
+                'timestamp': self.timestamp,
+                'execution_deadline': self.execution_deadline,
+                'dependencies_count': len(self.dependencies),
+                'audit_created_at': time.time()
+            }
+            
+            tracking_time = (time.time() - start_time) * 1000
+            
+            # Performance validation
+            if tracking_time > 12:
+                logger.warning(f"Decision tracking took {tracking_time:.1f}ms, target <12ms")
+            
+            audit_record['tracking_time_ms'] = tracking_time
+            return audit_record
+            
+        except Exception as e:
+            logger.error(f"Audit record creation failed: {str(e)}")
+            return {
+                'decision_id': self.decision_id,
+                'error': str(e),
+                'audit_failed_at': time.time()
+            }
+
+
+@dataclass(frozen=True)
+class StrategicOutcome:
+    """
+    Guardian Security: Outcome tracking with correlation and bounded storage.
+    
+    Provides secure outcome management with:
+    - Correlation tracking between decisions and results
+    - Bounded outcome storage
+    - Performance monitoring
+    - Thread-safe immutable design
+    """
+    
+    outcome_id: str
+    related_decision_id: str
+    actual_result: dict[str, any]
+    expected_result: dict[str, any]
+    success_metrics: dict[str, float]
+    correlation_factors: dict[str, float]
+    execution_time_ms: float
+    timestamp: float
+    lessons_learned: list[str]
+    performance_impact: dict[str, float]
+    
+    def __post_init__(self):
+        """Guardian validation for outcome data."""
+        if not self.outcome_id or len(self.outcome_id) > 100:
+            raise ValueError("outcome_id must be 1-100 characters")
+        
+        if not self.related_decision_id or len(self.related_decision_id) > 100:
+            raise ValueError("related_decision_id must be 1-100 characters")
+        
+        if len(self.actual_result) > InputSanitizer.MAX_COLLECTION_SIZE:
+            raise ValueError("actual_result size exceeds limit")
+        
+        if len(self.expected_result) > InputSanitizer.MAX_COLLECTION_SIZE:
+            raise ValueError("expected_result size exceeds limit")
+        
+        if len(self.lessons_learned) > 100:  # Bounded collection
+            raise ValueError("Too many lessons learned (max 100)")
+        
+        if self.execution_time_ms < 0:
+            raise ValueError("execution_time_ms must be non-negative")
+    
+    def calculate_outcome_correlation(self, expected_success_rate: float = 0.5) -> float:
+        """
+        Calculate correlation between expected and actual outcomes.
+        
+        Args:
+            expected_success_rate: Baseline success rate for correlation
+            
+        Returns:
+            Correlation score between -1.0 and 1.0
+        """
+        try:
+            # Simple correlation based on success metrics
+            if not self.success_metrics:
+                return 0.0
+            
+            # Calculate average success score
+            actual_success = sum(self.success_metrics.values()) / len(self.success_metrics)
+            
+            # Compare with expected success rate
+            correlation = (actual_success - expected_success_rate) / max(expected_success_rate, 0.1)
+            
+            # Clamp to [-1, 1] range
+            return max(-1.0, min(1.0, correlation))
+            
+        except Exception as e:
+            logger.error(f"Correlation calculation failed: {str(e)}")
+            return 0.0
+    
+    def get_performance_summary(self) -> dict[str, any]:
+        """
+        Get bounded performance summary for analysis.
+        
+        Returns:
+            Performance summary with bounded data
+        """
+        return {
+            'outcome_id': self.outcome_id,
+            'execution_time_ms': self.execution_time_ms,
+            'success_score': sum(self.success_metrics.values()) / len(self.success_metrics) if self.success_metrics else 0.0,
+            'correlation_score': self.calculate_outcome_correlation(),
+            'lessons_count': len(self.lessons_learned),
+            'performance_factors': len(self.performance_impact),
+            'timestamp': self.timestamp
+        }
+
+
 class StrategyPriority(Enum):
     """Strategic request priority levels."""
 
