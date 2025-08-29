@@ -22,6 +22,9 @@ import docker
 import requests
 from docker.errors import APIError, DockerException, ImageNotFound
 
+# Security validation imports
+from .validators import validate_script_input, validate_docker_image
+
 # Import compatibility layer factory for transparent adapter selection
 try:
     from .pokemon_gym_factory import create_pokemon_client
@@ -827,13 +830,37 @@ class EmulatorPool:
         start_time = time.time()
 
         try:
+            # SECURITY: Validate script input before processing
+            try:
+                validated_script = validate_script_input(script_text)
+                logger.info(f"Script validation passed: {len(validated_script)} characters")
+            except Exception as e:
+                logger.error(f"Script validation failed: {e}")
+                end_time = time.time()
+                return ExecutionResult(
+                    execution_id=str(uuid.uuid4()),
+                    script_id=f"validation_failed_{int(time.time())}",
+                    status=ExecutionStatus.FAILED,
+                    start_time=start_time,
+                    end_time=end_time,
+                    final_state={},
+                    tile_observations=[],
+                    performance_metrics={
+                        "frames_executed": 0,
+                        "actual_duration_ms": int((end_time - start_time) * 1000),
+                        "error_type": "validation_error",
+                    },
+                    error_message=f"Script validation failed: {str(e)}",
+                    checkpoint_id=checkpoint_id,
+                )
+            
             # Acquire emulator with reasonable timeout
             client = self.acquire(timeout=30.0)
 
             # Use full compilation pipeline if Pokemon components are available
             if POKEMON_COMPONENTS_AVAILABLE and self.script_compiler:
-                logger.info(f"Compiling script: {script_text[:100]}...")
-                compiled_script = self.script_compiler.compile(script_text)
+                logger.info(f"Compiling script: {validated_script[:100]}...")
+                compiled_script = self.script_compiler.compile(validated_script)
 
                 # Execute compiled script with monitoring support
                 script_id = f"script_{int(time.time())}"
@@ -848,7 +875,7 @@ class EmulatorPool:
 
             else:
                 # Fallback to basic script execution
-                logger.info(f"Using basic script execution for: {script_text[:100]}...")
+                logger.info(f"Using basic script execution for: {validated_script[:100]}...")
 
                 # Load checkpoint if specified (basic mode)
                 if checkpoint_id:
@@ -857,10 +884,10 @@ class EmulatorPool:
                     )
 
                 # Compile DSL script to input sequence (simplified compilation)
-                input_sequence = self._compile_script(script_text)
+                input_sequence = self._compile_script(validated_script)
 
                 # Execute script on emulator
-                logger.info(f"Executing script on {client}: {script_text[:100]}...")
+                logger.info(f"Executing script on {client}: {validated_script[:100]}...")
 
                 # Generate execution tracking
                 execution_id = str(uuid.uuid4())
@@ -982,7 +1009,11 @@ class EmulatorPool:
             )
 
         try:
-            return self.script_compiler.compile(script_text)
+            # SECURITY: Validate script input before compilation
+            validated_script = validate_script_input(script_text)
+            logger.debug(f"Script validation passed for compilation: {len(validated_script)} characters")
+            
+            return self.script_compiler.compile(validated_script)
         except Exception as e:
             raise EmulatorPoolError(f"Script compilation failed: {e}") from e
 
@@ -1507,7 +1538,14 @@ class EmulatorPool:
 
     def _start_single_container(self, port: int) -> docker.models.containers.Container:
         """
-        Start a single container with production configuration.
+        Start a single container with hardened security configuration.
+        
+        Guardian Security Features:
+        - Non-root user execution (uid 1000)  
+        - Security options preventing privilege escalation
+        - Resource limits to prevent DoS attacks
+        - Capability dropping for minimal privileges
+        - Read-only root filesystem for immutability
 
         Args:
             port: Host port for container mapping
@@ -1521,16 +1559,58 @@ class EmulatorPool:
         try:
             if not self.client:
                 raise EmulatorPoolError("Docker client not initialized. Call initialize() first.")
+            
+            # SECURITY: Validate Docker image name before use
+            try:
+                validated_image = validate_docker_image(self.image_name)
+                logger.debug(f"Docker image validation passed: {validated_image}")
+            except Exception as e:
+                raise EmulatorPoolError(f"Docker image validation failed: {e}")
+            
+            # SECURITY: Hardened container configuration
             container = self.client.containers.run(
-                image=self.image_name,
+                image=validated_image,
                 ports={"8080/tcp": port},  # Map internal port 8080 to host port
                 detach=True,
                 remove=True,  # Auto-cleanup on container stop
                 name=f"pokemon-emulator-{port}",
-                # Production container configuration
+                
+                # Security hardening - Guardian implementation
+                user="1000:1000",  # Run as non-root user (pokemon:pokemon)
+                security_opt=[
+                    "no-new-privileges:true",  # Prevent privilege escalation
+                    "apparmor=docker-default",  # Use AppArmor profile
+                ],
+                cap_drop=["ALL"],  # Drop all capabilities
+                cap_add=["NET_BIND_SERVICE"],  # Only allow binding to ports
+                read_only=True,  # Read-only root filesystem
+                tmpfs={
+                    '/tmp': 'rw,noexec,nosuid,size=100m',  # Writable tmp with restrictions
+                    '/var/run': 'rw,noexec,nosuid,size=10m'  # Runtime directory
+                },
+                
+                # Resource limits - hardened for security
                 restart_policy={"Name": "on-failure", "MaximumRetryCount": 3},
-                mem_limit="512m",  # Prevent memory exhaustion
-                cpu_count=1,  # Fair CPU allocation
+                mem_limit="256m",  # Reduced memory limit for security
+                mem_reservation="128m",  # Memory soft limit
+                memswap_limit="256m",  # No swap usage allowed
+                cpu_quota=50000,  # Limit to 0.5 CPU cores (50% of 100000 = 1 core)
+                cpu_period=100000,  # Standard period
+                pids_limit=100,  # Limit number of processes
+                
+                # Network security
+                network_mode="bridge",  # Use bridge network (isolated)
+                
+                # Filesystem restrictions
+                volumes={
+                    # No host volumes mounted for security
+                },
+                
+                # Environment variable restrictions
+                environment={
+                    'NODE_ENV': 'production',
+                    'POKEMON_GYM_PORT': '8080'
+                }
             )
 
         except ImageNotFound as e:

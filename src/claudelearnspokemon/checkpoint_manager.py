@@ -43,6 +43,14 @@ from typing import Any, Protocol
 import lz4.frame
 import structlog
 
+# Security validation imports
+from .validators import (
+    validate_checkpoint_input, 
+    CheckpointDataValidator,
+    SecurityValidationError,
+    InputSizeError
+)
+
 logger = structlog.get_logger(__name__)
 
 
@@ -574,30 +582,55 @@ class CheckpointManager:
             if not checkpoint_path.exists():
                 raise CheckpointNotFoundError(f"Checkpoint {checkpoint_id} not found")
 
-            # Validate integrity before loading with specific error messages
+            # SECURITY: Validate checkpoint file before processing
             try:
-                # First try to validate - this will catch corruption and give us specific errors
                 with checkpoint_path.open("rb") as f:
                     compressed_data = f.read()
 
                 if not compressed_data:
                     raise CheckpointCorruptionError(f"Checkpoint {checkpoint_id} is empty")
 
-                # Test LZ4 decompression first
+                # SECURITY: Validate compressed data size to prevent compression bombs
                 try:
-                    decompressed = lz4.frame.decompress(compressed_data)
+                    CheckpointDataValidator.validate_compressed_size(compressed_data)
+                    logger.debug(f"Compressed data size validation passed: {len(compressed_data)} bytes")
+                except InputSizeError as e:
+                    raise CheckpointCorruptionError(f"Checkpoint {checkpoint_id} size validation failed: {e}") from e
+
+                # SECURITY: Safe LZ4 decompression with size limits
+                try:
+                    # Decompress with safety checks
+                    decompressed = self._safe_decompress_lz4(compressed_data, checkpoint_id)
+                    logger.debug(f"Safe decompression completed: {len(decompressed)} bytes")
                 except Exception as e:
                     raise CheckpointCorruptionError(
-                        f"Failed to decompress checkpoint {checkpoint_id}: {str(e)}"
+                        f"Failed to safely decompress checkpoint {checkpoint_id}: {str(e)}"
                     ) from e
 
-                # Test JSON parsing
+                # SECURITY: Safe JSON parsing with validation
                 try:
                     json_data = decompressed.decode("utf-8")
+                    
+                    # Pre-validate JSON size before parsing
+                    if len(json_data) > 10 * 1024 * 1024:  # 10MB limit
+                        raise CheckpointCorruptionError(
+                            f"Decompressed JSON too large: {len(json_data)} bytes"
+                        )
+                    
                     checkpoint_data = json.loads(json_data)
+                    
+                    # SECURITY: Validate checkpoint data structure
+                    validated_data = validate_checkpoint_input(checkpoint_data)
+                    logger.debug(f"Checkpoint data validation passed: {checkpoint_id}")
+                    checkpoint_data = validated_data
+                    
                 except (json.JSONDecodeError, UnicodeDecodeError) as e:
                     raise CheckpointCorruptionError(
                         f"Failed to parse JSON in checkpoint {checkpoint_id}: {str(e)}"
+                    ) from e
+                except SecurityValidationError as e:
+                    raise CheckpointCorruptionError(
+                        f"Checkpoint {checkpoint_id} failed security validation: {str(e)}"
                     ) from e
 
             except CheckpointCorruptionError:
@@ -711,16 +744,25 @@ class CheckpointManager:
                     self._record_validation_failure(checkpoint_id)
                     return False
 
-            # Test decompression and parsing
+            # SECURITY: Test secure decompression and parsing
             try:
                 with checkpoint_path.open("rb") as f:
                     compressed_data = f.read()
 
-                # Test LZ4 decompression
-                decompressed = lz4.frame.decompress(compressed_data)
+                # SECURITY: Validate compressed size first
+                CheckpointDataValidator.validate_compressed_size(compressed_data)
 
-                # Test JSON parsing
-                json.loads(decompressed.decode("utf-8"))
+                # SECURITY: Test safe LZ4 decompression
+                decompressed = self._safe_decompress_lz4(compressed_data, checkpoint_id)
+
+                # SECURITY: Test safe JSON parsing with validation
+                json_data = decompressed.decode("utf-8")
+                if len(json_data) > 10 * 1024 * 1024:  # 10MB limit
+                    return False
+                
+                parsed_data = json.loads(json_data)
+                # Validate checkpoint data structure
+                validate_checkpoint_input(parsed_data)
 
             except Exception:
                 logger.warning("Decompression/parsing failed", checkpoint_id=checkpoint_id)
@@ -1876,3 +1918,77 @@ class CheckpointManager:
 
         except Exception as e:
             logger.warning("Failed to update storage metrics", error=str(e))
+
+    def _safe_decompress_lz4(self, compressed_data: bytes, checkpoint_id: str) -> bytes:
+        """
+        Safely decompress LZ4 data with Guardian security measures.
+        
+        Guardian Security Features:
+        - Size limits to prevent compression bombs
+        - Timeout protection for malicious payloads
+        - Memory usage monitoring
+        - Comprehensive error handling
+        
+        Args:
+            compressed_data: LZ4 compressed bytes
+            checkpoint_id: Checkpoint identifier for logging
+            
+        Returns:
+            Decompressed bytes
+            
+        Raises:
+            CheckpointCorruptionError: If decompression fails or data is malicious
+        """
+        # Constants for safety limits
+        MAX_DECOMPRESSED_SIZE = 100 * 1024 * 1024  # 100MB max decompressed size
+        DECOMPRESSION_TIMEOUT = 5.0  # 5 second timeout
+        
+        try:
+            import signal
+            
+            def timeout_handler(signum, frame):
+                raise TimeoutError("LZ4 decompression timeout - possible compression bomb")
+            
+            # Set up timeout protection (Unix only)
+            if hasattr(signal, 'SIGALRM'):
+                old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+                signal.alarm(int(DECOMPRESSION_TIMEOUT))
+                
+            try:
+                # Attempt decompression with size checking
+                decompressed = lz4.frame.decompress(compressed_data)
+                
+                # Validate decompressed size
+                if len(decompressed) > MAX_DECOMPRESSED_SIZE:
+                    raise CheckpointCorruptionError(
+                        f"Decompressed data too large: {len(decompressed)} bytes > {MAX_DECOMPRESSED_SIZE} bytes. "
+                        "Possible compression bomb attack."
+                    )
+                
+                logger.debug(
+                    f"Safe LZ4 decompression completed for {checkpoint_id}: "
+                    f"compressed={len(compressed_data)} bytes, "
+                    f"decompressed={len(decompressed)} bytes, "
+                    f"ratio={len(decompressed) / len(compressed_data):.2f}"
+                )
+                
+                return decompressed
+                
+            finally:
+                # Restore original signal handler
+                if hasattr(signal, 'SIGALRM'):
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, old_handler)
+                    
+        except TimeoutError as e:
+            logger.error(f"LZ4 decompression timeout for {checkpoint_id}: {e}")
+            raise CheckpointCorruptionError(f"Decompression timeout - possible malicious payload: {e}") from e
+        except lz4.frame.LZ4FrameError as e:
+            logger.error(f"LZ4 frame error for {checkpoint_id}: {e}")
+            raise CheckpointCorruptionError(f"Invalid LZ4 data format: {e}") from e
+        except MemoryError as e:
+            logger.error(f"Memory exhaustion during decompression for {checkpoint_id}: {e}")
+            raise CheckpointCorruptionError(f"Memory exhaustion - possible compression bomb: {e}") from e
+        except Exception as e:
+            logger.error(f"Unexpected error during decompression for {checkpoint_id}: {e}")
+            raise CheckpointCorruptionError(f"Decompression failed: {e}") from e

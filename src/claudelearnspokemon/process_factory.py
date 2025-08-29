@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .prompts import ProcessType, PromptRepository
+from .validators import validate_subprocess_command, SecurityValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +157,13 @@ class ClaudeProcessFactory:
 
     def create_subprocess(self, config: ProcessConfig) -> subprocess.Popen:
         """
-        Create a Claude CLI subprocess with the given configuration.
+        Create a Claude CLI subprocess with hardened security configuration.
+        
+        Guardian Security Features:
+        - Command validation to prevent injection attacks
+        - Environment variable sanitization
+        - Secure subprocess creation with restricted privileges
+        - Process group isolation
 
         Args:
             config: Process configuration specifying type, model, and settings
@@ -166,6 +173,7 @@ class ClaudeProcessFactory:
 
         Raises:
             ValueError: If configuration is invalid
+            SecurityValidationError: If command validation fails  
             OSError: If subprocess creation fails
         """
         # Validate configuration
@@ -176,22 +184,36 @@ class ClaudeProcessFactory:
         environment = self.env_builder.build_environment(config)
 
         try:
-            # Create subprocess with performance settings
+            # SECURITY: Validate command for injection attacks
+            validated_command = validate_subprocess_command(command)
+            logger.debug(f"Command validation passed: {' '.join(validated_command)}")
+            
+            # SECURITY: Sanitize environment variables
+            safe_environment = self._sanitize_environment(environment)
+            
+            # Create subprocess with hardened security settings
             process = subprocess.Popen(
-                command,
-                env=environment,
+                validated_command,
+                env=safe_environment,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=0,  # Unbuffered for real-time communication
                 preexec_fn=os.setsid if config.use_process_group else None,
+                # SECURITY: Additional hardening
+                shell=False,  # Never use shell=True to prevent injection
+                close_fds=True,  # Close file descriptors for security
+                start_new_session=True,  # Start new session for isolation
             )
 
-            logger.info(f"Created {config.process_type.value} subprocess " f"(PID: {process.pid})")
+            logger.info(f"Created secure {config.process_type.value} subprocess (PID: {process.pid})")
 
             return process
 
+        except SecurityValidationError as e:
+            logger.error(f"Command validation failed for {config.process_type.value}: {e}")
+            raise SecurityValidationError(f"Subprocess creation blocked - security validation failed: {e}") from e
         except Exception as e:
             logger.error(f"Failed to create subprocess for {config.process_type.value}: {e}")
             raise OSError(f"Subprocess creation failed: {e}") from e
@@ -300,6 +322,67 @@ class ClaudeProcessFactory:
         # Validate buffer sizes
         if config.stdout_buffer_size <= 0 or config.stderr_buffer_size <= 0:
             raise ValueError("Buffer sizes must be positive")
+
+    def _sanitize_environment(self, env: dict[str, str]) -> dict[str, str]:
+        """
+        Sanitize environment variables for security.
+        
+        Guardian Security Features:
+        - Remove dangerous environment variables
+        - Validate environment variable values
+        - Prevent environment variable injection
+        
+        Args:
+            env: Original environment dictionary
+            
+        Returns:
+            Sanitized environment dictionary
+        """
+        # Dangerous environment variables to remove
+        DANGEROUS_ENV_VARS = {
+            'LD_PRELOAD',  # Library preloading attack vector
+            'LD_LIBRARY_PATH',  # Library path manipulation
+            'DYLD_INSERT_LIBRARIES',  # macOS library injection
+            'DYLD_LIBRARY_PATH',  # macOS library path
+            'IFS',  # Input Field Separator manipulation
+            'PATH',  # We'll set our own safe PATH
+        }
+        
+        # Start with base environment (filtered)
+        safe_env = {}
+        
+        for key, value in env.items():
+            # Skip dangerous variables
+            if key in DANGEROUS_ENV_VARS:
+                logger.debug(f"Removing dangerous environment variable: {key}")
+                continue
+                
+            # Validate variable name (alphanumeric + underscore only)
+            if not key.replace('_', '').isalnum():
+                logger.warning(f"Skipping environment variable with invalid name: {key}")
+                continue
+                
+            # Validate variable value (no shell metacharacters)
+            if any(char in str(value) for char in [';', '&', '|', '`', '$', '>', '<', '\n', '\r']):
+                logger.warning(f"Skipping environment variable with dangerous value: {key}")
+                continue
+                
+            # Limit value length to prevent resource exhaustion
+            if len(str(value)) > 1000:
+                logger.warning(f"Truncating long environment variable: {key}")
+                value = str(value)[:1000]
+                
+            safe_env[key] = str(value)
+        
+        # Set secure PATH  
+        safe_env['PATH'] = '/usr/local/bin:/usr/bin:/bin'
+        
+        # Ensure critical security variables
+        safe_env['PYTHONUNBUFFERED'] = '1'
+        safe_env['PYTHONDONTWRITEBYTECODE'] = '1'  # Don't write .pyc files
+        
+        logger.debug(f"Environment sanitized: {len(env)} -> {len(safe_env)} variables")
+        return safe_env
 
     def get_factory_stats(self) -> dict[str, Any]:
         """

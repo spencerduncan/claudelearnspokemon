@@ -32,6 +32,7 @@ from .predictive_planning import (
 from .strategy_response import FallbackStrategy, StrategyResponse
 from .strategy_response_cache import ResponseCache
 from .strategy_response_parser import StrategyResponseParser, ValidationRule
+from .strategy_validator import StrategyResponseValidator, validate_strategic_json
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,13 @@ class OpusStrategist:
             max_size=cache_size, default_ttl=cache_ttl, cleanup_interval=60.0
         )
 
+        # Initialize security validator with Guardian settings
+        self.strategy_validator = StrategyResponseValidator(
+            max_response_size=5 * 1024 * 1024,  # 5MB limit
+            max_json_depth=15,  # Prevent deep nesting attacks
+            processing_timeout=30.0  # Timeout protection
+        )
+
         self.circuit_breaker = CircuitBreaker(
             config=CircuitConfig(
                 failure_threshold=int(10 * circuit_breaker_threshold),  # Convert to count
@@ -163,7 +171,7 @@ class OpusStrategist:
         self._metrics_lock = threading.Lock()
 
         logger.info(
-            f"OpusStrategist initialized with production configuration (predictive planning: {enable_predictive_planning})"
+            f"OpusStrategist initialized with production configuration (predictive planning: {enable_predictive_planning}, Guardian security: enabled)"
         )
 
     def get_strategy(
@@ -290,7 +298,7 @@ class OpusStrategist:
                 # Request strategic plan from Opus
                 raw_response = self._request_strategic_plan_from_opus(strategic_prompt)
 
-                # Parse JSON strategy response into actionable plan
+                # Parse JSON strategy response into actionable plan with security validation
                 strategic_plan = self._parse_strategic_response(raw_response)
 
                 # Validate strategic plan structure
@@ -352,6 +360,10 @@ class OpusStrategist:
                     # Handle embedded directives
                     extracted_directive = self._extract_embedded_directive(insight)
                     if extracted_directive:
+                        # Guardian: Bounded collection to prevent memory exhaustion
+                        if len(directives) >= 100:  # Maximum directive limit
+                            logger.warning(f"Directive collection limit reached, skipping additional directives")
+                            break
                         directives.append(extracted_directive)
 
             # Remove duplicates while preserving order
@@ -360,6 +372,10 @@ class OpusStrategist:
             for directive in directives:
                 directive_lower = directive.lower()
                 if directive_lower not in seen:
+                    # Guardian: Bounded collection to prevent memory exhaustion
+                    if len(unique_directives) >= 100:  # Maximum directive limit
+                        logger.warning(f"Directive limit reached, truncating at {len(unique_directives)}")
+                        break
                     unique_directives.append(directive)
                     seen.add(directive_lower)
 
@@ -898,29 +914,33 @@ class OpusStrategist:
 
     def _parse_strategic_response(self, raw_response: str) -> dict[str, Any]:
         """
-        Parse JSON strategy response from Opus into structured strategic plan.
+        Parse JSON strategy response from Opus with comprehensive security validation.
 
-        This method handles JSON parsing with comprehensive error handling
-        for malformed responses.
+        Guardian Security Implementation:
+        - Uses StrategyResponseValidator to prevent JSON injection attacks
+        - Enforces size limits to prevent memory exhaustion
+        - Validates structure to prevent malformed data processing
+        - Implements timeout protection against DoS attacks
         """
-        import json
-
         try:
-            # Attempt to parse JSON response
-            strategic_plan = json.loads(raw_response)
-
-            # Basic structure validation
-            if not isinstance(strategic_plan, dict):
-                raise MalformedResponseError("Strategic response is not a valid JSON object")
-
+            # SECURITY FIX: Replace unsafe json.loads with Guardian validator
+            strategic_plan = self.strategy_validator.validate_json_response(raw_response)
+            
+            # Log successful secure validation
+            logger.debug(f"Strategic response securely validated: {len(strategic_plan)} fields")
             return strategic_plan
 
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse strategic JSON response: {str(e)}")
-            raise MalformedResponseError(f"Invalid JSON in strategic response: {str(e)}") from e
         except Exception as e:
-            logger.error(f"Unexpected error parsing strategic response: {str(e)}")
-            raise MalformedResponseError(f"Strategic response parsing failed: {str(e)}") from e
+            # Enhanced security logging for validation failures
+            logger.error(f"SECURITY: Strategic JSON validation failed: {type(e).__name__}: {str(e)}")
+            
+            # Re-raise as appropriate OpusStrategist exception
+            if "SecurityValidationError" in str(type(e)):
+                raise MalformedResponseError(f"Security validation failed: {str(e)}") from e
+            elif "InputSizeError" in str(type(e)):
+                raise MalformedResponseError(f"Response size limit exceeded: {str(e)}") from e
+            else:
+                raise MalformedResponseError(f"Strategic response parsing failed: {str(e)}") from e
 
     def _validate_strategic_plan(self, strategic_plan: dict[str, Any]) -> dict[str, Any]:
         """
@@ -1020,31 +1040,34 @@ class OpusStrategist:
         # Create basic strategic experiments based on game state
         fallback_experiments = []
 
-        # Basic exploration experiment
-        fallback_experiments.append(
-            {
-                "id": "fallback_exploration",
-                "name": "Safe exploration pattern",
-                "checkpoint": f"fallback_{game_state.get('location', 'unknown')}",
-                "script_dsl": "SAFE_MOVE; OBSERVE; SAFE_MOVE",
-                "expected_outcome": "Gather information safely",
-                "priority": "medium",
-            }
-        )
+        # Basic exploration experiment with bounds checking
+        if len(fallback_experiments) < 20:  # Guardian: Bounded collection limit
+            fallback_experiments.append(
+                {
+                    "id": "fallback_exploration",
+                    "name": "Safe exploration pattern",
+                    "checkpoint": f"fallback_{game_state.get('location', 'unknown')}",
+                    "script_dsl": "SAFE_MOVE; OBSERVE; SAFE_MOVE",
+                    "expected_outcome": "Gather information safely",
+                    "priority": "medium",
+                }
+            )
 
         # Pattern-based experiment if we have successful patterns
         if successful_patterns:
             most_common_pattern = max(set(successful_patterns), key=successful_patterns.count)
-            fallback_experiments.append(
-                {
-                    "id": "fallback_pattern_repeat",
-                    "name": f"Repeat successful {most_common_pattern}",
-                    "checkpoint": game_state.get("location", "current_position"),
-                    "script_dsl": f"# Repeat {most_common_pattern} pattern",
-                    "expected_outcome": f"Leverage {most_common_pattern} success",
-                    "priority": "high",
-                }
-            )
+            # Guardian: Bounded collection to prevent memory exhaustion
+            if len(fallback_experiments) < 20:  # Maximum fallback experiments
+                fallback_experiments.append(
+                    {
+                        "id": "fallback_pattern_repeat",
+                        "name": f"Repeat successful {most_common_pattern}",
+                        "checkpoint": game_state.get("location", "current_position"),
+                        "script_dsl": f"# Repeat {most_common_pattern} pattern",
+                        "expected_outcome": f"Leverage {most_common_pattern} success",
+                        "priority": "high",
+                    }
+                )
 
         # Create strategic insights from available data
         strategic_insights = [
@@ -1053,11 +1076,16 @@ class OpusStrategist:
         ]
 
         if successful_patterns:
-            strategic_insights.append(
-                f"Successful patterns available: {', '.join(set(successful_patterns))}"
-            )
-        if failed_patterns:
-            strategic_insights.append(f"Avoid failed patterns: {', '.join(set(failed_patterns))}")
+            # Guardian: Limit pattern length to prevent oversized strings
+            pattern_summary = ', '.join(list(set(successful_patterns))[:10])  # Limit to first 10 patterns
+            if len(strategic_insights) < 50:  # Bounded collection limit
+                strategic_insights.append(
+                    f"Successful patterns available: {pattern_summary}"
+                )
+        if failed_patterns and len(strategic_insights) < 50:  # Guardian: Bounded collection
+            # Limit failed patterns to prevent oversized strings
+            failed_summary = ', '.join(list(set(failed_patterns))[:10])  # Limit to first 10 patterns
+            strategic_insights.append(f"Avoid failed patterns: {failed_summary}")
 
         # Recommend basic checkpoints
         next_checkpoints = [
