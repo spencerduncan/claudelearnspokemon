@@ -72,6 +72,286 @@ class TestOpusStrategistBasics(unittest.TestCase):
         # Strategic process validation is now done at runtime, not initialization
         # self.mock_manager.get_strategic_process.assert_called_once()
 
+    def test_request_strategy_method_exists(self):
+        """Test that request_strategy method exists with correct signature."""
+        # Check method exists
+        self.assertTrue(hasattr(self.strategist, "request_strategy"))
+
+        # Check method is callable
+        self.assertTrue(callable(self.strategist.request_strategy))
+
+
+@pytest.mark.fast
+class TestRequestStrategyInterface(unittest.TestCase):
+    """Test the strategic planning interface request_strategy method."""
+
+    def setUp(self):
+        """Set up test environment with mocked ClaudeCodeManager."""
+        # Mock ClaudeCodeManager with strategic process
+        self.mock_manager = Mock()
+        self.mock_strategic_process = Mock()
+        self.mock_manager.get_strategic_process.return_value = self.mock_strategic_process
+
+        # Import after mocking to avoid initialization issues
+        from claudelearnspokemon.opus_strategist import OpusStrategist
+
+        self.strategist = OpusStrategist(self.mock_manager)
+
+        # Test data
+        self.game_state = {
+            "location": "pallet_town",
+            "health": 100,
+            "level": 5,
+            "pokemon_count": 1,
+            "badges": 0,
+            "x": 10,
+            "y": 15,
+        }
+
+        self.recent_results = [
+            {
+                "worker_id": "worker_1",
+                "success": True,
+                "execution_time": 1.23,
+                "actions_taken": ["A", "B", "START", "RIGHT"],
+                "final_state": {"x": 12, "y": 15, "level": 5},
+                "patterns_discovered": ["menu_optimization"],
+            },
+            {
+                "worker_id": "worker_2",
+                "success": False,
+                "execution_time": 2.1,
+                "actions_taken": ["A", "LEFT", "B"],
+                "final_state": {"x": 9, "y": 15, "level": 5},
+                "patterns_discovered": ["failed_movement"],
+            },
+        ]
+
+    def test_opus_strategist_formats_game_state_for_context(self):
+        """
+        Test that request_strategy properly formats game state for strategic context.
+
+        This test validates Issue #99 requirement: format strategic requests
+        for Claude Opus consumption with clear game state context.
+        """
+        # Mock strategic process response
+        mock_response = """{
+            "strategy_id": "strategic_001",
+            "experiments": [
+                {
+                    "id": "exp_001",
+                    "name": "Optimize menu navigation",
+                    "checkpoint": "pallet_town_start",
+                    "script_dsl": "MENU_OPEN; SELECT_POKEMON; MENU_CLOSE",
+                    "expected_outcome": "Faster menu operations",
+                    "priority": "high"
+                }
+            ],
+            "strategic_insights": [
+                "Menu optimization shows high success rate",
+                "Left movement patterns correlate with failures"
+            ],
+            "next_checkpoints": ["oak_lab_entrance", "route1_start"]
+        }"""
+
+        self.mock_strategic_process.send_message.return_value = mock_response
+
+        # Execute request_strategy
+        result = self.strategist.request_strategy(self.game_state, self.recent_results)
+
+        # Verify strategic process was called
+        self.mock_strategic_process.send_message.assert_called_once()
+
+        # Get the formatted request sent to Opus
+        call_args = self.mock_strategic_process.send_message.call_args[0][0]
+
+        # Verify game state formatting
+        self.assertIn("STRATEGIC PLANNING REQUEST", call_args)
+        self.assertIn("Current Game State:", call_args)
+        self.assertIn("location: pallet_town", call_args)
+        self.assertIn("health: 100", call_args)
+        self.assertIn("level: 5", call_args)
+        self.assertIn("badges: 0", call_args)
+
+        # Verify result is properly formatted
+        self.assertIsInstance(result, dict)
+        self.assertIn("strategy_id", result)
+        self.assertIn("experiments", result)
+
+    def test_opus_strategist_parses_json_strategy_response(self):
+        """
+        Test that request_strategy parses JSON strategy responses correctly.
+
+        This test validates Issue #99 requirement: parse JSON strategy responses
+        into actionable plans with proper error handling.
+        """
+        # Mock valid JSON response from Opus
+        valid_json_response = """{
+            "strategy_id": "strategic_002",
+            "experiments": [
+                {
+                    "id": "exp_002",
+                    "name": "Route optimization test",
+                    "checkpoint": "current_position",
+                    "script_dsl": "MOVE_RIGHT; MOVE_UP; INTERACT",
+                    "expected_outcome": "Faster route completion",
+                    "priority": "medium"
+                }
+            ],
+            "strategic_insights": [
+                "DIRECTIVE: Focus on right movement patterns",
+                "Previous left movements show 50% failure rate"
+            ],
+            "next_checkpoints": ["route1_end"]
+        }"""
+
+        self.mock_strategic_process.send_message.return_value = valid_json_response
+
+        # Execute request_strategy
+        result = self.strategist.request_strategy(self.game_state, self.recent_results)
+
+        # Verify JSON parsing worked correctly
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["strategy_id"], "strategic_002")
+        self.assertIsInstance(result["experiments"], list)
+        self.assertEqual(len(result["experiments"]), 1)
+
+        # Verify experiment structure
+        experiment = result["experiments"][0]
+        self.assertEqual(experiment["id"], "exp_002")
+        self.assertEqual(experiment["name"], "Route optimization test")
+        self.assertEqual(experiment["priority"], "medium")
+
+        # Verify insights parsing
+        self.assertIn("strategic_insights", result)
+        self.assertIsInstance(result["strategic_insights"], list)
+
+    def test_request_strategy_formats_recent_results_context(self):
+        """
+        Test that recent_results are properly formatted for strategic context.
+
+        This validates that recent execution results provide meaningful
+        context for strategic planning decisions.
+        """
+        mock_response = """{
+            "strategy_id": "results_based_003",
+            "experiments": [],
+            "strategic_insights": ["Based on recent results analysis"],
+            "next_checkpoints": []
+        }"""
+
+        self.mock_strategic_process.send_message.return_value = mock_response
+
+        # Execute with recent results
+        self.strategist.request_strategy(self.game_state, self.recent_results)
+
+        # Get the formatted request
+        call_args = self.mock_strategic_process.send_message.call_args[0][0]
+
+        # Verify recent results are included in strategic context
+        self.assertIn("Recent Execution Results:", call_args)
+        self.assertIn("worker_1", call_args)
+        self.assertIn("worker_2", call_args)
+        self.assertIn("success: True", call_args)
+        self.assertIn("success: False", call_args)
+        self.assertIn("menu_optimization", call_args)
+        self.assertIn("failed_movement", call_args)
+
+        # Verify performance metrics included
+        self.assertIn("execution_time: 1.23", call_args)
+        self.assertIn("execution_time: 2.1", call_args)
+
+    def test_request_strategy_handles_malformed_json_response(self):
+        """
+        Test graceful handling of malformed JSON responses from Opus.
+
+        This validates Issue #99 requirement: handle strategic planning
+        request failures gracefully.
+        """
+        # Mock malformed JSON response
+        malformed_response = """
+        {
+            "strategy_id": "malformed_001",
+            "experiments": [
+                "invalid_structure"  // This should be an object, not string
+            ]
+            "strategic_insights": "not_an_array"
+            // Missing closing brace
+        """
+
+        self.mock_strategic_process.send_message.return_value = malformed_response
+
+        # Execute request_strategy - should handle malformed response gracefully
+        result = self.strategist.request_strategy(self.game_state, self.recent_results)
+
+        # Should return fallback strategy, not crash
+        self.assertIsInstance(result, dict)
+
+        # Should contain fallback indicators
+        self.assertTrue(
+            "fallback" in str(result).lower()
+            or "experiments" in result,  # Fallback should still have basic structure
+            "Should return fallback strategy for malformed response",
+        )
+
+    def test_request_strategy_handles_empty_recent_results(self):
+        """Test request_strategy handles empty recent_results gracefully."""
+        mock_response = """{
+            "strategy_id": "empty_results_001",
+            "experiments": [],
+            "strategic_insights": ["No recent results available"],
+            "next_checkpoints": []
+        }"""
+
+        self.mock_strategic_process.send_message.return_value = mock_response
+
+        # Execute with empty recent results
+        result = self.strategist.request_strategy(self.game_state, [])
+
+        # Should work without errors
+        self.assertIsInstance(result, dict)
+
+        # Get the formatted request
+        call_args = self.mock_strategic_process.send_message.call_args[0][0]
+
+        # Should handle empty results gracefully
+        self.assertIn("Recent Execution Results:", call_args)
+        self.assertIn("No recent results available", call_args)
+
+    def test_request_strategy_performance_target(self):
+        """
+        Test that request_strategy meets <100ms performance target.
+
+        This validates Issue #99 performance requirement for strategic operations.
+        """
+        import time
+
+        mock_response = """{
+            "strategy_id": "performance_001",
+            "experiments": [],
+            "strategic_insights": [],
+            "next_checkpoints": []
+        }"""
+
+        self.mock_strategic_process.send_message.return_value = mock_response
+
+        # Measure performance
+        start_time = time.time()
+        result = self.strategist.request_strategy(self.game_state, self.recent_results)
+        end_time = time.time()
+
+        execution_time_ms = (end_time - start_time) * 1000
+
+        # Verify performance target
+        self.assertLess(
+            execution_time_ms,
+            100,
+            f"request_strategy took {execution_time_ms:.1f}ms, target is <100ms",
+        )
+
+        # Verify it still works correctly
+        self.assertIsInstance(result, dict)
+
     @pytest.mark.skip(
         reason="API changed - _validate_strategic_process method removed, validation now at runtime"
     )
