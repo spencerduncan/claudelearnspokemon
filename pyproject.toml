@@ -29,6 +29,7 @@ dependencies = [
     "types-psutil>=5.9.0",
     "python-Levenshtein>=0.21.1",
     "responses>=0.25.0",
+    "prometheus-client>=0.19.0",
 ]
 
 [project.optional-dependencies]
