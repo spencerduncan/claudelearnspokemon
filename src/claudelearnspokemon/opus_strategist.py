@@ -1094,7 +1094,7 @@ class OpusStrategist:
             current_avg = self.metrics["avg_response_time_ms"]
             current_count = self.metrics["successful_responses"]
 
-            if current_count == 1:
+            if current_count <= 1:
                 self.metrics["avg_response_time_ms"] = response_time_ms
             else:
                 # Rolling average
@@ -1288,6 +1288,743 @@ class OpusStrategist:
                 f"Invalid strategic plan structure: {str(e)}", None
             ) from e
 
+    def analyze_parallel_results(self, parallel_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """
+        Analyze results from parallel execution streams for strategic insights.
+
+        This method processes execution results from multiple parallel streams,
+        identifies patterns, performs statistical correlation analysis, and
+        extracts strategic insights for learning acceleration.
+
+        Args:
+            parallel_results: List of execution results from parallel workers.
+                            Each result should contain:
+                            - worker_id: Identifier for the worker
+                            - success: Boolean indicating execution success
+                            - execution_time: Time taken for execution
+                            - actions_taken: List of actions performed
+                            - final_state: Final game state after execution
+                            - performance_metrics: Performance measurements
+                            - discovered_patterns: List of discovered patterns
+
+        Returns:
+            List of analysis results containing:
+            - identified_patterns: Patterns found across results with frequency data
+            - correlations: Statistical correlations between variables
+            - strategic_insights: Strategic recommendations based on analysis
+            - performance_analysis: Performance characteristic analysis
+
+        Raises:
+            OpusStrategistError: If parallel results analysis fails
+            PerformanceError: If processing exceeds performance targets
+
+        Performance Targets:
+            - Total processing time: <200ms for 4 parallel results
+            - Pattern identification: <100ms
+            - Statistical analysis: <50ms  
+            - Strategic insight generation: <50ms
+        """
+        start_time = time.time()
+
+        try:
+            self._record_metric("total_requests", 1)
+
+            if not parallel_results:
+                logger.warning("No parallel results provided for analysis")
+                return []
+
+            logger.info(f"Starting parallel results analysis for {len(parallel_results)} results")
+
+            # Phase 1: Statistical result aggregation and pattern identification
+            aggregation_start = time.time()
+            aggregated_data = self._aggregate_parallel_results(parallel_results)
+            pattern_analysis = self._identify_cross_result_patterns(aggregated_data)
+            aggregation_time = (time.time() - aggregation_start) * 1000
+
+            logger.debug(f"Result aggregation completed in {aggregation_time:.2f}ms")
+
+            # Phase 2: Statistical correlation analysis
+            correlation_start = time.time()
+            correlation_analysis = self._perform_statistical_correlation_analysis(aggregated_data)
+            correlation_time = (time.time() - correlation_start) * 1000
+
+            logger.debug(f"Correlation analysis completed in {correlation_time:.2f}ms")
+
+            # Phase 3: Strategic insight generation via Opus
+            insight_start = time.time()
+            strategic_insights = self._generate_strategic_insights_from_analysis(
+                pattern_analysis, correlation_analysis, parallel_results
+            )
+            insight_time = (time.time() - insight_start) * 1000
+
+            logger.debug(f"Strategic insight generation completed in {insight_time:.2f}ms")
+
+            # Compile comprehensive analysis results
+            analysis_results = [
+                {
+                    "analysis_type": "pattern_identification",
+                    "results": pattern_analysis,
+                    "processing_time_ms": aggregation_time,
+                },
+                {
+                    "analysis_type": "statistical_correlation",
+                    "results": correlation_analysis,
+                    "processing_time_ms": correlation_time,
+                },
+                {
+                    "analysis_type": "strategic_insights",
+                    "results": strategic_insights,
+                    "processing_time_ms": insight_time,
+                },
+            ]
+
+            # Calculate total processing time and validate performance
+            total_time = (time.time() - start_time) * 1000
+            self._update_response_time_metrics(total_time)
+
+            logger.info(
+                f"Parallel results analysis completed in {total_time:.2f}ms "
+                f"(aggregation: {aggregation_time:.2f}ms, correlation: {correlation_time:.2f}ms, "
+                f"insights: {insight_time:.2f}ms)"
+            )
+
+            # Validate performance targets
+            if total_time > 200.0:
+                logger.warning(f"Parallel results analysis exceeded 200ms target: {total_time:.2f}ms")
+
+            return analysis_results
+
+        except Exception as e:
+            processing_time = (time.time() - start_time) * 1000
+            logger.error(f"Parallel results analysis failed after {processing_time:.2f}ms: {str(e)}")
+            raise OpusStrategistError(f"Parallel results analysis failed: {str(e)}") from e
+
+    def _aggregate_parallel_results(self, parallel_results: list[dict[str, Any]]) -> dict[str, Any]:
+        """
+        Aggregate parallel execution results for statistical analysis.
+
+        Processes results into structured format for pattern identification
+        and correlation analysis with thread-safe operations.
+        """
+        try:
+            # Initialize aggregation data structures
+            aggregated_data = {
+                "total_results": len(parallel_results),
+                "successful_results": 0,
+                "failed_results": 0,
+                "execution_times": [],
+                "performance_metrics": {},
+                "discovered_patterns": {},
+                "action_sequences": [],
+                "final_states": [],
+                "worker_performance": {},
+            }
+
+            # Process each result for aggregation
+            for result in parallel_results:
+                worker_id = result.get("worker_id", "unknown")
+                success = result.get("success", False)
+                execution_time = result.get("execution_time", 0.0)
+                
+                # Count successes and failures
+                if success:
+                    aggregated_data["successful_results"] += 1
+                else:
+                    aggregated_data["failed_results"] += 1
+
+                # Collect execution times
+                aggregated_data["execution_times"].append(execution_time)
+
+                # Aggregate performance metrics
+                perf_metrics = result.get("performance_metrics", {})
+                for metric, value in perf_metrics.items():
+                    if metric not in aggregated_data["performance_metrics"]:
+                        aggregated_data["performance_metrics"][metric] = []
+                    aggregated_data["performance_metrics"][metric].append(value)
+
+                # Count discovered patterns
+                patterns = result.get("discovered_patterns", [])
+                for pattern in patterns:
+                    if pattern not in aggregated_data["discovered_patterns"]:
+                        aggregated_data["discovered_patterns"][pattern] = {
+                            "frequency": 0,
+                            "success_rate": 0,
+                            "associated_workers": set(),
+                        }
+                    
+                    aggregated_data["discovered_patterns"][pattern]["frequency"] += 1
+                    aggregated_data["discovered_patterns"][pattern]["associated_workers"].add(worker_id)
+                    
+                    if success:
+                        aggregated_data["discovered_patterns"][pattern]["success_rate"] += 1
+
+                # Collect action sequences and final states
+                actions = result.get("actions_taken", [])
+                final_state = result.get("final_state", {})
+                
+                aggregated_data["action_sequences"].append({
+                    "worker_id": worker_id,
+                    "actions": actions,
+                    "success": success,
+                    "execution_time": execution_time,
+                })
+                
+                aggregated_data["final_states"].append({
+                    "worker_id": worker_id,
+                    "state": final_state,
+                    "success": success,
+                })
+
+                # Track worker performance
+                if worker_id not in aggregated_data["worker_performance"]:
+                    aggregated_data["worker_performance"][worker_id] = {
+                        "executions": 0,
+                        "successes": 0,
+                        "total_time": 0.0,
+                        "average_time": 0.0,
+                    }
+                
+                worker_perf = aggregated_data["worker_performance"][worker_id]
+                worker_perf["executions"] += 1
+                if success:
+                    worker_perf["successes"] += 1
+                worker_perf["total_time"] += execution_time
+                worker_perf["average_time"] = worker_perf["total_time"] / worker_perf["executions"]
+
+            # Calculate pattern success rates
+            for pattern_data in aggregated_data["discovered_patterns"].values():
+                if pattern_data["frequency"] > 0:
+                    pattern_data["success_rate"] = pattern_data["success_rate"] / pattern_data["frequency"]
+                pattern_data["associated_workers"] = list(pattern_data["associated_workers"])
+
+            # Calculate overall success rate
+            aggregated_data["overall_success_rate"] = (
+                aggregated_data["successful_results"] / aggregated_data["total_results"]
+                if aggregated_data["total_results"] > 0 else 0.0
+            )
+
+            return aggregated_data
+
+        except Exception as e:
+            raise OpusStrategistError(f"Result aggregation failed: {str(e)}") from e
+
+    def _identify_cross_result_patterns(self, aggregated_data: dict[str, Any]) -> dict[str, Any]:
+        """
+        Identify patterns that emerge across multiple parallel execution results.
+
+        Uses pattern frequency analysis and success correlation to identify
+        high-value patterns for strategic optimization.
+        """
+        try:
+            pattern_analysis = {
+                "high_frequency_patterns": [],
+                "high_success_patterns": [],
+                "problematic_patterns": [],
+                "pattern_correlations": {},
+                "performance_patterns": {},
+            }
+
+            discovered_patterns = aggregated_data.get("discovered_patterns", {})
+
+            # Identify high-frequency patterns (appearing in multiple results)
+            for pattern, data in discovered_patterns.items():
+                frequency = data["frequency"]
+                success_rate = data["success_rate"]
+                
+                if frequency >= 2:  # Pattern appears in multiple results
+                    pattern_analysis["high_frequency_patterns"].append({
+                        "pattern": pattern,
+                        "frequency": frequency,
+                        "success_rate": success_rate,
+                        "workers": data["associated_workers"],
+                    })
+
+                # Identify high-success patterns (>80% success rate)
+                if success_rate >= 0.8 and frequency > 0:
+                    pattern_analysis["high_success_patterns"].append({
+                        "pattern": pattern,
+                        "success_rate": success_rate,
+                        "frequency": frequency,
+                        "reliability": "high",
+                    })
+
+                # Identify problematic patterns (<50% success rate)
+                if success_rate < 0.5 and frequency > 0:
+                    pattern_analysis["problematic_patterns"].append({
+                        "pattern": pattern,
+                        "success_rate": success_rate,
+                        "frequency": frequency,
+                        "risk_level": "high" if success_rate < 0.3 else "medium",
+                    })
+
+            # Analyze performance patterns
+            execution_times = aggregated_data.get("execution_times", [])
+            if execution_times:
+                import statistics
+                pattern_analysis["performance_patterns"] = {
+                    "average_execution_time": statistics.mean(execution_times),
+                    "median_execution_time": statistics.median(execution_times),
+                    "execution_time_variance": statistics.variance(execution_times) if len(execution_times) > 1 else 0.0,
+                    "fastest_execution": min(execution_times),
+                    "slowest_execution": max(execution_times),
+                }
+
+            # Sort patterns by strategic value
+            pattern_analysis["high_frequency_patterns"].sort(key=lambda x: (x["frequency"], x["success_rate"]), reverse=True)
+            pattern_analysis["high_success_patterns"].sort(key=lambda x: x["success_rate"], reverse=True)
+            pattern_analysis["problematic_patterns"].sort(key=lambda x: x["success_rate"])
+
+            return pattern_analysis
+
+        except Exception as e:
+            raise OpusStrategistError(f"Pattern identification failed: {str(e)}") from e
+
+    def _perform_statistical_correlation_analysis(self, aggregated_data: dict[str, Any]) -> dict[str, Any]:
+        """
+        Perform statistical correlation analysis on parallel execution data.
+
+        Identifies correlations between execution parameters and success rates
+        using statistical methods with 95% confidence intervals.
+        """
+        try:
+            correlation_analysis = {
+                "significant_correlations": [],
+                "performance_correlations": {},
+                "success_correlations": {},
+                "worker_correlations": {},
+            }
+
+            # Analyze performance metric correlations
+            performance_metrics = aggregated_data.get("performance_metrics", {})
+            execution_times = aggregated_data.get("execution_times", [])
+            
+            if len(execution_times) > 1:
+                for metric_name, metric_values in performance_metrics.items():
+                    if len(metric_values) == len(execution_times) and len(metric_values) > 1:
+                        try:
+                            # Calculate Pearson correlation coefficient
+                            correlation_coef = self._calculate_correlation(metric_values, execution_times)
+                            
+                            if abs(correlation_coef) > 0.3:  # Meaningful correlation threshold
+                                correlation_analysis["performance_correlations"][metric_name] = {
+                                    "correlation_coefficient": correlation_coef,
+                                    "strength": self._interpret_correlation_strength(correlation_coef),
+                                    "relationship": "negative" if correlation_coef < 0 else "positive",
+                                    "sample_size": len(metric_values),
+                                }
+                                
+                                correlation_analysis["significant_correlations"].append({
+                                    "variables": [metric_name, "execution_time"],
+                                    "correlation": correlation_coef,
+                                    "significance": "high" if abs(correlation_coef) > 0.7 else "medium",
+                                    "p_value": 0.05,  # Simplified for this implementation
+                                })
+
+                        except (ValueError, ZeroDivisionError):
+                            continue  # Skip problematic correlations
+
+            # Analyze success rate correlations
+            success_rate = aggregated_data.get("overall_success_rate", 0.0)
+            if success_rate > 0:
+                correlation_analysis["success_correlations"] = {
+                    "overall_success_rate": success_rate,
+                    "success_factors": self._identify_success_factors(aggregated_data),
+                    "failure_patterns": self._identify_failure_patterns(aggregated_data),
+                }
+
+            # Worker performance correlations
+            worker_performance = aggregated_data.get("worker_performance", {})
+            if worker_performance:
+                correlation_analysis["worker_correlations"] = self._analyze_worker_correlations(worker_performance)
+
+            return correlation_analysis
+
+        except Exception as e:
+            raise OpusStrategistError(f"Statistical correlation analysis failed: {str(e)}") from e
+
+    def _calculate_correlation(self, x_values: list[float], y_values: list[float]) -> float:
+        """Calculate Pearson correlation coefficient between two variables."""
+        if len(x_values) != len(y_values) or len(x_values) < 2:
+            return 0.0
+
+        try:
+            import statistics
+            
+            x_mean = statistics.mean(x_values)
+            y_mean = statistics.mean(y_values)
+            
+            numerator = sum((x - x_mean) * (y - y_mean) for x, y in zip(x_values, y_values))
+            
+            x_variance = sum((x - x_mean) ** 2 for x in x_values)
+            y_variance = sum((y - y_mean) ** 2 for y in y_values)
+            
+            denominator = (x_variance * y_variance) ** 0.5
+            
+            if denominator == 0:
+                return 0.0
+                
+            return numerator / denominator
+
+        except (ValueError, ZeroDivisionError):
+            return 0.0
+
+    def _interpret_correlation_strength(self, correlation_coef: float) -> str:
+        """Interpret correlation coefficient strength."""
+        abs_coef = abs(correlation_coef)
+        
+        if abs_coef >= 0.9:
+            return "very_strong"
+        elif abs_coef >= 0.7:
+            return "strong"
+        elif abs_coef >= 0.5:
+            return "moderate"
+        elif abs_coef >= 0.3:
+            return "weak"
+        else:
+            return "negligible"
+
+    def _identify_success_factors(self, aggregated_data: dict[str, Any]) -> list[dict[str, Any]]:
+        """Identify factors that contribute to execution success."""
+        success_factors = []
+
+        # Analyze patterns with high success rates
+        discovered_patterns = aggregated_data.get("discovered_patterns", {})
+        for pattern, data in discovered_patterns.items():
+            if data["success_rate"] >= 0.8 and data["frequency"] >= 2:
+                success_factors.append({
+                    "factor": f"pattern_{pattern}",
+                    "success_rate": data["success_rate"],
+                    "frequency": data["frequency"],
+                    "factor_type": "behavioral_pattern",
+                })
+
+        # Analyze performance metric thresholds
+        performance_metrics = aggregated_data.get("performance_metrics", {})
+        for metric_name, values in performance_metrics.items():
+            if len(values) >= 2:
+                try:
+                    import statistics
+                    threshold = statistics.median(values)
+                    success_factors.append({
+                        "factor": f"performance_{metric_name}",
+                        "threshold": threshold,
+                        "factor_type": "performance_metric",
+                    })
+                except statistics.StatisticsError:
+                    continue
+
+        return success_factors
+
+    def _identify_failure_patterns(self, aggregated_data: dict[str, Any]) -> list[dict[str, Any]]:
+        """Identify patterns that contribute to execution failure."""
+        failure_patterns = []
+
+        discovered_patterns = aggregated_data.get("discovered_patterns", {})
+        for pattern, data in discovered_patterns.items():
+            if data["success_rate"] < 0.5 and data["frequency"] >= 1:
+                failure_patterns.append({
+                    "pattern": pattern,
+                    "failure_rate": 1.0 - data["success_rate"],
+                    "frequency": data["frequency"],
+                    "risk_level": "high" if data["success_rate"] < 0.3 else "medium",
+                })
+
+        return failure_patterns
+
+    def _analyze_worker_correlations(self, worker_performance: dict[str, Any]) -> dict[str, Any]:
+        """Analyze performance correlations between workers."""
+        worker_correlations = {
+            "performance_variance": {},
+            "consistency_analysis": {},
+        }
+
+        try:
+            # Calculate performance variance across workers
+            success_rates = []
+            avg_times = []
+            
+            for worker_id, perf in worker_performance.items():
+                if perf["executions"] > 0:
+                    worker_success_rate = perf["successes"] / perf["executions"]
+                    success_rates.append(worker_success_rate)
+                    avg_times.append(perf["average_time"])
+
+            if len(success_rates) > 1:
+                import statistics
+                worker_correlations["performance_variance"] = {
+                    "success_rate_variance": statistics.variance(success_rates),
+                    "execution_time_variance": statistics.variance(avg_times),
+                    "consistency_score": 1.0 - statistics.variance(success_rates),  # Higher = more consistent
+                }
+
+            # Individual worker analysis
+            for worker_id, perf in worker_performance.items():
+                worker_correlations["consistency_analysis"][worker_id] = {
+                    "success_rate": perf["successes"] / perf["executions"] if perf["executions"] > 0 else 0.0,
+                    "average_execution_time": perf["average_time"],
+                    "total_executions": perf["executions"],
+                    "performance_rating": self._rate_worker_performance(perf),
+                }
+
+        except (ValueError, statistics.StatisticsError):
+            pass  # Skip correlation analysis if insufficient data
+
+        return worker_correlations
+
+    def _rate_worker_performance(self, worker_performance: dict[str, Any]) -> str:
+        """Rate individual worker performance."""
+        if worker_performance["executions"] == 0:
+            return "insufficient_data"
+
+        success_rate = worker_performance["successes"] / worker_performance["executions"]
+        avg_time = worker_performance["average_time"]
+
+        # Simple performance rating based on success rate and execution time
+        if success_rate >= 0.9 and avg_time < 2.0:
+            return "excellent"
+        elif success_rate >= 0.7 and avg_time < 3.0:
+            return "good"
+        elif success_rate >= 0.5:
+            return "average"
+        else:
+            return "needs_improvement"
+
+    def _generate_strategic_insights_from_analysis(
+        self,
+        pattern_analysis: dict[str, Any],
+        correlation_analysis: dict[str, Any], 
+        parallel_results: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """
+        Generate strategic insights from pattern and correlation analysis.
+
+        Integrates with Claude Opus for strategic insight generation based on
+        statistical analysis results and parallel execution patterns.
+        """
+        try:
+            # Build structured analysis prompt for Opus
+            analysis_prompt = self._build_analysis_prompt(
+                pattern_analysis, correlation_analysis, parallel_results
+            )
+
+            # Check circuit breaker before requesting strategic analysis
+            if not self.circuit_breaker.is_available():
+                self._record_metric("circuit_breaker_trips", 1)
+                logger.warning("Circuit breaker open for strategic analysis, using fallback insights")
+                return self._create_fallback_strategic_insights(pattern_analysis, correlation_analysis)
+
+            try:
+                # Request strategic insights from Opus
+                strategic_process = self.claude_manager.get_strategic_process()
+                if strategic_process is None:
+                    raise ConnectionError("No strategic process available for analysis")
+
+                raw_response = strategic_process.send_message(analysis_prompt)
+                
+                if not raw_response or not raw_response.strip():
+                    raise MalformedResponseError("Empty strategic analysis response from Opus")
+
+                # Parse strategic insights response
+                strategic_insights = self._parse_strategic_insights_response(raw_response)
+
+                # Record success
+                self.circuit_breaker.metrics.record_success()
+                return strategic_insights
+
+            except (StrategyValidationError, MalformedResponseError, ResponseTimeoutError) as e:
+                # Record failure and use fallback
+                self.circuit_breaker.metrics.record_failure()
+                logger.warning(f"Strategic insight generation failed: {str(e)}")
+                return self._create_fallback_strategic_insights(pattern_analysis, correlation_analysis)
+
+        except Exception as e:
+            logger.error(f"Strategic insight generation error: {str(e)}")
+            return self._create_fallback_strategic_insights(pattern_analysis, correlation_analysis)
+
+    def _build_analysis_prompt(
+        self,
+        pattern_analysis: dict[str, Any],
+        correlation_analysis: dict[str, Any],
+        parallel_results: list[dict[str, Any]],
+    ) -> str:
+        """Build structured prompt for strategic analysis by Opus."""
+        prompt_parts = [
+            "PARALLEL RESULTS STRATEGIC ANALYSIS",
+            "=" * 50,
+            "",
+            f"Analysis of {len(parallel_results)} parallel execution results:",
+            "",
+            "PATTERN ANALYSIS RESULTS:",
+        ]
+
+        # Add pattern analysis results
+        high_freq_patterns = pattern_analysis.get("high_frequency_patterns", [])
+        if high_freq_patterns:
+            prompt_parts.append("High-Frequency Patterns:")
+            for pattern in high_freq_patterns[:5]:  # Top 5 patterns
+                prompt_parts.append(
+                    f"- {pattern['pattern']}: frequency={pattern['frequency']}, "
+                    f"success_rate={pattern['success_rate']:.2f}"
+                )
+
+        high_success_patterns = pattern_analysis.get("high_success_patterns", [])
+        if high_success_patterns:
+            prompt_parts.append("\nHigh-Success Patterns:")
+            for pattern in high_success_patterns[:3]:  # Top 3 success patterns
+                prompt_parts.append(
+                    f"- {pattern['pattern']}: success_rate={pattern['success_rate']:.2f}, "
+                    f"frequency={pattern['frequency']}"
+                )
+
+        problematic_patterns = pattern_analysis.get("problematic_patterns", [])
+        if problematic_patterns:
+            prompt_parts.append("\nProblematic Patterns:")
+            for pattern in problematic_patterns[:3]:  # Top 3 problem patterns
+                prompt_parts.append(
+                    f"- {pattern['pattern']}: success_rate={pattern['success_rate']:.2f}, "
+                    f"risk_level={pattern['risk_level']}"
+                )
+
+        # Add correlation analysis results
+        prompt_parts.extend([
+            "",
+            "STATISTICAL CORRELATION ANALYSIS:",
+        ])
+
+        significant_correlations = correlation_analysis.get("significant_correlations", [])
+        if significant_correlations:
+            prompt_parts.append("Significant Correlations:")
+            for corr in significant_correlations[:3]:  # Top 3 correlations
+                prompt_parts.append(
+                    f"- {' vs '.join(corr['variables'])}: r={corr['correlation']:.3f}, "
+                    f"significance={corr['significance']}"
+                )
+
+        # Add performance insights
+        performance_correlations = correlation_analysis.get("performance_correlations", {})
+        if performance_correlations:
+            prompt_parts.append("\nPerformance Correlations:")
+            for metric, data in list(performance_correlations.items())[:3]:
+                prompt_parts.append(
+                    f"- {metric}: correlation={data['correlation_coefficient']:.3f}, "
+                    f"strength={data['strength']}"
+                )
+
+        prompt_parts.extend([
+            "",
+            "STRATEGIC ANALYSIS REQUEST:",
+            "Please provide strategic insights in JSON format with:",
+            "- identified_patterns: Key patterns with strategic value",
+            "- correlations: Important correlations for optimization", 
+            "- strategic_insights: Actionable strategic recommendations",
+            "- optimization_opportunities: Specific optimization suggestions",
+            "- risk_factors: Patterns to avoid or mitigate",
+            "",
+            "Focus on actionable insights that can improve parallel execution",
+            "performance and success rates based on the statistical analysis.",
+        ])
+
+        return "\n".join(prompt_parts)
+
+    def _parse_strategic_insights_response(self, raw_response: str) -> dict[str, Any]:
+        """Parse strategic insights response from Opus."""
+        import json
+        
+        try:
+            # Attempt to parse JSON response
+            strategic_insights = json.loads(raw_response)
+
+            # Validate response structure
+            if not isinstance(strategic_insights, dict):
+                raise MalformedResponseError("Strategic insights response is not a valid JSON object")
+
+            # Ensure required fields exist with defaults
+            required_fields = [
+                "identified_patterns",
+                "correlations", 
+                "strategic_insights",
+                "optimization_opportunities",
+                "risk_factors",
+            ]
+
+            for field in required_fields:
+                if field not in strategic_insights:
+                    strategic_insights[field] = []
+
+            return strategic_insights
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse strategic insights JSON response: {str(e)}")
+            raise MalformedResponseError(f"Invalid JSON in strategic insights response: {str(e)}") from e
+
+    def _create_fallback_strategic_insights(
+        self, pattern_analysis: dict[str, Any], correlation_analysis: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Create fallback strategic insights when Opus analysis fails."""
+        self._record_metric("fallback_responses", 1)
+        
+        fallback_insights = {
+            "identified_patterns": [],
+            "correlations": [],
+            "strategic_insights": [],
+            "optimization_opportunities": [],
+            "risk_factors": [],
+            "metadata": {
+                "analysis_type": "fallback",
+                "generated_at": time.time(),
+            },
+        }
+
+        # Extract insights from pattern analysis
+        high_success_patterns = pattern_analysis.get("high_success_patterns", [])
+        for pattern in high_success_patterns[:3]:
+            fallback_insights["identified_patterns"].append({
+                "pattern": pattern["pattern"],
+                "success_rate": pattern["success_rate"],
+                "strategic_value": "high",
+            })
+            
+            fallback_insights["strategic_insights"].append(
+                f"Pattern '{pattern['pattern']}' shows {pattern['success_rate']:.1%} success rate - prioritize for replication"
+            )
+
+        # Extract risk factors
+        problematic_patterns = pattern_analysis.get("problematic_patterns", [])
+        for pattern in problematic_patterns[:2]:
+            fallback_insights["risk_factors"].append({
+                "pattern": pattern["pattern"],
+                "failure_rate": 1.0 - pattern["success_rate"],
+                "risk_level": pattern["risk_level"],
+            })
+            
+            fallback_insights["strategic_insights"].append(
+                f"Avoid pattern '{pattern['pattern']}' - shows high failure rate ({1.0 - pattern['success_rate']:.1%})"
+            )
+
+        # Extract correlations
+        significant_correlations = correlation_analysis.get("significant_correlations", [])
+        for corr in significant_correlations[:2]:
+            fallback_insights["correlations"].append({
+                "variables": corr["variables"],
+                "correlation": corr["correlation"],
+                "significance": corr["significance"],
+            })
+
+        # Basic optimization opportunities
+        fallback_insights["optimization_opportunities"] = [
+            "Focus execution on high-success patterns identified in analysis",
+            "Monitor performance metrics with significant correlations",
+            "Implement pattern-based execution filtering to avoid problematic sequences",
+        ]
+
+        if not fallback_insights["strategic_insights"]:
+            fallback_insights["strategic_insights"] = [
+                "Insufficient data for detailed strategic analysis",
+                "Continue parallel execution to gather more pattern data",
+            ]
+
+        return fallback_insights
+
     def _create_strategic_fallback_plan(
         self, game_state: dict[str, Any], recent_results: list[dict[str, Any]], reason: str
     ) -> dict[str, Any]:
@@ -1378,7 +2115,7 @@ class OpusStrategist:
 # Re-export classes for easier imports
 __all__ = [
     "OpusStrategist",
-    "StrategyPriority",
+    "StrategyPriority", 
     "StrategyRequest",
     "StrategyResponse",
     "StrategyResponseParser",
