@@ -67,7 +67,7 @@ class HealthMonitor:
         # Health monitoring state
         self._timer: threading.Timer | None = None
         self._running = False
-        self._lock = threading.RLock()
+        self._lock = threading.RLock()  # RLock required: timer callback holds lock during health check
 
         # Track health history for change detection
         self._last_health_status: dict[str, bool] = {}

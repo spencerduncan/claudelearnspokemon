@@ -47,3 +47,10 @@ repos:
         types: [python]
         pass_filenames: false
         always_run: true
+      - id: coverage-validation
+        name: validate coverage claims
+        entry: bash -c 'PYTHONPATH=${PWD}/src:$PYTHONPATH coverage run -m pytest tests/ && coverage json && python scripts/validate_coverage.py'
+        language: system
+        types: [python]
+        pass_filenames: false
+        always_run: true
