@@ -10,6 +10,7 @@ Tests the extracted components for better separation of concerns:
 Author: Claude Code - Refactoring Implementation
 """
 
+import json
 import pytest
 import requests
 import responses
@@ -275,11 +276,80 @@ class TestComponentIntegration:
     """Test integration between the extracted components."""
     
     def test_error_recovery_with_gym_client_integration(self):
-        """Test error recovery handler works with gym client."""
-        # This would test more complex integration scenarios
-        # but for now we'll keep it simple since the main adapter tests
-        # already cover the integration
-        pass
+        """Test error recovery handler works with gym client integration scenarios."""
+        # Set up real integration between ErrorRecoveryHandler and PokemonGymClient
+        gym_client = PokemonGymClient("http://localhost:8080")
+        session_manager = Mock(spec=SessionManager)
+        session_manager.is_initialized = True
+        session_manager.session_id = "test-session-123"
+        
+        handler = ErrorRecoveryHandler(gym_client, session_manager)
+        
+        # Test scenario 1: Session error detection and recovery with actual gym client
+        with patch.object(gym_client, 'post_action') as mock_post_action, \
+             patch.object(gym_client, 'post_initialize') as mock_post_init:
+            
+            # Simulate session expired error from gym client
+            session_error = requests.HTTPError("401 Unauthorized") 
+            session_error.response = Mock()
+            session_error.response.json.return_value = {"error": "session_expired", "code": 401}
+            
+            mock_post_action.side_effect = session_error
+            mock_post_init.return_value = {"session_id": "recovery-session-456", "status": "initialized"}
+            
+            # Test that handler correctly identifies session error
+            assert handler.is_session_error(session_error) is True
+            
+            # Test emergency recovery with actual gym client interaction
+            handler.emergency_session_recovery()
+            
+            # Verify gym client was called for recovery initialization
+            mock_post_init.assert_called_once()
+            recovery_config = mock_post_init.call_args[0][0]
+            assert recovery_config == {"headless": True, "sound": False}
+            
+            # Verify session manager state was updated
+            assert session_manager.session_id == "recovery-session-456"
+            assert session_manager.is_initialized is True
+            
+        # Test scenario 2: Retry delay calculation integration
+        delays = handler.calculate_retry_delays(max_retries=3)
+        assert len(delays) == 3
+        assert delays == [0.1, 0.2, 0.4]  # Exponential backoff
+        
+        # Test scenario 3: Force clean state integration with session manager
+        session_manager.is_initialized = True
+        session_manager.session_id = "active-session"
+        session_manager._reset_in_progress = True
+        
+        handler.force_clean_state()
+        
+        assert session_manager.is_initialized is False
+        assert session_manager.session_id is None
+        assert session_manager._reset_in_progress is False
+        
+        # Test scenario 4: Integration with non-session errors (should not trigger recovery)
+        non_session_error = requests.HTTPError("500 Internal Server Error")
+        assert handler.is_session_error(non_session_error) is False
+        
+        # Test scenario 5: Emergency recovery failure handling
+        with patch.object(gym_client, 'post_initialize') as mock_post_init:
+            mock_post_init.side_effect = requests.ConnectionError("Network unreachable")
+            
+            with pytest.raises(PokemonGymAdapterError) as exc_info:
+                handler.emergency_session_recovery()
+            
+            assert "Emergency recovery failed" in str(exc_info.value)
+            assert "Network unreachable" in str(exc_info.value)
+            
+        # Test scenario 6: Session error detection with malformed response
+        malformed_error = requests.HTTPError("400 Bad Request")
+        malformed_error.response = Mock()
+        malformed_error.response.json.side_effect = json.JSONDecodeError("Invalid JSON", "", 0)
+        
+        # Should handle malformed response gracefully and fall back to string analysis
+        result = handler.is_session_error(malformed_error)
+        assert result is False  # "400 Bad Request" doesn't contain session indicators
         
     def test_performance_monitor_with_real_operations(self):
         """Test performance monitor tracking real operations."""

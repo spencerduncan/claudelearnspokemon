@@ -780,11 +780,218 @@ class CheckpointManager:
         result = asdict(metadata)
         result["value_score"] = self._calculate_value_score(metadata)
         result["file_path"] = str(self._get_checkpoint_path(checkpoint_id))
+        
+        # Extract commonly accessed fields from progress_markers for backward compatibility
+        if "tags" in metadata.progress_markers:
+            result["tags"] = metadata.progress_markers["tags"]
+        if "custom_fields" in metadata.progress_markers:
+            result["custom_fields"] = metadata.progress_markers["custom_fields"]
+        if "performance_metrics" in metadata.progress_markers:
+            result["performance_metrics"] = metadata.progress_markers["performance_metrics"]
+        
+        # Add game_location field for backward compatibility
+        result["game_location"] = metadata.location
 
         # Update cache
         self._update_cache(checkpoint_id, result)
 
         return result
+
+    def update_checkpoint_metadata(self, checkpoint_id: str, updates: dict[str, Any]) -> bool:
+        """
+        Update metadata for an existing checkpoint.
+
+        This method supports updating various metadata fields while maintaining
+        data integrity and thread safety. It follows the production principles
+        of atomic updates and comprehensive error handling.
+
+        Args:
+            checkpoint_id: Unique identifier of checkpoint to update
+            updates: Dictionary of metadata fields to update
+                    Supported fields: tags, custom_fields, performance_metrics, game_location
+
+        Returns:
+            bool: True if update succeeded, False if checkpoint not found or update failed
+
+        Raises:
+            ValueError: If checkpoint_id or updates are invalid
+            CheckpointError: If update operation fails
+        """
+        if not checkpoint_id or not isinstance(checkpoint_id, str):
+            raise ValueError("checkpoint_id must be a non-empty string")
+        
+        if not isinstance(updates, dict) or not updates:
+            raise ValueError("updates must be a non-empty dictionary")
+
+        try:
+            with self._write_lock:  # Thread-safe update
+                # Load current metadata
+                metadata = self._load_metadata(checkpoint_id)
+                if not metadata:
+                    logger.warning("Checkpoint not found for update", checkpoint_id=checkpoint_id)
+                    return False
+
+                # Check if checkpoint file exists
+                if not self.checkpoint_exists(checkpoint_id):
+                    logger.warning("Checkpoint file missing", checkpoint_id=checkpoint_id)
+                    return False
+
+                # Apply updates to supported fields
+                updated = False
+                for field, value in updates.items():
+                    if field == "tags" and isinstance(value, list):
+                        # Store tags in progress_markers for backward compatibility
+                        if "tags" not in metadata.progress_markers:
+                            metadata.progress_markers["tags"] = []
+                        metadata.progress_markers["tags"] = value
+                        updated = True
+                    elif field == "custom_fields" and isinstance(value, dict):
+                        # Store custom fields in progress_markers
+                        if "custom_fields" not in metadata.progress_markers:
+                            metadata.progress_markers["custom_fields"] = {}
+                        metadata.progress_markers["custom_fields"].update(value)
+                        updated = True
+                    elif field == "performance_metrics" and isinstance(value, dict):
+                        # Store performance metrics in progress_markers
+                        if "performance_metrics" not in metadata.progress_markers:
+                            metadata.progress_markers["performance_metrics"] = {}
+                        metadata.progress_markers["performance_metrics"].update(value)
+                        updated = True
+                    elif field == "game_location" and isinstance(value, str):
+                        metadata.location = value
+                        updated = True
+                    elif field == "strategic_value" and isinstance(value, (int, float)):
+                        metadata.strategic_value = float(value)
+                        updated = True
+                    elif field == "success_rate" and isinstance(value, (int, float)):
+                        metadata.success_rate = float(min(1.0, max(0.0, value)))  # Clamp to [0,1]
+                        updated = True
+                    else:
+                        logger.warning(
+                            "Unsupported metadata field or invalid type", 
+                            field=field, 
+                            field_type=type(value).__name__,
+                            checkpoint_id=checkpoint_id
+                        )
+
+                if not updated:
+                    logger.warning("No valid updates applied", checkpoint_id=checkpoint_id, updates=list(updates.keys()))
+                    return False
+
+                # Save updated metadata
+                self._save_metadata(checkpoint_id, metadata)
+
+                # Update caches
+                with self._cache_lock:
+                    if checkpoint_id in self._metadata_cache:
+                        # Update the existing cache entry
+                        cached_data = self._metadata_cache[checkpoint_id]
+                        cached_data.update(updates)
+                        self._cache_access_times[checkpoint_id] = time.time()
+
+                logger.info("Checkpoint metadata updated", checkpoint_id=checkpoint_id, updated_fields=list(updates.keys()))
+                return True
+
+        except Exception as e:
+            logger.error("Failed to update checkpoint metadata", checkpoint_id=checkpoint_id, error=str(e))
+            raise CheckpointError(f"Failed to update metadata for {checkpoint_id}: {e}") from e
+
+    def search_checkpoints(self, criteria: dict[str, Any]) -> list[dict[str, Any]]:
+        """
+        Search for checkpoints matching specified criteria.
+
+        This method provides flexible searching capabilities across various
+        metadata fields with performance optimizations for large checkpoint collections.
+
+        Args:
+            criteria: Search criteria dictionary
+                     Supported keys:
+                     - game_location: Exact location match
+                     - tags: List of tags (any match)
+                     - performance_min: Minimum performance score
+                     - custom_fields: Dictionary of custom field matches
+                     - min_score: Minimum value score threshold
+
+        Returns:
+            list: List of matching checkpoint metadata dictionaries
+
+        Raises:
+            ValueError: If criteria is invalid
+        """
+        if not isinstance(criteria, dict):
+            raise ValueError("criteria must be a dictionary")
+
+        if not criteria:
+            # Return all checkpoints if no criteria specified
+            return self.list_checkpoints({})
+
+        try:
+            all_checkpoints = self._get_all_checkpoint_metadata()
+            matching_checkpoints = []
+
+            for checkpoint in all_checkpoints:
+                matches = True
+
+                # Check game_location criteria
+                if "game_location" in criteria:
+                    if checkpoint.location != criteria["game_location"]:
+                        matches = False
+                        continue
+
+                # Check tags criteria (any tag match)
+                if "tags" in criteria and criteria["tags"]:
+                    checkpoint_tags = checkpoint.progress_markers.get("tags", [])
+                    if not any(tag in checkpoint_tags for tag in criteria["tags"]):
+                        matches = False
+                        continue
+
+                # Check minimum performance score
+                if "performance_min" in criteria:
+                    performance_metrics = checkpoint.progress_markers.get("performance_metrics", {})
+                    score = performance_metrics.get("score", 0)
+                    if score < criteria["performance_min"]:
+                        matches = False
+                        continue
+
+                # Check custom fields criteria
+                if "custom_fields" in criteria and criteria["custom_fields"]:
+                    checkpoint_custom = checkpoint.progress_markers.get("custom_fields", {})
+                    for key, expected_value in criteria["custom_fields"].items():
+                        if key not in checkpoint_custom or checkpoint_custom[key] != expected_value:
+                            matches = False
+                            break
+                    if not matches:
+                        continue
+
+                # Check minimum value score
+                if "min_score" in criteria:
+                    value_score = self._calculate_value_score(checkpoint)
+                    if value_score < criteria["min_score"]:
+                        matches = False
+                        continue
+
+                if matches:
+                    # Convert to dictionary format with additional metadata
+                    checkpoint_info = asdict(checkpoint)
+                    checkpoint_info["value_score"] = self._calculate_value_score(checkpoint)
+                    checkpoint_info["file_path"] = str(self._get_checkpoint_path(checkpoint.checkpoint_id))
+                    matching_checkpoints.append(checkpoint_info)
+
+            # Sort by value score (descending - highest scores first)
+            matching_checkpoints.sort(key=lambda x: x["value_score"], reverse=True)
+
+            logger.debug(
+                "Checkpoint search completed", 
+                criteria=criteria,
+                total_checkpoints=len(all_checkpoints),
+                matching_count=len(matching_checkpoints)
+            )
+
+            return matching_checkpoints
+
+        except Exception as e:
+            logger.error("Failed to search checkpoints", criteria=criteria, error=str(e))
+            return []
 
     def prune_checkpoints(self, max_count: int, dry_run: bool = False) -> dict[str, Any]:
         """

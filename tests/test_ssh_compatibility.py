@@ -251,7 +251,6 @@ class TestCIDashboardSSHIntegration:
 class TestDashboardLayoutSSH:
     """Test dashboard layout adaptations for SSH environments."""
 
-    @pytest.mark.skip(reason="Temporary skip for emergency fix - datetime.min timestamp issue")
     @patch("scripts.ci_dashboard.detect_ssh_environment")
     @patch("scripts.ci_dashboard.get_terminal_size")
     @patch.object(CIDashboard, "get_worktree_status")
@@ -282,7 +281,6 @@ class TestDashboardLayoutSSH:
         assert panel is not None
         assert "Worktrees" in panel.title
 
-    @pytest.mark.skip(reason="Temporary skip for emergency fix - datetime.min timestamp issue")
     @patch("scripts.ci_dashboard.detect_ssh_environment")
     @patch("scripts.ci_dashboard.get_terminal_size")
     @patch.object(CIDashboard, "get_worktree_status")

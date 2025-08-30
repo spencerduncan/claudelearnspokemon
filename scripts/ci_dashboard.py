@@ -914,7 +914,7 @@ class CIDashboard:
             # Primary sort by status priority, secondary by last modified time
             return (
                 status_order.get(w["status"], 6),
-                -(w.get("last_modified") or datetime.min).timestamp(),
+                -(w.get("last_modified") or datetime.fromtimestamp(0)).timestamp(),
             )
 
         sorted_worktrees = sorted(worktrees, key=sort_priority)

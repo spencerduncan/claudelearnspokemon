@@ -21,15 +21,37 @@ from typing import Any
 
 import requests
 
+# Import from separated SOLID components
+from .pokemon_gym_adapter_exceptions import (
+    AdapterError,
+    SessionError,
+    NetworkError,
+    TimeoutError,
+    ContainerError,
+    StateError,
+    PerformanceError,
+    InitializationError,
+    ValidationError as AdapterValidationError,
+)
+from .pokemon_gym_adapter_types import (
+    ActionRequest,
+    ActionResponse,
+    ActionType,
+    GameConfig,
+    InitializeRequest,
+    InitializeResponse,
+    ErrorResponse,
+    AdapterConfig,
+    PerformanceMetrics,
+    SessionMetrics,
+)
+
 # Configure logging for production observability
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
-class PokemonGymAdapterError(Exception):
-    """Custom exception for Pokemon Gym Adapter operations."""
-
-    pass
+# Legacy alias for backward compatibility - use AdapterError for new code
+PokemonGymAdapterError = AdapterError
 
 
 class SessionManager:
@@ -69,7 +91,7 @@ class SessionManager:
             return dict(data)
 
         except requests.RequestException as e:
-            raise PokemonGymAdapterError(f"Session initialization failed: {e}") from e
+            raise SessionError(f"Session initialization failed: {e}") from e
 
     def stop_session(self) -> dict[str, Any]:
         """Stop current session."""
@@ -170,7 +192,7 @@ class SessionManager:
                 # Ensure clean state even on failure
                 self.is_initialized = False
                 self.session_id = None
-                raise PokemonGymAdapterError(f"Session reset failed: {e}") from e
+                raise SessionError(f"Session reset failed: {e}") from e
 
             finally:
                 self._reset_in_progress = False
@@ -352,7 +374,7 @@ class HTTPClientWrapper:
             response = self._session.post(url, **kwargs)
             return ResponseWrapper(response)
         except requests.RequestException as e:
-            raise PokemonGymAdapterError(f"HTTP POST request failed: {e}") from e
+            raise NetworkError(f"HTTP POST request failed: {e}") from e
 
     def get(self, url: str, **kwargs) -> ResponseWrapper:
         """Make GET request with automatic URL completion."""
@@ -362,7 +384,7 @@ class HTTPClientWrapper:
             response = self._session.get(url, **kwargs)
             return ResponseWrapper(response)
         except requests.RequestException as e:
-            raise PokemonGymAdapterError(f"HTTP GET request failed: {e}") from e
+            raise NetworkError(f"HTTP GET request failed: {e}") from e
 
     def close(self) -> None:
         """Close the underlying session."""
@@ -556,7 +578,7 @@ class InputValidator:
                     # Map test actions to valid button for simulation
                     parsed_buttons.append("A")  # Default to A button
                 else:
-                    raise PokemonGymAdapterError(f"Invalid button name: {button}")
+                    raise AdapterValidationError(f"Invalid button name: {button}")
 
         return parsed_buttons
         
