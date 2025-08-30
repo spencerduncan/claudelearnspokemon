@@ -20,13 +20,25 @@ Google SRE Patterns Applied:
 - Request tracing for debugging routing decisions
 """
 
+import hashlib
 import logging
 import threading
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 from uuid import uuid4
+
+# Rate limiting configuration
+DEFAULT_RATE_LIMIT_REQUESTS = 100  # requests per minute
+DEFAULT_RATE_LIMIT_BURST = 20      # burst capacity
+DEFAULT_RATE_LIMIT_WINDOW = 60.0   # time window in seconds
+
+# Circuit breaker security configuration
+DEFAULT_FINGERPRINT_WINDOW = 300.0  # 5 minutes for fingerprint tracking
+MAX_IDENTICAL_FINGERPRINTS = 50     # Max identical requests in window
+FINGERPRINT_HASH_LENGTH = 16        # Hash length for request fingerprinting
 
 from .claude_code_manager import ClaudeCodeManager
 from .message_classifier import ClassificationResult, MessageClassifier, MessageType
@@ -35,6 +47,236 @@ from .routing_strategy import RoutingStrategy, WorkerInfo, WorkerState, create_l
 from .sonnet_worker_pool import SonnetWorkerPool
 
 logger = logging.getLogger(__name__)
+
+
+class TokenBucket:
+    """
+    Thread-safe token bucket implementation for rate limiting.
+    
+    Implements the token bucket algorithm with configurable rate and burst capacity
+    to prevent DoS attacks on message routing.
+    """
+    
+    def __init__(self, rate: float, burst_capacity: int, window_seconds: float = 60.0):
+        """
+        Initialize token bucket.
+        
+        Args:
+            rate: Tokens per window (e.g., 100 requests per minute)
+            burst_capacity: Maximum tokens in bucket (burst allowance)
+            window_seconds: Time window for rate calculation (default 60s)
+        """
+        if rate <= 0:
+            raise ValueError("Rate must be positive")
+        if burst_capacity <= 0:
+            raise ValueError("Burst capacity must be positive")
+        if window_seconds <= 0:
+            raise ValueError("Window must be positive")
+            
+        self.rate = rate
+        self.burst_capacity = burst_capacity
+        self.window_seconds = window_seconds
+        self.tokens_per_second = rate / window_seconds
+        
+        # Current state
+        self._tokens = float(burst_capacity)  # Start with full bucket
+        self._last_refill = time.time()
+        self._lock = threading.Lock()
+        
+        # Metrics
+        self._total_requests = 0
+        self._allowed_requests = 0
+        self._rejected_requests = 0
+    
+    def consume(self, tokens: int = 1) -> bool:
+        """
+        Attempt to consume tokens from the bucket.
+        
+        Args:
+            tokens: Number of tokens to consume
+            
+        Returns:
+            True if tokens were consumed (request allowed), False if rejected
+        """
+        with self._lock:
+            self._total_requests += 1
+            self._refill_bucket()
+            
+            if self._tokens >= tokens:
+                self._tokens -= tokens
+                self._allowed_requests += 1
+                return True
+            else:
+                self._rejected_requests += 1
+                return False
+    
+    def _refill_bucket(self) -> None:
+        """Refill bucket based on elapsed time (called with lock held)."""
+        current_time = time.time()
+        elapsed = current_time - self._last_refill
+        
+        if elapsed > 0:
+            # Add tokens based on rate
+            tokens_to_add = elapsed * self.tokens_per_second
+            self._tokens = min(self.burst_capacity, self._tokens + tokens_to_add)
+            self._last_refill = current_time
+    
+    def get_metrics(self) -> dict[str, Any]:
+        """Get rate limiting metrics."""
+        with self._lock:
+            rejection_rate = 0.0
+            if self._total_requests > 0:
+                rejection_rate = self._rejected_requests / self._total_requests
+                
+            return {
+                "total_requests": self._total_requests,
+                "allowed_requests": self._allowed_requests,
+                "rejected_requests": self._rejected_requests,
+                "rejection_rate": rejection_rate,
+                "current_tokens": self._tokens,
+                "rate_per_second": self.tokens_per_second,
+                "burst_capacity": self.burst_capacity,
+            }
+    
+    def reset(self) -> None:
+        """Reset bucket to full capacity (for testing/admin use)."""
+        with self._lock:
+            self._tokens = float(self.burst_capacity)
+            self._last_refill = time.time()
+
+
+class RequestFingerprinter:
+    """
+    Thread-safe request fingerprinting for circuit breaker bypass detection.
+    
+    Tracks request patterns to detect potential bypass attempts and malicious
+    request floods that could circumvent circuit breaker protections.
+    """
+    
+    def __init__(self, window_seconds: float = DEFAULT_FINGERPRINT_WINDOW):
+        """
+        Initialize request fingerprinter.
+        
+        Args:
+            window_seconds: Time window for fingerprint tracking
+        """
+        self.window_seconds = window_seconds
+        self._lock = threading.Lock()
+        
+        # Track fingerprints with timestamps
+        self._fingerprints: dict[str, list[float]] = defaultdict(list)
+        self._suspicious_ips: set[str] = set()
+        self._bypass_attempts = 0
+        
+        # Last cleanup time
+        self._last_cleanup = time.time()
+        self._cleanup_interval = 60.0  # Cleanup every minute
+    
+    def generate_fingerprint(self, request: 'RoutingRequest', client_ip: str = "unknown") -> str:
+        """
+        Generate secure fingerprint for request.
+        
+        Args:
+            request: The routing request
+            client_ip: Client IP address (if available)
+            
+        Returns:
+            Hexadecimal fingerprint string
+        """
+        # Create fingerprint from request characteristics
+        content_hash = hashlib.sha256(str(request.content).encode()).hexdigest()[:8]
+        context_hash = hashlib.sha256(str(sorted(request.context.items())).encode()).hexdigest()[:8]
+        
+        # Include request metadata in fingerprint
+        fingerprint_data = (
+            f"{content_hash}:"
+            f"{context_hash}:"
+            f"{request.priority.value}:"
+            f"{request.require_strategic}:"
+            f"{request.require_tactical}:"
+            f"{client_ip}"
+        )
+        
+        # Generate final fingerprint
+        return hashlib.sha256(fingerprint_data.encode()).hexdigest()[:FINGERPRINT_HASH_LENGTH]
+    
+    def check_suspicious_pattern(self, fingerprint: str, client_ip: str = "unknown") -> bool:
+        """
+        Check if request pattern is suspicious (potential bypass attempt).
+        
+        Args:
+            fingerprint: Request fingerprint
+            client_ip: Client IP address
+            
+        Returns:
+            True if pattern is suspicious, False otherwise
+        """
+        current_time = time.time()
+        
+        with self._lock:
+            # Cleanup old entries periodically
+            if current_time - self._last_cleanup > self._cleanup_interval:
+                self._cleanup_old_fingerprints(current_time)
+                self._last_cleanup = current_time
+            
+            # Add current fingerprint with timestamp
+            self._fingerprints[fingerprint].append(current_time)
+            
+            # Check for suspicious patterns
+            recent_requests = [
+                timestamp for timestamp in self._fingerprints[fingerprint]
+                if current_time - timestamp <= self.window_seconds
+            ]
+            
+            # Update fingerprint list with only recent requests
+            self._fingerprints[fingerprint] = recent_requests
+            
+            # Detect potential bypass attempt
+            if len(recent_requests) > MAX_IDENTICAL_FINGERPRINTS:
+                self._suspicious_ips.add(client_ip)
+                self._bypass_attempts += 1
+                return True
+                
+            # Check if IP is already marked suspicious
+            if client_ip in self._suspicious_ips:
+                return True
+                
+            return False
+    
+    def _cleanup_old_fingerprints(self, current_time: float) -> None:
+        """Remove old fingerprint entries (called with lock held)."""
+        keys_to_remove = []
+        
+        for fingerprint, timestamps in self._fingerprints.items():
+            # Keep only recent timestamps
+            recent_timestamps = [
+                ts for ts in timestamps 
+                if current_time - ts <= self.window_seconds
+            ]
+            
+            if recent_timestamps:
+                self._fingerprints[fingerprint] = recent_timestamps
+            else:
+                keys_to_remove.append(fingerprint)
+        
+        # Remove empty fingerprint entries
+        for key in keys_to_remove:
+            del self._fingerprints[key]
+    
+    def get_security_metrics(self) -> dict[str, Any]:
+        """Get security metrics for monitoring."""
+        with self._lock:
+            return {
+                "tracked_fingerprints": len(self._fingerprints),
+                "suspicious_ips": len(self._suspicious_ips),
+                "bypass_attempts_detected": self._bypass_attempts,
+                "window_seconds": self.window_seconds,
+            }
+    
+    def reset_suspicious_ip(self, client_ip: str) -> None:
+        """Reset suspicious IP status (for admin use)."""
+        with self._lock:
+            self._suspicious_ips.discard(client_ip)
 
 
 class RoutingMode(Enum):
@@ -113,6 +355,9 @@ class MessageRouter:
         classifier: MessageClassifier | None = None,
         routing_strategy: RoutingStrategy | None = None,
         max_concurrent_routes: int = 100,
+        rate_limit_requests: float = DEFAULT_RATE_LIMIT_REQUESTS,
+        rate_limit_burst: int = DEFAULT_RATE_LIMIT_BURST,
+        rate_limit_window: float = DEFAULT_RATE_LIMIT_WINDOW,
     ):
         """
         Initialize message router with production components.
@@ -123,18 +368,31 @@ class MessageRouter:
             classifier: Message classifier (defaults to new instance)
             routing_strategy: Routing strategy (defaults to least-loaded)
             max_concurrent_routes: Maximum concurrent routing operations
+            rate_limit_requests: Requests per minute allowed
+            rate_limit_burst: Burst capacity for rate limiter
+            rate_limit_window: Time window for rate limiting (seconds)
         """
         self.claude_manager = claude_manager
         self.worker_pool = worker_pool
         self.classifier = classifier or MessageClassifier()
         self.routing_strategy = routing_strategy or create_least_loaded_strategy()
+        
+        # Rate limiting for DoS protection
+        self.rate_limiter = TokenBucket(
+            rate=rate_limit_requests,
+            burst_capacity=rate_limit_burst,
+            window_seconds=rate_limit_window
+        )
+        
+        # Request fingerprinting for circuit breaker bypass detection
+        self.fingerprinter = RequestFingerprinter()
 
         # Priority queues for different message types
         self.strategic_queue = MessagePriorityQueue()
         self.tactical_queue = MessagePriorityQueue()
 
         # Routing state management
-        self._lock = threading.RLock()
+        self._lock = threading.Lock()  # Simple lock sufficient - no reentrancy needed
         self._routing_semaphore = threading.Semaphore(max_concurrent_routes)
         self._running = False
         self._routing_mode = RoutingMode.NORMAL
@@ -158,6 +416,8 @@ class MessageRouter:
             "fallback_routes": 0,
             "queue_overflow_rejections": 0,
             "expired_request_rejections": 0,
+            "rate_limit_rejections": 0,
+            "circuit_breaker_bypass_attempts": 0,
         }
 
         # Request tracing for debugging
@@ -220,11 +480,37 @@ class MessageRouter:
             with self._routing_semaphore:
                 self._metrics["total_routing_requests"] += 1
 
+                # Rate limiting check - prevent DoS attacks
+                if not self.rate_limiter.consume():
+                    self._metrics["rate_limit_rejections"] += 1
+                    logger.warning(f"Rate limit exceeded for request {request.request_id}")
+                    return self._create_failure_result(
+                        request, 
+                        "Rate limit exceeded", 
+                        {"rate_limit_blocked": True, "start_time": start_time}
+                    )
+
+                # Circuit breaker bypass detection
+                client_ip = request.context.get("client_ip", "unknown")
+                fingerprint = self.fingerprinter.generate_fingerprint(request, client_ip)
+                
+                if self.fingerprinter.check_suspicious_pattern(fingerprint, client_ip):
+                    self._metrics["circuit_breaker_bypass_attempts"] += 1
+                    logger.error(f"Suspected circuit breaker bypass attempt from {client_ip} "
+                               f"with fingerprint {fingerprint}")
+                    return self._create_failure_result(
+                        request,
+                        "Suspicious request pattern detected",
+                        {"bypass_attempt_blocked": True, "fingerprint": fingerprint, "start_time": start_time}
+                    )
+
                 # Create trace entry
                 trace_info = {
                     "start_time": start_time,
                     "routing_mode": self._routing_mode.value,
                     "circuit_breaker_open": self._circuit_open,
+                    "request_fingerprint": fingerprint,
+                    "client_ip": client_ip,
                 }
 
                 # Check if request is expired
@@ -604,6 +890,8 @@ class MessageRouter:
                 "queues": queue_status,
                 "classifier_health": self.classifier.get_health_status(),
                 "routing_strategy_metrics": self.routing_strategy.get_strategy_metrics(),
+                "rate_limiting": self.rate_limiter.get_metrics(),
+                "security_fingerprinting": self.fingerprinter.get_security_metrics(),
             }
 
     def get_request_trace(self, request_id: str) -> dict[str, Any] | None:

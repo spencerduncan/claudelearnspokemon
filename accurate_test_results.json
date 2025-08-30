@@ -1,13 +1,13 @@
 {
-  "test_files_discovered": 32,
+  "test_files_discovered": 41,
   "total_tests": 0,
   "passed": 0,
   "failed": 0,
   "skipped": 0,
   "timeout_batches": 0,
   "pass_rate_percent": 0.0,
-  "total_duration_seconds": 0.2959658780018799,
-  "connection_pooling_ms": 1341.7504290118814,
+  "total_duration_seconds": 0.662068208999699,
+  "connection_pooling_ms": 1385.863081000025,
   "connection_pooling_passes": false,
   "batch_size": 50,
   "batch_count": 1

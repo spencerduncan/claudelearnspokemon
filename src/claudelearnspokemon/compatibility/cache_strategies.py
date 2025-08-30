@@ -107,7 +107,7 @@ class InMemoryCache(CacheStrategy):
     Thread-safe in-memory cache implementation.
 
     Production features:
-    - Thread-safe using RLock for high-performance concurrent access
+    - Thread-safe using Lock for high-performance concurrent access
     - Configurable default TTL with per-key override support
     - Automatic expiration handling
     - Performance metrics for monitoring
@@ -127,7 +127,7 @@ class InMemoryCache(CacheStrategy):
 
         # Thread-safe storage with expiration metadata
         self._cache: dict[str, dict[str, Any]] = {}
-        self._lock = threading.RLock()  # Reentrant for nested operations
+        self._lock = threading.Lock()  # Simple lock sufficient - no reentrancy needed
 
         # Performance metrics
         self._hits = 0

@@ -136,7 +136,7 @@ class CircuitBreaker:
         self._last_trip_time: float | None = None
 
         # Thread safety - minimize lock contention
-        self._lock = threading.RLock()
+        self._lock = threading.Lock()  # Simple lock sufficient - no reentrancy needed
 
         # Sliding window for failure tracking (simple implementation)
         self._recent_results: list[bool] = []  # True = success, False = failure

@@ -28,7 +28,63 @@ from enum import Enum
 from re import Pattern
 from typing import Any
 
+# Security constants for input validation
+MAX_MESSAGE_LENGTH = 10000  # Prevent excessively long messages
+MAX_PATTERN_LENGTH = 500   # Prevent complex regex patterns
+DANGEROUS_REGEX_PATTERNS = [
+    r'(\([^)]*\))\+',  # Nested groups with quantifiers (ReDoS risk)
+    r'\([^)]*\)\\1\+', # Backreferences with quantifiers (proper detection)
+    r'\(\?\=.*\)\+',   # Lookaheads with quantifiers
+    r'(\.\*){2,}',     # Multiple .* patterns (exponential backtracking)
+]
+
 logger = logging.getLogger(__name__)
+
+
+def validate_message_input(message: str) -> None:
+    """
+    Validate message input for security vulnerabilities.
+    
+    Raises:
+        ValueError: If message fails validation
+    """
+    if not isinstance(message, str):
+        raise ValueError("Message must be a string")
+    
+    if len(message) > MAX_MESSAGE_LENGTH:
+        raise ValueError(f"Message length {len(message)} exceeds maximum {MAX_MESSAGE_LENGTH}")
+    
+    # Allow empty messages to pass through - they will be handled by fallback logic
+    # Empty messages should default to TACTICAL per routing requirements
+    
+    # Check for control characters (except common whitespace)
+    if any(ord(c) < 32 and c not in '\t\n\r' for c in message):
+        raise ValueError("Message contains invalid control characters")
+
+
+def validate_regex_pattern(pattern: str) -> None:
+    """
+    Validate regex pattern for security vulnerabilities.
+    
+    Raises:
+        ValueError: If pattern is potentially dangerous
+    """
+    if not isinstance(pattern, str):
+        raise ValueError("Pattern must be a string")
+        
+    if len(pattern) > MAX_PATTERN_LENGTH:
+        raise ValueError(f"Pattern length {len(pattern)} exceeds maximum {MAX_PATTERN_LENGTH}")
+    
+    # Check for dangerous regex patterns that could cause ReDoS
+    for dangerous_pattern in DANGEROUS_REGEX_PATTERNS:
+        if re.search(dangerous_pattern, pattern):
+            raise ValueError(f"Pattern contains potentially dangerous construct: {pattern}")
+    
+    # Test compile with timeout simulation (basic validation)
+    try:
+        re.compile(pattern)
+    except re.error as e:
+        raise ValueError(f"Invalid regex pattern: {e}")
 
 
 class MessageType(Enum):
@@ -204,6 +260,10 @@ class PatternBasedClassifier(MessageClassificationStrategy):
         start_time = time.time()
 
         try:
+            # Validate input for security (except empty messages which default to TACTICAL)
+            if message.strip():  # Only validate non-empty messages
+                validate_message_input(message)
+            
             self._metrics["total_classifications"] += 1
 
             # Check cache first for performance - include context in cache key
@@ -360,6 +420,9 @@ class PatternBasedClassifier(MessageClassificationStrategy):
             True if pattern added successfully, False otherwise
         """
         try:
+            # Validate pattern for security before compilation
+            validate_regex_pattern(pattern_def.pattern)
+            
             # Compile pattern to validate
             compiled = re.compile(pattern_def.pattern, pattern_def.regex_flags)
             self._pattern_cache[pattern_def.pattern] = compiled
@@ -376,7 +439,7 @@ class PatternBasedClassifier(MessageClassificationStrategy):
             logger.info(f"Added custom pattern: {pattern_def.description}")
             return True
 
-        except re.error as e:
+        except (re.error, ValueError) as e:
             logger.error(f"Failed to add pattern '{pattern_def.pattern}': {e}")
             return False
 
@@ -432,6 +495,20 @@ class MessageClassifier:
         """
         start_time = time.time()
         self._metrics["total_requests"] += 1
+        
+        # Validate input at the main entry point (except for empty messages which default to TACTICAL)
+        try:
+            if message.strip():  # Only validate non-empty messages
+                validate_message_input(message)
+        except ValueError as e:
+            logger.warning(f"Message validation failed: {e}")
+            return ClassificationResult(
+                message_type=MessageType.UNKNOWN,
+                confidence=0.0,
+                processing_time_ms=(time.time() - start_time) * 1000,
+                fallback_used=True,
+                error_message=f"Input validation failed: {e}",
+            )
 
         # Check circuit breaker state
         if self._circuit_open:

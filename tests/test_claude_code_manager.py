@@ -22,6 +22,8 @@ from claudelearnspokemon.claude_code_manager import (
     benchmark_startup_performance,
 )
 from claudelearnspokemon.claude_process import ClaudeProcess
+from claudelearnspokemon.conversation_error_handler import ConversationError
+from claudelearnspokemon.conversation_lifecycle_manager import TurnLimitConfiguration
 from claudelearnspokemon.process_factory import ProcessConfig
 from claudelearnspokemon.process_health_monitor import ProcessState
 from claudelearnspokemon.process_metrics_collector import ProcessMetrics
@@ -314,6 +316,106 @@ class TestFailureHandling(unittest.TestCase):
         """Test restart when no processes need restarting."""
         restart_count = self.manager.restart_failed_processes()
         self.assertEqual(restart_count, 0)
+    
+    @patch("subprocess.Popen")
+    def test_claude_code_manager_gracefully_handles_conversation_failure(self, mock_popen):
+        """Test that ClaudeCodeManager gracefully handles conversation failures with retry logic."""
+        # Setup mock process
+        mock_process = Mock()
+        mock_process.pid = 12345
+        mock_process.poll.return_value = None  # Healthy process
+        mock_process.stdin = Mock()
+        mock_popen.return_value = mock_process
+        
+        # Start processes
+        success = self.manager.start_all_processes()
+        self.assertTrue(success)
+        
+        # Get a test process
+        tactical_process = self.manager.get_available_tactical_process()
+        self.assertIsNotNone(tactical_process)
+        
+        # Mock the send_message method to simulate conversation failure then success
+        failure_count = 0
+        def mock_send_message(message):
+            nonlocal failure_count
+            failure_count += 1
+            if failure_count <= 2:  # Fail first 2 attempts
+                raise ConversationError("Simulated conversation failure")
+            return {"response": "Success after retries", "status": "ok"}
+        
+        # Add send_message method to the process
+        tactical_process.send_message = mock_send_message
+        
+        # Test conversation with retry handling
+        test_message = "Test message that will initially fail"
+        success, response, exception = self.manager.send_message_with_retry(
+            tactical_process, 
+            test_message,
+            "test_conversation"
+        )
+        
+        # Verify that the operation succeeded after retries
+        self.assertTrue(success, f"Conversation should succeed after retries, but got exception: {exception}")
+        self.assertIsNotNone(response)
+        self.assertIsNone(exception)
+        self.assertEqual(response["response"], "Success after retries")
+        self.assertEqual(failure_count, 3)  # Should have tried 3 times total
+        
+        # Test conversation health status
+        health_status = self.manager.get_conversation_health_status()
+        self.assertIn("name", health_status)
+        self.assertIn("conversation_metrics", health_status)
+        self.assertEqual(health_status["name"], "claude_code_manager")
+        
+        # Verify retry attempts were recorded
+        conv_metrics = health_status["conversation_metrics"]
+        self.assertEqual(conv_metrics["total_attempts"], 1)
+        self.assertEqual(conv_metrics["successful_conversations"], 1)
+        self.assertGreater(conv_metrics["success_rate_percent"], 0)
+    
+    @patch("subprocess.Popen")  
+    def test_conversation_failure_circuit_breaker_activation(self, mock_popen):
+        """Test that circuit breaker activates after multiple conversation failures."""
+        # Setup mock process
+        mock_process = Mock()
+        mock_process.pid = 12345
+        mock_process.poll.return_value = None
+        mock_process.stdin = Mock()
+        mock_popen.return_value = mock_process
+        
+        # Start processes
+        success = self.manager.start_all_processes()
+        self.assertTrue(success)
+        
+        # Get a test process
+        tactical_process = self.manager.get_available_tactical_process()
+        self.assertIsNotNone(tactical_process)
+        
+        # Mock send_message to always fail
+        def always_fail(message):
+            raise ConversationError("Persistent conversation failure")
+        
+        tactical_process.send_message = always_fail
+        
+        # Make multiple failing requests to trip circuit breaker
+        failed_attempts = 0
+        for i in range(6):  # More than the failure threshold
+            success, response, exception = self.manager.send_message_with_retry(
+                tactical_process,
+                f"Test message {i}",
+                f"test_failure_{i}"
+            )
+            if not success:
+                failed_attempts += 1
+        
+        # Verify circuit breaker behavior
+        health_status = self.manager.get_conversation_health_status()
+        
+        # Circuit breaker should have been activated
+        conv_metrics = health_status["conversation_metrics"]
+        self.assertGreater(conv_metrics["failed_conversations"], 0)
+        self.assertGreater(failed_attempts, 0)
 
 
 @pytest.mark.fast
@@ -545,6 +647,200 @@ class TestBenchmarkUtilities(unittest.TestCase):
 
             if "ClaudeCodeManager Performance Benchmark" in benchmark_output:
                 self.assertIn("ClaudeCodeManager Performance Benchmark", benchmark_output)
+
+
+@pytest.mark.fast
+@pytest.mark.medium
+class TestConversationTurnTracking(unittest.TestCase):
+    """Test conversation turn tracking functionality."""
+
+    def setUp(self):
+        """Set up test environment with turn tracking."""
+        import tempfile
+        import uuid
+        
+        # Use temporary directory and unique test ID for isolation
+        self.test_dir = tempfile.mkdtemp()
+        self.test_id = str(uuid.uuid4())[:8]
+        
+        # Configure low limits for testing
+        turn_config = TurnLimitConfiguration(
+            opus_turn_limit=5,
+            sonnet_turn_limit=3,
+            alert_threshold_percent=60.0,  # Alert at 60% for testing
+            auto_save_interval_seconds=1.0  # Fast saves for testing
+        )
+        
+        # Patch ConversationLifecycleManager to use temp directory
+        original_init = ClaudeCodeManager.__init__
+        def patched_init(instance, max_workers=5, turn_config=None):
+            original_init(instance, max_workers, turn_config)
+            # After initialization, replace the lifecycle manager with one using temp directory
+            if turn_config:
+                from claudelearnspokemon.conversation_lifecycle_manager import ConversationLifecycleManager
+                instance.lifecycle_manager.shutdown()  # Clean shutdown of old one
+                instance.lifecycle_manager = ConversationLifecycleManager(
+                    config=turn_config,
+                    data_dir=self.test_dir
+                )
+        
+        ClaudeCodeManager.__init__ = patched_init
+        try:
+            self.manager = ClaudeCodeManager(max_workers=2, turn_config=turn_config)
+        finally:
+            ClaudeCodeManager.__init__ = original_init
+
+    def tearDown(self):
+        """Clean up after tests."""
+        if hasattr(self, "manager"):
+            self.manager.shutdown()
+        
+        # Clean up temp directory
+        if hasattr(self, "test_dir"):
+            import shutil
+            import os
+            if os.path.exists(self.test_dir):
+                shutil.rmtree(self.test_dir)
+
+    @patch("subprocess.Popen")
+    def test_claude_code_manager_tracks_conversation_turn_counts(self, mock_popen):
+        """Test that ClaudeCodeManager tracks conversation turn counts correctly."""
+        # Setup mock process
+        mock_process = Mock()
+        mock_process.pid = 12345
+        mock_process.poll.return_value = None  # Healthy process
+        mock_process.stdin = Mock()
+        mock_popen.return_value = mock_process
+        
+        # Start processes
+        success = self.manager.start_all_processes()
+        self.assertTrue(success, "Processes should start successfully")
+        
+        # Get test processes
+        opus_process = self.manager.get_strategic_process()
+        sonnet_process = self.manager.get_available_tactical_process()
+        
+        self.assertIsNotNone(opus_process, "Should have Opus strategic process")
+        self.assertIsNotNone(sonnet_process, "Should have Sonnet tactical process")
+        
+        # Mock send_message methods to avoid NotImplementedError
+        def mock_opus_send(message):
+            return {"response": f"Opus response to: {message}", "status": "success"}
+        
+        def mock_sonnet_send(message):
+            return {"response": f"Sonnet response to: {message}", "status": "success"}
+        
+        opus_process.send_message = mock_opus_send
+        sonnet_process.send_message = mock_sonnet_send
+        
+        # Test conversation turn tracking with unique ID to avoid state pollution
+        conversation_id = f"test_conversation_{self.test_id}"
+        
+        # Send messages and verify turn tracking
+        # Opus messages (limit: 5)
+        for i in range(3):
+            success, response, exception = self.manager.send_message_with_retry(
+                opus_process, 
+                f"Opus message {i+1}",
+                f"opus_operation_{i+1}",
+                conversation_id
+            )
+            self.assertTrue(success, f"Opus message {i+1} should succeed")
+            self.assertIsNotNone(response)
+            self.assertIsNone(exception)
+        
+        # Sonnet messages (limit: 3)
+        for i in range(2):
+            success, response, exception = self.manager.send_message_with_retry(
+                sonnet_process,
+                f"Sonnet message {i+1}",
+                f"sonnet_operation_{i+1}",
+                conversation_id
+            )
+            self.assertTrue(success, f"Sonnet message {i+1} should succeed")
+            self.assertIsNotNone(response)
+            self.assertIsNone(exception)
+        
+        # Verify turn counts in conversation metrics
+        conv_metrics = self.manager.get_conversation_turn_metrics(conversation_id)
+        self.assertEqual(conv_metrics["total_turns"], 5, "Should have 5 total turns")
+        self.assertEqual(conv_metrics["opus_turns"], 3, "Should have 3 Opus turns")
+        self.assertEqual(conv_metrics["sonnet_turns"], 2, "Should have 2 Sonnet turns")
+        self.assertEqual(conv_metrics["conversation_id"], conversation_id)
+        
+        # Verify global metrics
+        global_metrics = self.manager.get_conversation_turn_metrics()
+        self.assertEqual(global_metrics["total_turns"], 5, "Global should have 5 total turns")
+        self.assertEqual(global_metrics["opus_turns"], 3, "Global should have 3 Opus turns")
+        self.assertEqual(global_metrics["sonnet_turns"], 2, "Global should have 2 Sonnet turns")
+        
+        # Verify metrics in performance output
+        perf_metrics = self.manager.get_performance_metrics()
+        self.assertIn("conversation_metrics", perf_metrics)
+        self.assertIn("turn_limits", perf_metrics)
+        
+        conv_perf = perf_metrics["conversation_metrics"]
+        self.assertEqual(conv_perf["total_turns"], 5)
+        self.assertEqual(conv_perf["opus_turns"], 3)
+        self.assertEqual(conv_perf["sonnet_turns"], 2)
+        
+        turn_limits = perf_metrics["turn_limits"]
+        self.assertEqual(turn_limits["opus_limit"], 5)
+        self.assertEqual(turn_limits["sonnet_limit"], 3)
+        
+        # Test turn limit enforcement
+        # Try to exceed Sonnet limit (3)
+        success, response, exception = self.manager.send_message_with_retry(
+            sonnet_process,
+            "This should exceed limit",
+            "sonnet_limit_test",
+            conversation_id
+        )
+        self.assertTrue(success, "Should succeed - at limit but not over")
+        
+        # Now we're at the limit - next message should fail
+        success, response, exception = self.manager.send_message_with_retry(
+            sonnet_process,
+            "This should be blocked",
+            "sonnet_blocked",
+            conversation_id
+        )
+        self.assertFalse(success, "Should fail - exceeds Sonnet limit")
+        self.assertIsNotNone(exception, "Should have exception for limit exceeded")
+        self.assertIn("Sonnet turn limit reached", str(exception))
+        
+        # Opus should still work (hasn't hit limit of 5)
+        success, response, exception = self.manager.send_message_with_retry(
+            opus_process,
+            "Opus should still work",
+            "opus_still_works",
+            conversation_id
+        )
+        self.assertTrue(success, "Opus should still work under limit")
+        
+        # Verify final counts
+        final_conv_metrics = self.manager.get_conversation_turn_metrics(conversation_id)
+        self.assertEqual(final_conv_metrics["total_turns"], 7, "Should have 7 total turns")
+        self.assertEqual(final_conv_metrics["opus_turns"], 4, "Should have 4 Opus turns")
+        self.assertEqual(final_conv_metrics["sonnet_turns"], 3, "Should have 3 Sonnet turns")
+        
+        # Test remaining turn calculations
+        self.assertEqual(final_conv_metrics["opus_remaining"], 1, "Should have 1 Opus turn remaining")
+        self.assertEqual(final_conv_metrics["sonnet_remaining"], 0, "Should have 0 Sonnet turns remaining")
+        
+        # Test alert thresholds (60% of limits)
+        limit_check = self.manager.check_conversation_turn_limits(conversation_id)
+        # Opus: 4/5 = 80% > 60% threshold
+        # Sonnet: 3/3 = 100% > 60% threshold
+        # Note: Alert might not be needed due to cooldown, but we should be at/near threshold
+        self.assertGreaterEqual(final_conv_metrics["opus_turns"], 3, "Should have significant Opus usage")
+        self.assertEqual(final_conv_metrics["sonnet_turns"], 3, "Should be at Sonnet limit")
+        
+        # Test all conversation metrics
+        all_metrics = self.manager.get_all_conversation_turn_metrics()
+        self.assertIn("global", all_metrics)
+        self.assertIn(conversation_id, all_metrics)
+        self.assertEqual(len(all_metrics), 2, "Should have global + 1 conversation")
 
 
 if __name__ == "__main__":

@@ -143,7 +143,7 @@ class MemoryGraph:
             enable_metrics: Whether to collect performance metrics
         """
         self.enable_metrics = enable_metrics
-        self._lock = threading.RLock()  # Reentrant lock for concurrent access
+        self._lock = threading.Lock()  # Simple lock sufficient - no reentrancy needed
 
         # Performance tracking
         self._query_times: list[float] = []

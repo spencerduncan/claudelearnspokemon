@@ -48,7 +48,7 @@ class SessionManager:
         self._session = requests.Session()
 
         # Thread safety for concurrent operations
-        self._lock = threading.RLock()
+        self._lock = threading.Lock()  # Simple lock sufficient - no reentrancy needed
 
         # Reset operation tracking for concurrency safety
         self._reset_in_progress: bool = False

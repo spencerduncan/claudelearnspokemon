@@ -237,7 +237,7 @@ class HeapBasedPriorityQueue(PriorityQueueStrategy[QueuedMessage]):
         """
         self.max_capacity = max_capacity
         self._queue: list[QueuedMessage] = []
-        self._lock = threading.RLock()  # Reentrant lock for nested operations
+        self._lock = threading.Lock()  # Simple lock sufficient - no reentrancy needed
         self._metrics = QueueMetrics()
 
         # Circuit breaker state

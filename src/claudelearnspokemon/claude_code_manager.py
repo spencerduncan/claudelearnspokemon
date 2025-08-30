@@ -25,6 +25,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from .claude_process import ClaudeProcess
+from .conversation_error_handler import ConversationErrorHandler, ConversationErrorConfig
+from .conversation_lifecycle_manager import ConversationLifecycleManager, TurnLimitConfiguration
 from .process_factory import ClaudeProcessFactory
 from .process_health_monitor import ProcessState
 from .process_metrics_collector import AggregatedMetricsCollector
@@ -44,12 +46,13 @@ class ClaudeCodeManager:
     Principle while maintaining all performance optimizations.
     """
 
-    def __init__(self, max_workers: int = 5):
+    def __init__(self, max_workers: int = 5, turn_config: TurnLimitConfiguration = None):
         """
         Initialize manager with clean component architecture.
 
         Args:
             max_workers: Maximum number of parallel workers
+            turn_config: Configuration for conversation turn limits
         """
         self.max_workers = max_workers
         self.processes: dict[int, ClaudeProcess] = {}
@@ -60,8 +63,25 @@ class ClaudeCodeManager:
         # Initialize specialized components
         self.factory = ClaudeProcessFactory()
         self.metrics_aggregator = AggregatedMetricsCollector()
+        
+        # Initialize conversation-level error handling
+        error_config = ConversationErrorConfig(
+            max_retries=3,
+            base_delay=0.5,
+            failure_threshold=5
+        )
+        self.error_handler = ConversationErrorHandler(
+            config=error_config,
+            name="claude_code_manager"
+        )
+        
+        # Initialize conversation lifecycle management
+        self.lifecycle_manager = ConversationLifecycleManager(
+            config=turn_config,
+            data_dir=".claude_conversation_data"
+        )
 
-        logger.info(f"ClaudeCodeManager initialized with {max_workers} workers")
+        logger.info(f"ClaudeCodeManager initialized with {max_workers} workers and conversation turn tracking")
 
     def start_all_processes(self) -> bool:
         """
@@ -207,7 +227,21 @@ class ClaudeCodeManager:
         Returns:
             Dictionary with system-wide performance metrics
         """
-        return self.metrics_aggregator.get_system_metrics()
+        # Get base metrics from aggregated collector
+        metrics = self.metrics_aggregator.get_system_metrics()
+        
+        # Add conversation turn metrics
+        conversation_metrics = self.lifecycle_manager.get_conversation_metrics()
+        metrics.update({
+            "conversation_metrics": conversation_metrics,
+            "turn_limits": {
+                "opus_limit": self.lifecycle_manager.config.opus_turn_limit,
+                "sonnet_limit": self.lifecycle_manager.config.sonnet_turn_limit,
+                "alert_threshold_percent": self.lifecycle_manager.config.alert_threshold_percent
+            }
+        })
+        
+        return metrics
 
     def shutdown(self, timeout: float = 10.0):
         """
@@ -217,6 +251,9 @@ class ClaudeCodeManager:
             timeout: Total time to wait for all processes to shutdown
         """
         logger.info("Shutting down ClaudeCodeManager...")
+        
+        # Shutdown conversation lifecycle manager first to save data
+        self.lifecycle_manager.shutdown()
 
         if not self.processes:
             return
@@ -270,6 +307,147 @@ class ClaudeCodeManager:
     def __enter__(self):
         """Context manager entry."""
         return self
+
+    def send_message_with_retry(
+        self, 
+        process: ClaudeProcess, 
+        message: str,
+        operation_name: str = "send_message",
+        conversation_id: str = "default"
+    ) -> tuple[bool, Any | None, Exception | None]:
+        """
+        Send message to Claude process with comprehensive error handling and turn tracking.
+        
+        Args:
+            process: ClaudeProcess to send message to
+            message: Message content to send
+            operation_name: Descriptive name for the operation
+            conversation_id: Unique identifier for the conversation
+            
+        Returns:
+            Tuple of (success, response, exception)
+        """
+        # Check turn limits before sending message
+        limit_check = self.lifecycle_manager.check_turn_limits(conversation_id)
+        process_type = process.config.process_type
+        
+        # If conversation doesn't exist yet, it's okay to proceed (first message)
+        if limit_check.get("status") == "not_found":
+            # First message for this conversation - allow it
+            pass
+        else:
+            # Block if the next turn would exceed the limit
+            if process_type == ProcessType.OPUS_STRATEGIC:
+                current_opus = limit_check.get("opus_turns", 0)
+                opus_limit = limit_check.get("opus_limit", self.lifecycle_manager.config.opus_turn_limit)
+                if current_opus >= opus_limit:
+                    error_msg = f"Opus turn limit reached for conversation {conversation_id}"
+                    logger.error(error_msg)
+                    return False, None, RuntimeError(error_msg)
+                
+            if process_type == ProcessType.SONNET_TACTICAL:
+                current_sonnet = limit_check.get("sonnet_turns", 0)
+                sonnet_limit = limit_check.get("sonnet_limit", self.lifecycle_manager.config.sonnet_turn_limit)
+                if current_sonnet >= sonnet_limit:
+                    error_msg = f"Sonnet turn limit reached for conversation {conversation_id}"
+                    logger.error(error_msg)
+                    return False, None, RuntimeError(error_msg)
+        
+        def send_message():
+            """Inner function to send message to Claude process."""
+            if not process.is_healthy():
+                raise ConnectionError(f"Process {process.process_id} is not healthy")
+            
+            # Simulate sending message to Claude process
+            # In real implementation, this would interact with the actual Claude CLI
+            # For now, we'll assume the process has a send_message method
+            if hasattr(process, 'send_message'):
+                return process.send_message(message)
+            else:
+                # Placeholder for actual message sending implementation
+                raise NotImplementedError("Message sending not yet implemented")
+        
+        # Attempt to send message
+        success, response, exception = self.error_handler.send_message_with_retry(
+            send_message,
+            message,
+            operation_name
+        )
+        
+        # Increment turn count only on successful message
+        if success:
+            turn_metrics = self.lifecycle_manager.increment_turn_count(
+                conversation_id, 
+                process.config.process_type
+            )
+            
+            logger.debug(
+                f"Turn incremented for {process.config.process_type.value} in conversation {conversation_id}: "
+                f"total={turn_metrics.total_turns}, opus={turn_metrics.opus_turns}, sonnet={turn_metrics.sonnet_turns}"
+            )
+        
+        return success, response, exception
+    
+    def get_conversation_health_status(self) -> dict[str, Any]:
+        """
+        Get conversation-level error handling health status.
+        
+        Returns:
+            Dictionary with error handler health information
+        """
+        return self.error_handler.get_health_status()
+    
+    def reset_conversation_metrics(self) -> None:
+        """
+        Reset conversation error handling metrics.
+        """
+        self.error_handler.reset_metrics()
+        logger.info("Conversation error handling metrics reset")
+    
+    def get_conversation_turn_metrics(self, conversation_id: str = None) -> dict[str, Any]:
+        """
+        Get conversation turn tracking metrics.
+        
+        Args:
+            conversation_id: Specific conversation to get metrics for (global if None)
+            
+        Returns:
+            Dictionary with turn tracking metrics
+        """
+        return self.lifecycle_manager.get_conversation_metrics(conversation_id)
+    
+    def get_all_conversation_turn_metrics(self) -> dict[str, dict[str, Any]]:
+        """
+        Get turn metrics for all tracked conversations.
+        
+        Returns:
+            Dictionary mapping conversation IDs to their metrics
+        """
+        return self.lifecycle_manager.get_all_conversation_metrics()
+    
+    def check_conversation_turn_limits(self, conversation_id: str = None) -> dict[str, Any]:
+        """
+        Check turn limits and get alert information.
+        
+        Args:
+            conversation_id: Specific conversation to check (global if None)
+            
+        Returns:
+            Dictionary with limit check results and alert information
+        """
+        return self.lifecycle_manager.check_turn_limits(conversation_id)
+    
+    def cleanup_old_conversations(self, max_age_hours: float = 24.0) -> int:
+        """
+        Remove old conversation data to prevent memory leaks.
+        
+        Args:
+            max_age_hours: Maximum age of conversations to keep
+            
+        Returns:
+            Number of conversations cleaned up
+        """
+        return self.lifecycle_manager.cleanup_old_conversations(max_age_hours)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit with cleanup."""

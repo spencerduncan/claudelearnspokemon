@@ -68,7 +68,7 @@ class ResponseCache:
         self.cleanup_interval = cleanup_interval
 
         self._cache: OrderedDict[str, CacheEntry] = OrderedDict()
-        self._lock = threading.RLock()  # Reentrant lock for nested operations
+        self._lock = threading.Lock()  # Simple lock sufficient - no reentrancy needed
         self._metrics = {
             "hits": 0,
             "misses": 0,
