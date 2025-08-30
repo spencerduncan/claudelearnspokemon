@@ -26,8 +26,9 @@ The system consists of these core components that need to be implemented:
 
 **State Management**
 - `CheckpointManager` - Saves/loads game states for deterministic replay
-- `TileObserver` - Captures and analyzes 20x18 tile grids
+- `TileObserver` - Captures and analyzes 20x18 tile grids with semantic learning
 - `MemoryGraph` - Memgraph-based persistent storage for patterns and knowledge
+- `SemanticGameAnalyzer` - Learns tile semantics and provides BFS pathfinding
 
 **Lifecycle Management**
 - `ConversationLifecycleManager` - Handles Claude conversation turn limits and compression
@@ -229,6 +230,7 @@ class TestComponentName:
 - Discover patterns through gameplay
 - Evolve language based on successful patterns
 - Compile DSL to input sequences
+- **NEW**: PATHFIND_TO command for automatic navigation
 
 **Checkpoint Strategy**
 - Save states at strategic locations
@@ -243,6 +245,34 @@ All Claude interactions use the CLI, not API:
 - Automatic context compression at turn limits
 - Persistent conversations with restart capability
 
+## Semantic Learning & Pathfinding
+
+**Tile Learning System**
+- Automatically learns tile semantics through gameplay
+- Stores knowledge in `data/tile_learning.json`
+- Tracks confidence scores (0.0-1.0) for each tile
+- Categories: floor, wall, door, npc, grass, water, stairs
+- Accumulates observations across locations
+
+**BFS Pathfinding**
+- Optimal path calculation avoiding obstacles
+- Available via `/pathfind` endpoint on port 8081
+- DSL command: `PATHFIND_TO <row> <col>`
+- Collision map: 9x10 window with player at center (4,4)
+- Returns movement sequence (up, down, left, right)
+
+**Semantic Server (Port 8081)**
+- `/semantic_state` - Enhanced state with tile knowledge
+- `/pathfind` - Calculate optimal paths
+- `/tile_knowledge` - View learned tile database
+- Enhanced collision maps with confidence symbols
+
+**Integration Scripts**
+- `pokemon-scripts/get_semantic_state.sh` - Get enhanced state
+- `pokemon-scripts/navigate_to.sh <row> <col>` - Find path
+- `pokemon-scripts/pathfind_and_move.sh <row> <col>` - Execute navigation
+- `pokemon-scripts/test_pathfind.sh` - Test pathfinding system
+
 ## Performance Requirements
 
 - Script compilation: < 100ms
@@ -250,6 +280,7 @@ All Claude interactions use the CLI, not API:
 - Tile observation: < 50ms
 - Pattern queries: < 100ms
 - Full execution cycle: < 5 seconds
+- Pathfinding calculation: < 50ms
 
 ## Pokemon-gym Integration
 

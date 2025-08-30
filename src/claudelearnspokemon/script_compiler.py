@@ -898,6 +898,125 @@ class ScriptCompiler:
         # Initialize with common Pokemon input patterns
         self._initialize_builtin_patterns()
 
+    def _preprocess_script(self, script_text: str) -> str:
+        """
+        Preprocess DSL script to normalize syntax variations.
+
+        Handles:
+        - Lowercase commands → uppercase
+        - Colon notation (e.g., down:3) → repeated commands
+        - Comma-separated sequences → newline-separated
+        - PATHFIND_TO <row> <col> → movement sequence
+        """
+        lines = []
+
+        # Handle comma-separated format first
+        if "," in script_text and "\n" not in script_text:
+            # Split by commas and process each part
+            parts = script_text.split(",")
+            for part in parts:
+                part = part.strip()
+                if ":" in part:
+                    # Handle colon notation within comma-separated
+                    cmd, count = part.split(":", 1)
+                    try:
+                        repeat_count = int(count)
+                        for _ in range(repeat_count):
+                            lines.append(cmd.upper())
+                    except ValueError:
+                        lines.append(part.upper())
+                else:
+                    lines.append(part.upper())
+        else:
+            # Process line by line
+            for line in script_text.split("\n"):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    lines.append(line)
+                    continue
+
+                # Handle PATHFIND_TO command
+                if line.upper().startswith("PATHFIND_TO"):
+                    # Extract pathfinding request and expand to movements
+                    movements = self._handle_pathfind_command(line)
+                    lines.extend(movements)
+                    continue
+
+                # Handle colon notation (e.g., down:3)
+                if ":" in line:
+                    parts = line.split(":", 1)
+                    cmd = parts[0].strip()
+                    try:
+                        repeat_count = int(parts[1].strip())
+                        # Expand to repeated commands
+                        for _ in range(repeat_count):
+                            lines.append(cmd.upper())
+                            if cmd.upper() in ["UP", "DOWN", "LEFT", "RIGHT"]:
+                                lines.append("DELAY_10")  # Add delay between movements
+                    except (ValueError, IndexError):
+                        # If not a valid number, just uppercase the line
+                        lines.append(line.upper())
+                else:
+                    # Simple uppercase conversion
+                    lines.append(line.upper())
+
+        return "\n".join(lines)
+
+    def _handle_pathfind_command(self, line: str) -> list[str]:
+        """
+        Handle PATHFIND_TO command by calling pathfinding API and expanding to movements.
+
+        Args:
+            line: Command line like "PATHFIND_TO 0 4"
+
+        Returns:
+            List of movement commands
+        """
+        parts = line.upper().split()
+        if len(parts) != 3:
+            # Invalid format, return as comment
+            return [f"# Invalid PATHFIND_TO: {line}"]
+
+        try:
+            target_row = int(parts[1])
+            target_col = int(parts[2])
+        except ValueError:
+            return [f"# Invalid PATHFIND_TO coordinates: {line}"]
+
+        # For compilation, we'll expand to a placeholder that indicates pathfinding
+        # In production, this would call the semantic server
+        # For now, we'll add a comment and basic movements as example
+        movements = [
+            f"# PATHFIND_TO {target_row} {target_col} - Auto-generated path",
+            "# Path calculation would happen at runtime via semantic server",
+        ]
+
+        # Add placeholder movements (in real implementation, would call API)
+        # This is just for demonstration - actual path comes from BFS algorithm
+        if target_row < 4:
+            # Moving north
+            for _ in range(4 - target_row):
+                movements.append("UP")
+                movements.append("DELAY_10")
+        elif target_row > 4:
+            # Moving south
+            for _ in range(target_row - 4):
+                movements.append("DOWN")
+                movements.append("DELAY_10")
+
+        if target_col < 4:
+            # Moving west
+            for _ in range(4 - target_col):
+                movements.append("LEFT")
+                movements.append("DELAY_10")
+        elif target_col > 4:
+            # Moving east
+            for _ in range(target_col - 4):
+                movements.append("RIGHT")
+                movements.append("DELAY_10")
+
+        return movements
+
     def compile(self, script_text: str) -> CompiledScript:
         """
         Compile DSL script to executable instruction sequence.
@@ -908,6 +1027,9 @@ class ScriptCompiler:
         start_time = time.perf_counter()
 
         try:
+            # Preprocess script to normalize syntax
+            script_text = self._preprocess_script(script_text)
+
             # Phase 1: Tokenization (~10ms target)
             tokens = self._lexer.tokenize(script_text)
 

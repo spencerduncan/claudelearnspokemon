@@ -130,6 +130,7 @@ addopts = "-v --tb=short --strict-markers"
 markers = [
     "unit: Unit tests",
     "integration: Integration tests",
+    "performance: Performance tests",
     "fast: Fast tests (<1s)",
     "medium: Medium speed tests (1-5s)",
     "slow: Slow tests (>5s)",

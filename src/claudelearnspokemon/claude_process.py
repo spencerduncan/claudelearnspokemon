@@ -11,6 +11,8 @@ import subprocess
 import threading
 import time
 
+from .conversation_error_handling import ConversationRetryHandler, retry_conversation_initialization
+from .conversation_state import ConversationState
 from .process_communication import ProcessCommunicator
 from .process_factory import ClaudeProcessFactory, ProcessConfig
 from .process_health_monitor import ProcessHealthMonitor, ProcessState
@@ -46,28 +48,40 @@ class ClaudeProcess:
         self.process: subprocess.Popen | None = None
         self._lock = threading.Lock()
 
+        # Initialize conversation state management
+        self.conversation_state = ConversationState(config.process_type, process_id)
+
+        # Initialize error handling for robust conversation setup
+        self.retry_handler = ConversationRetryHandler()
+
         # Initialize specialized components
         self.metrics_collector = ProcessMetricsCollector(process_id)
         self.health_monitor = ProcessHealthMonitor(process_id, self.metrics_collector)
         self.communicator = ProcessCommunicator(
-            process_id, config.stdout_buffer_size, config.stderr_buffer_size
+            process_id,
+            config.stdout_buffer_size,
+            config.stderr_buffer_size,
+            conversation_state=self.conversation_state,
         )
 
         # Factory for process creation
         self.factory = ClaudeProcessFactory()
 
-        logger.info(f"Initialized Claude process {process_id} with {config.process_type.value}")
+        logger.info(
+            f"Initialized Claude process {process_id} with {config.process_type.value} "
+            f"(turn limit: {self.conversation_state._max_turns})"
+        )
 
     def start(self) -> bool:
         """
-        Start Claude CLI process with performance timing.
+        Start Claude CLI process with performance timing and robust error handling.
 
         Returns:
             True if process started successfully, False otherwise
         """
-        start_time = time.time()
 
-        try:
+        def _start_process():
+            """Internal function for retry handler."""
             with self._lock:
                 if self.process is not None:
                     logger.warning(f"Process {self.process_id} already started")
@@ -76,31 +90,65 @@ class ClaudeProcess:
                 # Create subprocess using factory
                 self.process = self.factory.create_subprocess(self.config)
 
-                # Record startup timing
-                startup_duration = time.time() - start_time
-                self.metrics_collector.record_startup_time(startup_duration)
-
-                # Mark as healthy and send system prompt
+                # Mark as healthy and send system prompt with validation
                 self.health_monitor.mark_as_healthy()
-                self._initialize_process()
+                self._initialize_process_with_validation()
 
                 logger.info(
                     f"Started {self.config.process_type.value} process {self.process_id} "
-                    f"(PID: {self.process.pid}) in {startup_duration*1000:.1f}ms"
+                    f"(PID: {self.process.pid})"
                 )
 
                 return True
 
+        start_time = time.time()
+
+        try:
+            # Use retry handler for robust process startup
+            result = retry_conversation_initialization(_start_process, process_id=self.process_id)
+
+            # Record startup timing
+            startup_duration = time.time() - start_time
+            self.metrics_collector.record_startup_time(startup_duration)
+
+            logger.info(
+                f"Process {self.process_id} startup completed in {startup_duration*1000:.1f}ms"
+            )
+            return result
+
         except Exception as e:
-            logger.error(f"Failed to start process {self.process_id}: {e}")
+            startup_duration = time.time() - start_time
+            logger.error(
+                f"Failed to start process {self.process_id} after {startup_duration*1000:.1f}ms: {e}"
+            )
             self.health_monitor.mark_as_failed()
             return False
 
-    def _initialize_process(self):
-        """Send system prompt to initialize the process."""
-        if self.process:
-            prompt = PromptRepository.get_prompt(self.config.process_type)
-            self.communicator.send_system_prompt(self.process, prompt)
+    def _initialize_process_with_validation(self):
+        """Send system prompt and validate conversation initialization."""
+        if not self.process:
+            raise RuntimeError(f"Process {self.process_id} not available for initialization")
+
+        prompt = PromptRepository.get_prompt(self.config.process_type)
+
+        # Send system prompt with validation
+        success = self.communicator.send_system_prompt(self.process, prompt)
+        if not success:
+            raise RuntimeError(
+                f"Failed to send system prompt to process {self.process_id}. "
+                f"Prompt type: {self.config.process_type.value}"
+            )
+
+        # Validate conversation state was properly initialized
+        if not self.conversation_state._system_prompt_sent:
+            raise RuntimeError(
+                f"Conversation state not properly initialized for process {self.process_id}"
+            )
+
+        logger.debug(
+            f"Process {self.process_id} conversation initialized: "
+            f"{self.config.process_type.value} with turn limit {self.conversation_state._max_turns}"
+        )
 
     def health_check(self) -> bool:
         """
@@ -204,6 +252,45 @@ class ClaudeProcess:
     def get_performance_summary(self) -> dict:
         """Get human-readable performance summary."""
         return self.metrics_collector.get_performance_summary()
+
+    def get_conversation_status(self) -> dict:
+        """
+        Get comprehensive conversation status including turn tracking.
+
+        Returns:
+            Dictionary with conversation state, turn counts, and performance metrics
+        """
+        return self.conversation_state.get_status_summary()
+
+    def can_send_message(self) -> bool:
+        """
+        Check if process can send another message without exceeding turn limits.
+
+        Returns:
+            True if message can be sent, False if turn limit reached
+        """
+        return self.conversation_state.can_send_message()
+
+    def needs_context_compression(self) -> bool:
+        """
+        Check if conversation is approaching turn limits and needs context compression.
+
+        Returns:
+            True if approaching limit, False otherwise
+        """
+        return self.conversation_state.needs_context_compression()
+
+    def reset_conversation(self, preserve_metrics: bool = True):
+        """
+        Reset conversation state while optionally preserving performance metrics.
+
+        Args:
+            preserve_metrics: Whether to keep performance data across reset
+        """
+        self.conversation_state.reset_conversation(preserve_metrics)
+        logger.info(
+            f"Process {self.process_id} conversation reset (metrics preserved: {preserve_metrics})"
+        )
 
     def __enter__(self):
         """Context manager entry."""

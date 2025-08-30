@@ -283,19 +283,27 @@ class TestFailureHandling(unittest.TestCase):
     def test_mixed_success_failure_mock(self, mock_popen):
         """Test handling mixed success/failure scenarios."""
 
-        # Mock alternating success/failure pattern
+        # Mock deterministic failure pattern - even process IDs always fail
         def side_effect(*args, **kwargs):
             if not hasattr(side_effect, "call_count"):
                 side_effect.call_count = 0
             side_effect.call_count += 1
 
-            if side_effect.call_count % 2 == 0:
+            # Extract process type from command line to determine which process this is
+            cmd_args = args[0] if args else []
+            cmd_str = " ".join(cmd_args) if isinstance(cmd_args, list) else str(cmd_args)
+
+            # Always fail if this looks like a tactical process creation
+            # This ensures consistent failure regardless of retry count
+            if "sonnet" in cmd_str.lower() or side_effect.call_count > 2:
                 raise OSError("Process failed")
             else:
                 mock_process = Mock()
                 mock_process.pid = 12340 + side_effect.call_count
                 mock_process.poll.return_value = None
                 mock_process.stdin = Mock()
+                mock_process.stdout = Mock()
+                mock_process.stderr = Mock()
                 return mock_process
 
         mock_popen.side_effect = side_effect
