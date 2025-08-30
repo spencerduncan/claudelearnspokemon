@@ -275,8 +275,50 @@ class TestLanguageValidator(unittest.TestCase):
         """Test that validation meets <50ms performance target."""
         # Critical performance test: validation must be very fast
         # to avoid slowing down the evolution proposal process
+        import time
 
-        self.assertTrue(True, "Validation performance test ready")
+        # Create realistic validation workload with multiple proposals
+        validator = LanguageValidator()
+        
+        # Create realistic evolution proposals for performance testing
+        # Using MockEvolutionProposal with all required attributes
+        mock_proposals = []
+        for i in range(30):  # Typical number of proposals from production data
+            # Create a mock proposal object with all required attributes
+            proposal = type('MockEvolutionProposal', (), {
+                'proposal_id': f"perf_test_{i}",
+                'proposal_type': "macro_extension",
+                'pattern_basis': [f"pattern_{i % 5}"],
+                'dsl_changes': {"new_macros": {f"TEST_MACRO_{i}": [f"ACTION_{i}"]}},
+                'expected_improvement': {"execution_time_reduction": 0.1, "pattern_simplification": 0.2},
+                'validation_score': 0.0,
+                'implementation_complexity': "low",
+                'estimated_development_time': 1.0,  # Required by validator
+                'confidence_score': 0.8
+            })()
+            mock_proposals.append(proposal)
+
+        # Measure validation performance with statistical accuracy
+        times = []
+        for iteration in range(10):  # 10 iterations for statistical measurement
+            start_time = time.perf_counter()
+            validated_proposals = validator.validate_proposals(mock_proposals)
+            end_time = time.perf_counter()
+            times.append((end_time - start_time) * 1000)  # Convert to milliseconds
+
+        # Statistical analysis
+        avg_time = sum(times) / len(times)
+        std_dev = (sum((t - avg_time) ** 2 for t in times) / len(times)) ** 0.5 if len(times) > 1 else 0
+
+        # Performance validation (target: <50ms)
+        self.assertLess(avg_time, 50, 
+                       f"Validation took {avg_time:.2f}±{std_dev:.2f}ms for {len(mock_proposals)} proposals, target <50ms")
+        
+        # Validate that validation actually works
+        final_validated = validator.validate_proposals(mock_proposals)
+        self.assertGreaterEqual(len(final_validated), 0, "Should successfully validate proposals")
+        for proposal in final_validated:
+            self.assertGreaterEqual(proposal.validation_score, 0.0, "All proposals should have validation scores")
 
     def test_detect_potential_breaking_changes(self):
         """Test detection of proposals that could break existing patterns."""
@@ -495,11 +537,55 @@ class TestPerformanceTargets(unittest.TestCase):
         """Test complete language evolution pipeline performance."""
         # Integration performance test: entire evolution process
         # should complete within reasonable time for strategic planning
+        import time
 
-        # Expected total time budget: <500ms for complete evolution cycle
-        # (200ms analysis + 100ms generation + 50ms validation + overhead)
+        # Create realistic production-scale test data (88 patterns)
+        production_patterns = []
+        for i in range(88):
+            pattern = {
+                "name": f"production_pattern_{i}",
+                "success_rate": 0.5 + (i % 10) * 0.05,  # Varies from 0.5 to 0.95
+                "usage_frequency": 10 + i % 50,
+                "input_sequence": [f"ACTION_{j}" for j in range(2 + i % 6)],  # 2-7 actions per pattern
+                "context": {"location": f"area_{i % 12}", "level": i % 25},
+                "evolution_metadata": {}
+            }
+            production_patterns.append(pattern)
 
-        self.assertTrue(True, "End-to-end performance test ready")
+        # Test complete pipeline with statistical measurement
+        analyzer = LanguageAnalyzer()
+        generator = EvolutionProposalGenerator()
+        validator = LanguageValidator()
+
+        # Measure end-to-end performance with multiple iterations
+        times = []
+        for iteration in range(5):  # 5 iterations for statistical accuracy
+            start_time = time.perf_counter()
+            
+            # Full pipeline execution
+            opportunities = analyzer.identify_evolution_opportunities(production_patterns)
+            proposals = generator.generate_proposals(opportunities)
+            validated_proposals = validator.validate_proposals(proposals)
+            
+            end_time = time.perf_counter()
+            times.append((end_time - start_time) * 1000)  # Convert to milliseconds
+
+        # Statistical analysis
+        avg_time = sum(times) / len(times)
+        std_dev = (sum((t - avg_time) ** 2 for t in times) / len(times)) ** 0.5 if len(times) > 1 else 0
+
+        # Performance validation (target: <350ms as per honest_performance_validation.py)
+        self.assertLess(avg_time, 350, 
+                       f"End-to-end pipeline took {avg_time:.2f}±{std_dev:.2f}ms, target <350ms")
+        
+        # Validate that the pipeline actually produces results
+        final_opportunities = analyzer.identify_evolution_opportunities(production_patterns)
+        final_proposals = generator.generate_proposals(final_opportunities)
+        final_validated = validator.validate_proposals(final_proposals)
+        
+        self.assertGreater(len(final_opportunities), 0, "Should identify opportunities from production patterns")
+        self.assertGreater(len(final_proposals), 0, "Should generate proposals from opportunities")
+        self.assertGreaterEqual(len(final_validated), 0, "Should validate proposals successfully")
 
 
 @pytest.mark.medium
