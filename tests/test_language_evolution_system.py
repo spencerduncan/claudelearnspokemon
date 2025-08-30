@@ -75,51 +75,48 @@ class TestLanguageAnalyzer(unittest.TestCase):
         """Test identification of patterns that could benefit from language evolution."""
         # Red phase: Test will fail until LanguageAnalyzer is implemented
 
-        # Mock pattern data with varying success rates
-        _mock_patterns = [
-            MockPatternData(
-                name="menu_navigation",
-                success_rate=0.65,  # Medium success - improvement opportunity
-                usage_frequency=150,
-                input_sequence=["START", "1", "DOWN", "DOWN", "A"],
-                context={"location": "any", "menu_type": "main"},
-            ),
-            MockPatternData(
-                name="battle_sequence",
-                success_rate=0.95,  # High success - no immediate need for evolution
-                usage_frequency=80,
-                input_sequence=["A", "2", "DOWN", "A"],
-                context={"location": "battle", "pokemon_level": "any"},
-            ),
-            MockPatternData(
-                name="item_selection",
-                success_rate=0.45,  # Low success - high priority for evolution
-                usage_frequency=200,
-                input_sequence=["START", "RIGHT", "DOWN", "A", "B"],
-                context={"location": "any", "item_type": "consumable"},
-            ),
+        # Mock pattern data with varying success rates (converted to dict format)
+        mock_patterns = [
+            {
+                "name": "menu_navigation",
+                "success_rate": 0.65,  # Medium success - improvement opportunity
+                "usage_frequency": 150,
+                "input_sequence": ["START", "1", "DOWN", "DOWN", "A"],
+                "context": {"location": "any", "menu_type": "main"},
+            },
+            {
+                "name": "battle_sequence",
+                "success_rate": 0.95,  # High success - no immediate need for evolution
+                "usage_frequency": 80,
+                "input_sequence": ["A", "2", "DOWN", "A"],
+                "context": {"location": "battle", "pokemon_level": "any"},
+            },
+            {
+                "name": "item_selection",
+                "success_rate": 0.45,  # Low success - high priority for evolution
+                "usage_frequency": 200,
+                "input_sequence": ["START", "RIGHT", "DOWN", "A", "B"],
+                "context": {"location": "any", "item_type": "consumable"},
+            },
         ]
 
         # Expected behavior: analyzer should identify improvement opportunities
         # based on success rate and usage frequency
-
-        # This test will be implemented once LanguageAnalyzer exists
-        # analyzer = LanguageAnalyzer()
-        # opportunities = analyzer.identify_evolution_opportunities(mock_patterns)
+        analyzer = LanguageAnalyzer()
+        opportunities = analyzer.identify_evolution_opportunities(mock_patterns)
 
         # Assertions for expected behavior:
-        # self.assertGreater(len(opportunities), 0)
-        # self.assertIn("item_selection", [opp.pattern_name for opp in opportunities])
-        # self.assertIn("menu_navigation", [opp.pattern_name for opp in opportunities])
+        self.assertGreater(len(opportunities), 0, "Should identify improvement opportunities")
+        # Check if low success rate patterns are identified as opportunities
+        all_pattern_names = [name for opp in opportunities for name in opp.pattern_names]
+        self.assertIn("item_selection", all_pattern_names, "Low success pattern should be identified")
 
-        # Performance assertion: <200ms for analysis
-        # start_time = time.time()
-        # opportunities = analyzer.identify_evolution_opportunities(mock_patterns)
-        # analysis_time = (time.time() - start_time) * 1000
-        # self.assertLess(analysis_time, 200, f"Analysis took {analysis_time:.2f}ms, target is <200ms")
-
-        # Placeholder assertion for Red phase
-        self.assertTrue(True, "Test ready for LanguageAnalyzer implementation")
+        # Performance assertion: <200ms for analysis with real measurement
+        start_time = time.perf_counter()
+        test_opportunities = analyzer.identify_evolution_opportunities(mock_patterns)
+        analysis_time = (time.perf_counter() - start_time) * 1000
+        self.assertLess(analysis_time, 200, f"Analysis took {analysis_time:.2f}ms, target is <200ms")
+        self.assertEqual(len(test_opportunities), len(opportunities), "Consistent results across runs")
 
     def test_pattern_frequency_analysis_identifies_common_sequences(self):
         """Test identification of frequently used input sequences for macro creation."""
@@ -210,13 +207,36 @@ class TestEvolutionProposalGenerator(unittest.TestCase):
         # Performance-critical test: proposal generation must be fast
         # for real-time strategic planning integration
 
-        # This will be implemented with actual performance measurement
-        # start_time = time.time()
-        # proposals = generator.generate_proposals(opportunities)
-        # generation_time = (time.time() - start_time) * 1000
-        # self.assertLess(generation_time, 100, f"Generation took {generation_time:.2f}ms, target is <100ms")
-
-        self.assertTrue(True, "Performance test ready for implementation")
+        # Create mock opportunities for performance testing
+        from src.claudelearnspokemon.language_evolution import (
+            EvolutionOpportunity, EvolutionOpportunityType
+        )
+        
+        mock_opportunities = [
+            EvolutionOpportunity(
+                opportunity_id="perf_test_1",
+                opportunity_type=EvolutionOpportunityType.COMMON_SEQUENCE,
+                pattern_names=["test_pattern_1"],
+                common_sequence=["A", "START", "DOWN"],
+                frequency=100,
+                average_success_rate=0.6,
+                improvement_potential=0.3,
+            )
+        ]
+        
+        generator = EvolutionProposalGenerator()
+        
+        # Performance measurement with real timing
+        start_time = time.perf_counter()
+        proposals = generator.generate_proposals(mock_opportunities)
+        generation_time = (time.perf_counter() - start_time) * 1000
+        
+        # Performance assertion
+        self.assertLess(generation_time, 100, f"Generation took {generation_time:.2f}ms, target is <100ms")
+        
+        # Functional assertions
+        self.assertGreater(len(proposals), 0, "Should generate proposals from opportunities")
+        self.assertEqual(len(proposals), len(mock_opportunities), "Should generate one proposal per supported opportunity")
 
     def test_proposal_prioritization_by_expected_impact(self):
         """Test that proposals are prioritized by expected success rate improvement."""
@@ -281,21 +301,36 @@ class TestLanguageValidator(unittest.TestCase):
         validator = LanguageValidator()
         
         # Create realistic evolution proposals for performance testing
-        # Using MockEvolutionProposal with all required attributes
+        from src.claudelearnspokemon.language_evolution import (
+            EvolutionProposal, EvolutionOpportunity, ProposalType, ImplementationComplexity,
+            EvolutionOpportunityType
+        )
+        
         mock_proposals = []
         for i in range(30):  # Typical number of proposals from production data
-            # Create a mock proposal object with all required attributes
-            proposal = type('MockEvolutionProposal', (), {
-                'proposal_id': f"perf_test_{i}",
-                'proposal_type': "macro_extension",
-                'pattern_basis': [f"pattern_{i % 5}"],
-                'dsl_changes': {"new_macros": {f"TEST_MACRO_{i}": [f"ACTION_{i}"]}},
-                'expected_improvement': {"execution_time_reduction": 0.1, "pattern_simplification": 0.2},
-                'validation_score': 0.0,
-                'implementation_complexity': "low",
-                'estimated_development_time': 1.0,  # Required by validator
-                'confidence_score': 0.8
-            })()
+            # Create a real opportunity basis
+            opportunity = EvolutionOpportunity(
+                opportunity_id=f"opp_{i}",
+                opportunity_type=EvolutionOpportunityType.COMMON_SEQUENCE,
+                pattern_names=[f"pattern_{i % 5}"],
+                common_sequence=["A", "START"],
+                frequency=10 + i,
+                average_success_rate=0.6,
+                improvement_potential=0.3
+            )
+            
+            # Create a real proposal object
+            proposal = EvolutionProposal(
+                proposal_id=f"perf_test_{i}",
+                proposal_type=ProposalType.MACRO_EXTENSION,
+                opportunity_basis=opportunity,
+                dsl_changes={"new_macros": {f"TEST_MACRO_{i}": [f"ACTION_{i}"]}},
+                expected_improvement={"execution_time_reduction": 0.1, "pattern_simplification": 0.2},
+                validation_score=0.0,
+                implementation_complexity=ImplementationComplexity.LOW,
+                estimated_development_time=1.0,
+                risk_assessment={"complexity": "low"}
+            )
             mock_proposals.append(proposal)
 
         # Measure validation performance with statistical accuracy
