@@ -79,24 +79,26 @@ The Pokemon Gym adapter system is designed as a high-performance, multi-containe
 
 ## Component Architecture
 
-### EmulatorPool - Container Orchestration Engine
+### EmulatorPool - Workstation Container Orchestration Engine
+
+**Simplified for Workstation Development (Issue #150 Implementation)**
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        EMULATOR POOL                                │
 ├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
+│                     (Workstation Optimized)                        │
 │  ┌─────────────────────────────────────────────────────────────────┐ │
 │  │                    POOL MANAGER                                 │ │
 │  │                                                                 │ │
 │  │  ┌───────────────┐  ┌────────────────┐  ┌──────────────────┐   │ │
 │  │  │ Docker Client │  │ Container Mgmt │  │ Health Monitor   │   │ │
 │  │  │               │  │                │  │                  │   │ │
-│  │  │ - Image Pull  │  │ - Lifecycle    │  │ - Health Checks  │   │ │
-│  │  │ - Container   │  │ - Port Mgmt    │  │ - Auto Restart   │   │ │
-│  │  │   Create      │  │ - Resource     │  │ - Status Track   │   │ │
-│  │  │ - Network     │  │   Limits       │  │ - Failure Detect│   │ │
-│  │  │   Config      │  │ - Auto Cleanup │  │ - Recovery Logic │   │ │
+│  │  │ - Image Pull  │  │ - Lifecycle    │  │ - Status Enum    │   │ │
+│  │  │ - Container   │  │ - Port Mgmt    │  │ - Docker Status  │   │ │
+│  │  │   Create      │  │ - Resource     │  │ - HTTP Check     │   │ │
+│  │  │ - Network     │  │   Limits       │  │ - Structured     │   │ │
+│  │  │   Config      │  │ - Auto Cleanup │  │   Logging        │   │ │
 │  │  └───────────────┘  └────────────────┘  └──────────────────┘   │ │
 │  └─────────────────────────────────────────────────────────────────┘ │
 │                                     │                               │
@@ -104,32 +106,60 @@ The Pokemon Gym adapter system is designed as a high-performance, multi-containe
 │  │                  RESOURCE POOL                                  │ │
 │  │                                                                 │ │
 │  │  ┌─────────────┐    ┌─────────────┐    ┌─────────────────────┐  │ │
-│  │  │ Available   │    │ Busy        │    │ Connection Pool     │  │ │
+│  │  │ Available   │    │ Busy        │    │ Simple HTTP Client  │  │ │
 │  │  │ Queue       │    │ Tracking    │    │                     │  │ │
-│  │  │             │    │             │    │ - HTTP Sessions     │  │ │
-│  │  │ Port 8081 ──┼───►│ Port 8083   │    │ - Keep-Alive        │  │ │
-│  │  │ Port 8082   │    │             │    │ - Connection Reuse  │  │ │
-│  │  │ Port 8084   │    │             │    │ - Timeout Handling  │  │ │
-│  │  │             │    │             │    │ - Retry Logic       │  │ │
+│  │  │             │    │             │    │ - Session Reuse     │  │ │
+│  │  │ Port 8081 ──┼───►│ Port 8083   │    │ - Fixed Retry (2x)  │  │ │
+│  │  │ Port 8082   │    │             │    │ - Simple Timeout    │  │ │
+│  │  │ Port 8084   │    │             │    │ - Failure Tracking  │  │ │
+│  │  │             │    │             │    │ - Fast Fail (3 max) │  │ │
 │  │  └─────────────┘    └─────────────┘    └─────────────────────┘  │ │
 │  └─────────────────────────────────────────────────────────────────┘ │
 │                                     │                               │
 │  ┌─────────────────────────────────────────────────────────────────┐ │
-│  │                 THREAD SAFETY                                   │ │
+│  │              WORKSTATION THREAD SAFETY                         │ │
 │  │                                                                 │ │
 │  │  ┌─────────────────┐              ┌──────────────────────────┐  │ │
-│  │  │ RLock           │              │ Queue Operations         │  │ │
+│  │  │ Simple Lock     │              │ Queue Operations         │  │ │
 │  │  │                 │              │                          │  │ │
-│  │  │ - Acquire/      │              │ - Thread-safe get/put    │  │ │
-│  │  │   Release       │              │ - Timeout handling       │  │ │
-│  │  │ - Context Mgmt  │              │ - Non-blocking ops       │  │ │
-│  │  │ - Deadlock      │              │ - Exception safety       │  │ │
-│  │  │   Prevention    │              │ - Resource counting      │  │ │
+│  │  │ - Health Status │              │ - Thread-safe get/put    │  │ │
+│  │  │   Updates       │              │ - Timeout handling       │  │ │
+│  │  │ - Basic Sync    │              │ - Non-blocking ops       │  │ │
+│  │  │ - Workstation   │              │ - Exception safety       │  │ │
+│  │  │   Appropriate   │              │ - Resource counting      │  │ │
 │  │  └─────────────────┘              └──────────────────────────┘  │ │
+│  └─────────────────────────────────────────────────────────────────┘ │
+│                                     │                               │
+│  ┌─────────────────────────────────────────────────────────────────┐ │
+│  │                 HEALTH STATUS TRACKING                         │ │
+│  │                                                                 │ │
+│  │  ┌─────────────────────────────────────────────────────────────┐ │ │
+│  │  │                    Status Enums                             │ │ │
+│  │  │                                                             │ │ │
+│  │  │   HEALTHY    → Container running + HTTP responsive          │ │ │
+│  │  │   UNHEALTHY  → Container running + HTTP unresponsive        │ │ │
+│  │  │   STOPPED    → Container not running                        │ │ │
+│  │  │   UNKNOWN    → Status cannot be determined                  │ │ │
+│  │  │                                                             │ │ │
+│  │  │ ┌─────────────┐ ┌─────────────┐ ┌─────────────────────────┐ │ │ │
+│  │  │ │Docker Check │ │ HTTP Check  │ │ Structured Logging      │ │ │ │
+│  │  │ │- Status API │ │- Health Ping│ │- Status Transitions     │ │ │ │
+│  │  │ │- Restart    │ │- Response   │ │- Failure Tracking       │ │ │ │
+│  │  │ │  Detection  │ │  Time       │ │- Diagnostic Info        │ │ │ │
+│  │  │ └─────────────┘ └─────────────┘ └─────────────────────────┘ │ │ │
+│  │  └─────────────────────────────────────────────────────────────┘ │ │
 │  └─────────────────────────────────────────────────────────────────┘ │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+**Key Workstation Simplifications (Issue #150):**
+
+- **Simplified Failure Handling**: Replaced complex circuit breaker with simple consecutive failure tracking (max 3 failures, 10s timeout)
+- **Health Status Enumeration**: Added explicit `ContainerHealthStatus` enum (HEALTHY, UNHEALTHY, STOPPED, UNKNOWN)
+- **Docker Status Integration**: Enhanced health checks to include Docker container status validation
+- **Structured Logging**: Added structured logging for health status changes and transitions
+- **Workstation Threading**: Simplified thread synchronization appropriate for 4-container workstation use
 
 ### CheckpointManager - State Persistence Engine
 
