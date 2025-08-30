@@ -133,6 +133,8 @@ markers = [
     "fast: Fast tests (<1s)",
     "medium: Medium speed tests (1-5s)",
     "slow: Slow tests (>5s)",
+    "stress: Stress tests for load handling",
+    "benchmark: Benchmark tests for performance measurement",
 ]
 
 [tool.coverage.run]

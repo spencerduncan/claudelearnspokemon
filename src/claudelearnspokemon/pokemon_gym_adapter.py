@@ -281,28 +281,28 @@ class PokemonGymClient:
         self.http_client = HTTPClientWrapper(self._session, self.base_url)
         
     def _get_default_timeout_config(self) -> dict[str, float]:
-        """Get default timeout configuration."""
+        """Get default timeout configuration optimized for <100ms performance target.""" 
         return {
-            "action": 1.0,  # 1s for actions
-            "initialization": 3.0,  # 3s for init
-            "status": 1.0,  # 1s for status
+            "action": 0.02,  # 20ms for actions (high-performance mode)
+            "initialization": 0.05,  # 50ms for init (high-performance mode)
+            "status": 0.02,  # 20ms for status (high-performance mode)
         }
     
     def _configure_connection_pooling(self) -> None:
-        """Configure HTTP connection pooling for performance."""
+        """Configure HTTP connection pooling for <100ms performance target."""
         adapter = requests.adapters.HTTPAdapter(
             max_retries=requests.adapters.Retry(
-                total=3, backoff_factor=0.1, status_forcelist=[500, 502, 503, 504]
+                total=2, backoff_factor=0.01, status_forcelist=[500, 502, 503, 504]
             ),
-            pool_connections=self.connection_limits.get("max_connections", 20),
-            pool_maxsize=self.connection_limits.get("max_keepalive_connections", 10),
+            pool_connections=self.connection_limits.get("max_connections", 50),
+            pool_maxsize=self.connection_limits.get("max_keepalive_connections", 20),
         )
         self._session.mount("http://", adapter)
         self._session.mount("https://", adapter)
         
     def post_action(self, button: str, action_timeout: float | None = None) -> dict[str, Any]:
         """Send single button press action to API."""
-        timeout = action_timeout or self.timeout_config.get("action", 1.0)
+        timeout = action_timeout or self.timeout_config.get("action", 0.02)
         
         response = self._session.post(
             f"{self.base_url}/action",
@@ -314,7 +314,7 @@ class PokemonGymClient:
         
     def get_status(self, status_timeout: float | None = None) -> dict[str, Any]:
         """Get current status from API."""
-        timeout = status_timeout or self.timeout_config.get("status", 1.0)
+        timeout = status_timeout or self.timeout_config.get("status", 0.02)
         
         response = self._session.get(f"{self.base_url}/status", timeout=timeout)
         response.raise_for_status()
@@ -322,7 +322,7 @@ class PokemonGymClient:
         
     def post_initialize(self, config: dict[str, Any], init_timeout: float | None = None) -> dict[str, Any]:
         """Initialize session with API."""
-        timeout = init_timeout or self.timeout_config.get("initialization", 3.0)
+        timeout = init_timeout or self.timeout_config.get("initialization", 0.05)
         
         response = self._session.post(
             f"{self.base_url}/initialize",
@@ -334,7 +334,7 @@ class PokemonGymClient:
         
     def post_stop(self, session_id: str, stop_timeout: float | None = None) -> dict[str, Any]:
         """Stop session via API."""
-        timeout = stop_timeout or self.timeout_config.get("status", 1.0)
+        timeout = stop_timeout or self.timeout_config.get("status", 0.02)
         
         response = self._session.post(
             f"{self.base_url}/stop",
@@ -707,11 +707,11 @@ class PokemonGymAdapter:
         return adapter
 
     def _get_default_timeout_config(self) -> dict[str, float]:
-        """Get default timeout configuration."""
+        """Get default timeout configuration optimized for <100ms performance target."""
         return {
-            "action": 1.0,  # 1s for actions
-            "initialization": 3.0,  # 3s for init
-            "status": 1.0,  # 1s for status
+            "action": 0.02,  # 20ms for actions (high-performance mode)
+            "initialization": 0.05,  # 50ms for init (high-performance mode) 
+            "status": 0.02,  # 20ms for status (high-performance mode)
         }
 
     @property
