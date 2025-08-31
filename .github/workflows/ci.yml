@@ -46,9 +46,17 @@ jobs:
 
       - name: Run pre-commit checks
         run: |
-          pre-commit run --all-files
+          pre-commit run --all-files --show-diff-on-failure
         env:
-          SKIP: pytest-fast  # Skip tests in quality check job
+          SKIP: pytest-fast,ruff,black,mypy  # Skip tests, auto-fixers, and mypy in CI
+
+      - name: Check black formatting
+        run: |
+          black --check src/ tests/
+
+      - name: Check ruff linting
+        run: |
+          ruff check src/ tests/
 
       - name: Check if formatting changes are needed
         if: failure()
@@ -92,8 +100,8 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}/src
 
-  lint-check:
-    name: Type Checking & Linting
+  type-check:
+    name: Type Checking
     runs-on: ubuntu-latest
 
     steps:
@@ -109,9 +117,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-lint-pip-${{ hashFiles('**/pyproject.toml') }}
+          key: ${{ runner.os }}-type-pip-${{ hashFiles('**/pyproject.toml') }}
           restore-keys: |
-            ${{ runner.os }}-lint-pip-
+            ${{ runner.os }}-type-pip-
 
       - name: Install dependencies
         run: |
@@ -121,10 +129,6 @@ jobs:
       - name: Run MyPy type checking
         run: |
           mypy src/ --config-file=pyproject.toml
-
-      - name: Run ruff linting (check-only)
-        run: |
-          ruff check src/ tests/
 
       - name: Check test markers
         run: |

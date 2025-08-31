@@ -30,6 +30,7 @@ repos:
         files: ^src/
         args: [--config-file=pyproject.toml]
         additional_dependencies: [types-docker, types-requests, numpy, structlog]
+        stages: [manual]  # Only run manually, CI handles type checking
 
   - repo: local
     hooks:
@@ -56,3 +57,4 @@ repos:
         types: [python]
         pass_filenames: false
         always_run: true
+        stages: [manual]  # Only run manually, not on commit
