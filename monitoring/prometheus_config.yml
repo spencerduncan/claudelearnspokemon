@@ -1,0 +1,171 @@
+# Prometheus configuration for Pokemon speedrun learning agent monitoring
+# This configuration sets up scraping for the comprehensive monitoring system
+
+global:
+  scrape_interval: 15s          # Default scrape interval
+  evaluation_interval: 15s      # Default rule evaluation interval
+  scrape_timeout: 10s          # Default scrape timeout
+  
+  external_labels:
+    cluster: 'pokemon-speedrun'
+    environment: 'development'
+
+# Rule files for alerting
+rule_files:
+  - "alert_rules.yml"
+
+# Alertmanager configuration (optional - for production deployments)
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - alertmanager:9093
+
+# Scrape configurations
+scrape_configs:
+  # Pokemon speedrun learning agent metrics
+  - job_name: 'pokemon-speedrun-agent'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['localhost:8000']  # Default Prometheus export port
+    scrape_config:
+      honor_labels: true
+    metric_relabel_configs:
+      # Add instance labels for better identification
+      - source_labels: [__address__]
+        target_label: instance
+        regex: '([^:]+)(:[0-9]+)?'
+        replacement: '${1}'
+
+  # System metrics (if using node_exporter)
+  - job_name: 'node-exporter'
+    scrape_interval: 30s
+    static_configs:
+      - targets: ['localhost:9100']
+    metric_relabel_configs:
+      # Filter to only essential system metrics to reduce storage
+      - source_labels: [__name__]
+        regex: 'node_(cpu_seconds_total|memory_MemTotal_bytes|memory_MemAvailable_bytes|filesystem_size_bytes|filesystem_free_bytes|load1|load5|load15)'
+        action: keep
+
+  # Docker container metrics (if using cAdvisor)
+  - job_name: 'cadvisor'
+    scrape_interval: 30s
+    static_configs:
+      - targets: ['localhost:8080']
+    metric_relabel_configs:
+      # Focus on pokemon-gym container metrics
+      - source_labels: [container_label_com_docker_compose_service]
+        regex: 'pokemon-gym.*'
+        action: keep
+      - source_labels: [__name__]
+        regex: 'container_(cpu_usage_seconds_total|memory_usage_bytes|network_receive_bytes_total|network_transmit_bytes_total)'
+        action: keep
+
+  # Application-specific HTTP endpoints
+  - job_name: 'pokemon-gym-health'
+    scrape_interval: 30s
+    metrics_path: /health
+    static_configs:
+      - targets: 
+        - 'localhost:8081'  # EmulatorPool containers
+        - 'localhost:8082'
+        - 'localhost:8083'
+        - 'localhost:8084'
+    scrape_config:
+      honor_labels: false
+    metric_relabel_configs:
+      # Add port-based labels for container identification
+      - source_labels: [__address__]
+        target_label: emulator_port
+        regex: 'localhost:([0-9]+)'
+        replacement: '${1}'
+
+# Storage configuration
+storage:
+  tsdb:
+    retention.time: 30d          # 30 days retention for operational metrics
+    retention.size: 10GB         # Maximum storage size
+    wal-compression: true        # Enable WAL compression
+  
+  # Remote write configuration for long-term storage (optional)
+  # remote_write:
+  #   - url: "https://your-long-term-storage/api/v1/write"
+  #     queue_config:
+  #       max_samples_per_send: 1000
+  #       batch_send_deadline: 5s
+
+# Recording rules for efficient querying
+recording_rules:
+  - name: pokemon_speedrun_aggregations
+    interval: 30s
+    rules:
+      # Process health aggregations
+      - record: pokemon_speedrun:healthy_process_ratio
+        expr: pokemon_speedrun_healthy_processes / pokemon_speedrun_total_processes
+      
+      # Performance percentiles (5-minute windows)
+      - record: pokemon_speedrun:startup_time_p95_5m
+        expr: histogram_quantile(0.95, rate(pokemon_speedrun_process_startup_seconds_bucket[5m]))
+      
+      - record: pokemon_speedrun:startup_time_p50_5m
+        expr: histogram_quantile(0.50, rate(pokemon_speedrun_process_startup_seconds_bucket[5m]))
+      
+      # Health check performance
+      - record: pokemon_speedrun:health_check_p95_5m
+        expr: histogram_quantile(0.95, rate(pokemon_speedrun_health_check_duration_seconds_bucket[5m]))
+      
+      # Failure rates (per minute)
+      - record: pokemon_speedrun:failure_rate_1m
+        expr: rate(pokemon_speedrun_process_failures_total[1m])
+      
+      - record: pokemon_speedrun:restart_rate_1m  
+        expr: rate(pokemon_speedrun_process_restarts_total[1m])
+
+      # Resource usage aggregations
+      - record: pokemon_speedrun:avg_memory_usage_mb
+        expr: avg(pokemon_speedrun_process_memory_bytes) / 1024 / 1024
+      
+      - record: pokemon_speedrun:avg_cpu_usage_percent
+        expr: avg(pokemon_speedrun_process_cpu_percent)
+
+  # Long-term aggregation rules (1-hour windows for historical analysis)
+  - name: pokemon_speedrun_longterm
+    interval: 5m
+    rules:
+      - record: pokemon_speedrun:startup_time_p95_1h
+        expr: histogram_quantile(0.95, rate(pokemon_speedrun_process_startup_seconds_bucket[1h]))
+      
+      - record: pokemon_speedrun:success_rate_1h
+        expr: (
+          (pokemon_speedrun_total_processes - increase(pokemon_speedrun_process_failures_total[1h])) 
+          / pokemon_speedrun_total_processes * 100
+        )
+      
+      - record: pokemon_speedrun:sla_compliance_1h
+        expr: |
+          (
+            (pokemon_speedrun:startup_time_p95_1h < 0.15) and  # <150ms startup
+            (pokemon_speedrun:success_rate_1h >= 95)           # ≥95% success rate
+          )
+
+# Web console configuration
+web:
+  console:
+    libraries:
+      - /usr/share/prometheus/console_libraries
+    templates:
+      - /usr/share/prometheus/consoles
+  enable-lifecycle: true         # Enable API endpoints for configuration reload
+
+# Performance optimizations
+query:
+  max-concurrency: 20           # Maximum concurrent queries
+  timeout: 2m                   # Query timeout
+  max-samples: 50000000         # Maximum samples per query
+
+# Enable exemplars for tracing integration (optional)
+exemplars:
+  max-exemplars: 100000         # Maximum exemplars to keep in memory

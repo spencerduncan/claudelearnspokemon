@@ -17,6 +17,16 @@ from .experiment_models import (
     ExperimentStatus, SelectionStrategy
 )
 
+# Monitoring and metrics components
+from .prometheus_metrics import PrometheusMetricsExporter, MetricsUpdateScheduler
+from .system_metrics import SystemMetricsCollector, SystemMetrics
+from .monitoring_middleware import HTTPMonitoringMiddleware, get_global_middleware, monitor_requests_session
+from .speedrun_metrics import (
+    SpeedrunMetricsCollector, ExperimentResult as SpeedrunExperimentResult,
+    PatternDiscovery, ExperimentStatus as SpeedrunExperimentStatus, PatternType
+)
+from .alert_manager import AlertManager, AlertRule, AlertSeverity, get_default_alert_rules
+
 # Import compatibility layer components
 try:
     from .pokemon_gym_adapter import PokemonGymAdapter  # noqa: F401
@@ -54,6 +64,23 @@ __all__ = [
     "ExperimentMetrics",
     "ExperimentStatus",
     "SelectionStrategy",
+    # Monitoring and metrics components
+    "PrometheusMetricsExporter",
+    "MetricsUpdateScheduler", 
+    "SystemMetricsCollector",
+    "SystemMetrics",
+    "HTTPMonitoringMiddleware",
+    "get_global_middleware",
+    "monitor_requests_session",
+    "SpeedrunMetricsCollector",
+    "SpeedrunExperimentResult",
+    "PatternDiscovery",
+    "SpeedrunExperimentStatus",
+    "PatternType",
+    "AlertManager",
+    "AlertRule",
+    "AlertSeverity", 
+    "get_default_alert_rules",
 ]
 
 # Add compatibility layer to exports if available

@@ -1,0 +1,226 @@
+# Prometheus alerting rules for Pokemon speedrun learning agent
+# These rules define conditions that trigger alerts for operational monitoring
+
+groups:
+  # Performance regression alerts
+  - name: performance_alerts
+    rules:
+      - alert: ScriptCompilationPerformanceDegraded
+        expr: pokemon_speedrun:startup_time_p95_5m > 0.15  # >150ms (target is 100ms)
+        for: 5m
+        labels:
+          severity: warning
+          component: script_compiler
+        annotations:
+          summary: "Script compilation performance has degraded"
+          description: "95th percentile script compilation time is {{ $value | humanizeDuration }}, exceeding the 150ms warning threshold (target: 100ms)"
+          runbook_url: "https://docs.internal/runbooks/script-compilation-performance"
+
+      - alert: HealthCheckPerformanceDegraded
+        expr: pokemon_speedrun:health_check_p95_5m > 0.01  # >10ms
+        for: 3m
+        labels:
+          severity: warning
+          component: health_monitor
+        annotations:
+          summary: "Health check performance has degraded"
+          description: "95th percentile health check duration is {{ $value | humanizeDuration }}, exceeding the 10ms threshold"
+          runbook_url: "https://docs.internal/runbooks/health-check-performance"
+
+  # System resource alerts  
+  - name: resource_alerts
+    rules:
+      - alert: HighCPUUsage
+        expr: pokemon_speedrun:avg_cpu_usage_percent > 85
+        for: 2m
+        labels:
+          severity: critical
+          component: system
+        annotations:
+          summary: "System CPU usage is critically high"
+          description: "Average CPU usage across processes is {{ $value | printf \"%.1f\" }}%, exceeding the 85% threshold"
+          runbook_url: "https://docs.internal/runbooks/high-cpu-usage"
+
+      - alert: HighMemoryUsage
+        expr: pokemon_speedrun:avg_memory_usage_mb > 512  # >512MB per process
+        for: 2m
+        labels:
+          severity: critical
+          component: system
+        annotations:
+          summary: "System memory usage is critically high"
+          description: "Average memory usage across processes is {{ $value | printf \"%.0f\" }}MB, exceeding the 512MB threshold"
+          runbook_url: "https://docs.internal/runbooks/high-memory-usage"
+
+      - alert: ProcessMemoryLeak
+        expr: increase(pokemon_speedrun:avg_memory_usage_mb[30m]) > 100  # >100MB growth in 30min
+        for: 5m
+        labels:
+          severity: warning
+          component: memory_management
+        annotations:
+          summary: "Potential memory leak detected"
+          description: "Memory usage has increased by {{ $value | printf \"%.0f\" }}MB in the last 30 minutes"
+          runbook_url: "https://docs.internal/runbooks/memory-leak-investigation"
+
+  # Process health alerts
+  - name: health_alerts
+    rules:
+      - alert: InsufficientHealthyProcesses
+        expr: pokemon_speedrun_healthy_processes < 3
+        for: 1m
+        labels:
+          severity: critical
+          component: process_management
+        annotations:
+          summary: "Insufficient healthy processes"
+          description: "Only {{ $value }} processes are healthy, minimum required is 3"
+          runbook_url: "https://docs.internal/runbooks/process-health-recovery"
+
+      - alert: ProcessFailureRateHigh
+        expr: pokemon_speedrun:failure_rate_1m > 0.1  # >0.1 failures/minute
+        for: 3m
+        labels:
+          severity: warning
+          component: process_stability
+        annotations:
+          summary: "Process failure rate is elevated"
+          description: "Process failure rate is {{ $value | printf \"%.2f\" }} failures/minute"
+          runbook_url: "https://docs.internal/runbooks/process-failure-investigation"
+
+      - alert: ProcessRestartRateHigh
+        expr: pokemon_speedrun:restart_rate_1m > 0.2  # >0.2 restarts/minute
+        for: 5m
+        labels:
+          severity: warning
+          component: process_stability
+        annotations:
+          summary: "Process restart rate is elevated"  
+          description: "Process restart rate is {{ $value | printf \"%.2f\" }} restarts/minute"
+          runbook_url: "https://docs.internal/runbooks/process-restart-analysis"
+
+  # SLA compliance alerts
+  - name: sla_alerts
+    rules:
+      - alert: SLAComplianceViolation
+        expr: pokemon_speedrun:sla_compliance_1h == 0
+        for: 15m
+        labels:
+          severity: critical
+          component: sla
+        annotations:
+          summary: "SLA compliance violation"
+          description: "System is not meeting SLA requirements (95% success rate, <150ms startup time)"
+          runbook_url: "https://docs.internal/runbooks/sla-violation-response"
+
+      - alert: ExperimentSuccessRateLow
+        expr: pokemon_speedrun:success_rate_1h < 95
+        for: 15m
+        labels:
+          severity: critical
+          component: experiments
+        annotations:
+          summary: "Experiment success rate below SLA"
+          description: "Experiment success rate is {{ $value | printf \"%.1f\" }}%, below the 95% SLA threshold"
+          runbook_url: "https://docs.internal/runbooks/experiment-success-rate"
+
+  # System availability alerts
+  - name: availability_alerts
+    rules:
+      - alert: ProcessHealthRatio
+        expr: pokemon_speedrun:healthy_process_ratio < 0.75  # <75% healthy
+        for: 2m
+        labels:
+          severity: warning
+          component: availability
+        annotations:
+          summary: "Process health ratio is low"
+          description: "Only {{ $value | printf \"%.1f\" }}% of processes are healthy"
+          runbook_url: "https://docs.internal/runbooks/process-health-recovery"
+
+      - alert: SystemDown
+        expr: up{job="pokemon-speedrun-agent"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: system
+        annotations:
+          summary: "Pokemon speedrun agent system is down"
+          description: "The Pokemon speedrun learning agent system is not responding"
+          runbook_url: "https://docs.internal/runbooks/system-recovery"
+
+  # Docker container health (for EmulatorPool)
+  - name: container_alerts
+    rules:
+      - alert: EmulatorContainerDown
+        expr: up{job="pokemon-gym-health"} == 0
+        for: 2m
+        labels:
+          severity: warning
+          component: emulator_pool
+        annotations:
+          summary: "EmulatorPool container is down"
+          description: "Emulator container on {{ $labels.emulator_port }} is not responding"
+          runbook_url: "https://docs.internal/runbooks/emulator-container-recovery"
+
+      - alert: EmulatorContainerRestartLoop
+        expr: increase(container_start_time_seconds{name=~"pokemon-gym.*"}[10m]) > 3
+        for: 2m
+        labels:
+          severity: critical
+          component: emulator_pool
+        annotations:
+          summary: "Emulator container in restart loop"
+          description: "Emulator container {{ $labels.name }} has restarted {{ $value }} times in 10 minutes"
+          runbook_url: "https://docs.internal/runbooks/container-restart-loop"
+
+  # Performance benchmarking alerts
+  - name: benchmark_alerts
+    rules:
+      - alert: PerformanceRegressionDetected
+        expr: |
+          (
+            pokemon_speedrun:startup_time_p95_1h > 
+            pokemon_speedrun:startup_time_p95_1h offset 24h * 1.5
+          )
+        for: 30m
+        labels:
+          severity: warning
+          component: performance
+        annotations:
+          summary: "Performance regression detected"
+          description: "Current startup time ({{ $value | humanizeDuration }}) is 50% worse than 24h ago"
+          runbook_url: "https://docs.internal/runbooks/performance-regression-analysis"
+
+      - alert: MemoryUsageTrend
+        expr: |
+          (
+            pokemon_speedrun:avg_memory_usage_mb >
+            pokemon_speedrun:avg_memory_usage_mb offset 24h * 1.3
+          )
+        for: 1h
+        labels:
+          severity: info
+          component: capacity_planning
+        annotations:
+          summary: "Memory usage trend increasing"
+          description: "Current memory usage ({{ $value | printf \"%.0f\" }}MB) is 30% higher than 24h ago"
+          runbook_url: "https://docs.internal/runbooks/capacity-planning"
+
+  # Experimental: AI-specific alerts (if metrics become available)
+  - name: ai_performance_alerts
+    rules:
+      - alert: PatternDiscoveryRateDeclined
+        expr: |
+          (
+            rate(pokemon_speedrun_pattern_discoveries_total[1h]) < 
+            rate(pokemon_speedrun_pattern_discoveries_total[1h] offset 24h) * 0.5
+          )
+        for: 2h
+        labels:
+          severity: info
+          component: ai_learning
+        annotations:
+          summary: "AI pattern discovery rate has declined"
+          description: "Pattern discovery rate is 50% lower than 24 hours ago"
+          runbook_url: "https://docs.internal/runbooks/ai-performance-analysis"
