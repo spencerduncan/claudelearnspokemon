@@ -10,6 +10,13 @@ from .enhanced_client import EnhancedPokemonGymClient
 from .retry_manager import FailureType, RetryConfig, RetryManager, RetryOutcome
 from .session_recovery import SessionConfig, SessionRecovery, SessionRecoveryError, SessionState
 
+# ML-guided experiment selection components
+from .config import CONFIG, ConfigManager
+from .experiment_models import (
+    ExperimentCandidate, ExperimentResult, ExperimentMetrics,
+    ExperimentStatus, SelectionStrategy
+)
+
 # Import compatibility layer components
 try:
     from .pokemon_gym_adapter import PokemonGymAdapter  # noqa: F401
@@ -39,6 +46,14 @@ __all__ = [
     "SessionState",
     "SessionRecoveryError",
     "EnhancedPokemonGymClient",
+    # ML-guided experiment selection components
+    "CONFIG",
+    "ConfigManager",
+    "ExperimentCandidate",
+    "ExperimentResult", 
+    "ExperimentMetrics",
+    "ExperimentStatus",
+    "SelectionStrategy",
 ]
 
 # Add compatibility layer to exports if available

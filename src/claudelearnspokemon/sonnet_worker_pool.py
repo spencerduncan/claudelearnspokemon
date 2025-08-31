@@ -26,7 +26,11 @@ import random
 import threading
 import time
 import uuid
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Forward references to avoid circular imports
+    pass
 
 from .claude_code_manager import ClaudeCodeManager
 from .mcp_data_patterns import PokemonStrategy, QueryBuilder
@@ -220,6 +224,377 @@ class SemanticPatternEngine:
             
         success_rate = weighted_success / total_weight
         return success_rate * 0.3  # Max 30% boost
+
+
+class ExperimentSelector:
+    """ML-guided strategy selection for script development experiments.
+    
+    Coordinates between ReinforcementLearningEngine, MultiObjectiveOptimizer, and
+    SemanticPatternEngine to intelligently select optimal development strategies
+    based on task context and historical performance.
+    
+    Performance Target: <50ms strategy selection
+    """
+    
+    def __init__(self):
+        self.strategy_performance_history: Dict[str, List[float]] = {}
+        self.context_strategy_mapping: Dict[str, List[Tuple[str, float]]] = {}
+        self.selection_cache: Dict[str, Tuple[str, float]] = {}  # context_hash -> (strategy, confidence)
+        
+        # Available development strategies
+        self.development_strategies = {
+            'genetic_evolution': {
+                'description': 'Genetic algorithm with adaptive operators',
+                'best_contexts': ['optimization', 'exploration', 'long_sequences'],
+                'performance_target': 'balanced',
+                'computational_cost': 0.7
+            },
+            'reinforcement_guided': {
+                'description': 'RL-guided script development',
+                'best_contexts': ['learning', 'adaptation', 'complex_patterns'],
+                'performance_target': 'innovation', 
+                'computational_cost': 0.8
+            },
+            'pattern_synthesis': {
+                'description': 'Cross-worker pattern combination',
+                'best_contexts': ['synthesis', 'collaboration', 'known_patterns'],
+                'performance_target': 'reliability',
+                'computational_cost': 0.5
+            },
+            'semantic_search': {
+                'description': 'Context-aware pattern matching',
+                'best_contexts': ['similar_contexts', 'quick_solutions', 'proven_patterns'],
+                'performance_target': 'speed',
+                'computational_cost': 0.3
+            },
+            'multi_objective': {
+                'description': 'Balanced multi-objective optimization',
+                'best_contexts': ['trade_offs', 'multiple_goals', 'performance_critical'],
+                'performance_target': 'balanced',
+                'computational_cost': 0.6
+            }
+        }
+        
+        # Performance tracking
+        self.selection_times: List[float] = []
+        self.strategy_success_rates: Dict[str, List[bool]] = {
+            strategy: [] for strategy in self.development_strategies.keys()
+        }
+        
+    def select_optimal_strategy(self, task_context: Dict[str, Any], 
+                              rl_engine: 'ReinforcementLearningEngine',
+                              semantic_engine: 'SemanticPatternEngine',
+                              performance_constraints: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+        """Select optimal development strategy based on ML guidance and context analysis.
+        
+        Args:
+            task_context: Task context including location, objectives, constraints
+            rl_engine: Reinforcement learning engine for strategy learning
+            semantic_engine: Semantic pattern engine for context matching
+            performance_constraints: Optional performance requirements
+            
+        Returns:
+            Dictionary containing selected strategy, confidence, and metadata
+        """
+        selection_start = time.time()
+        
+        try:
+            # Create context hash for caching
+            context_hash = self._hash_context(task_context)
+            
+            # Check cache first for performance
+            if context_hash in self.selection_cache:
+                cached_result = self.selection_cache[context_hash]
+                self._record_selection_time(time.time() - selection_start)
+                return {
+                    'strategy': cached_result[0],
+                    'confidence': cached_result[1],
+                    'source': 'cache',
+                    'selection_time_ms': (time.time() - selection_start) * 1000
+                }
+            
+            # Get ML-guided recommendations
+            strategy_scores = self._compute_ml_strategy_scores(
+                task_context, rl_engine, semantic_engine
+            )
+            
+            # Apply performance constraints if specified
+            if performance_constraints:
+                strategy_scores = self._apply_performance_constraints(
+                    strategy_scores, performance_constraints
+                )
+            
+            # Select best strategy with confidence scoring
+            selected_strategy, confidence = self._select_best_strategy(
+                strategy_scores, task_context
+            )
+            
+            # Cache result for future use
+            self.selection_cache[context_hash] = (selected_strategy, confidence)
+            
+            selection_time = time.time() - selection_start
+            self._record_selection_time(selection_time)
+            
+            return {
+                'strategy': selected_strategy,
+                'confidence': confidence,
+                'strategy_scores': strategy_scores,
+                'source': 'ml_guided',
+                'selection_time_ms': selection_time * 1000,
+                'context_hash': context_hash
+            }
+            
+        except Exception as e:
+            logger.warning(f"Strategy selection failed: {e}, falling back to default")
+            return self._get_fallback_strategy(task_context)
+    
+    def update_strategy_performance(self, strategy: str, task_context: Dict[str, Any], 
+                                  success: bool, performance_metrics: Dict[str, float]) -> None:
+        """Update strategy performance history for learning."""
+        # Track success rate
+        if strategy in self.strategy_success_rates:
+            self.strategy_success_rates[strategy].append(success)
+            # Keep only recent history
+            if len(self.strategy_success_rates[strategy]) > 100:
+                self.strategy_success_rates[strategy] = self.strategy_success_rates[strategy][-50:]
+        
+        # Track detailed performance
+        context_hash = self._hash_context(task_context)
+        if context_hash not in self.context_strategy_mapping:
+            self.context_strategy_mapping[context_hash] = []
+        
+        performance_score = self._compute_performance_score(performance_metrics, success)
+        self.context_strategy_mapping[context_hash].append((strategy, performance_score))
+        
+        # Invalidate cache for this context
+        if context_hash in self.selection_cache:
+            del self.selection_cache[context_hash]
+            
+        logger.debug(f"Updated {strategy} performance: success={success}, score={performance_score:.3f}")
+    
+    def get_strategy_recommendations(self, top_k: int = 3) -> List[Dict[str, Any]]:
+        """Get top-k strategy recommendations with performance data."""
+        strategy_rankings = []
+        
+        for strategy, info in self.development_strategies.items():
+            success_history = self.strategy_success_rates.get(strategy, [])
+            success_rate = sum(success_history) / max(len(success_history), 1)
+            
+            strategy_rankings.append({
+                'strategy': strategy,
+                'description': info['description'],
+                'success_rate': success_rate,
+                'usage_count': len(success_history),
+                'computational_cost': info['computational_cost'],
+                'performance_target': info['performance_target']
+            })
+        
+        # Sort by success rate and usage
+        strategy_rankings.sort(
+            key=lambda x: (x['success_rate'], x['usage_count']), 
+            reverse=True
+        )
+        
+        return strategy_rankings[:top_k]
+    
+    def _compute_ml_strategy_scores(self, task_context: Dict[str, Any],
+                                  rl_engine: 'ReinforcementLearningEngine',
+                                  semantic_engine: 'SemanticPatternEngine') -> Dict[str, float]:
+        """Compute ML-guided scores for each strategy."""
+        scores = {}
+        
+        # Get RL recommendations
+        try:
+            state = self._encode_context_for_rl(task_context)
+            rl_action = rl_engine.select_action(state)
+            rl_strategy_preference = self._decode_rl_action(rl_action)
+        except Exception as e:
+            logger.debug(f"RL strategy selection failed: {e}")
+            rl_strategy_preference = {}
+        
+        # Compute context-based scores
+        for strategy, info in self.development_strategies.items():
+            # Base score from strategy characteristics
+            base_score = 0.5
+            
+            # RL preference boost
+            if strategy in rl_strategy_preference:
+                base_score += rl_strategy_preference[strategy] * 0.3
+            
+            # Context matching score
+            context_match_score = self._compute_context_match(task_context, info['best_contexts'])
+            base_score += context_match_score * 0.2
+            
+            # Historical performance in similar contexts
+            historical_score = self._get_historical_performance(strategy, task_context)
+            base_score += historical_score * 0.3
+            
+            scores[strategy] = min(1.0, max(0.0, base_score))
+        
+        return scores
+    
+    def _apply_performance_constraints(self, scores: Dict[str, float], 
+                                     constraints: Dict[str, float]) -> Dict[str, float]:
+        """Apply performance constraints to strategy scores."""
+        constrained_scores = scores.copy()
+        
+        for strategy, score in scores.items():
+            strategy_info = self.development_strategies[strategy]
+            
+            # Check computational cost constraint
+            if 'max_computational_cost' in constraints:
+                max_cost = constraints['max_computational_cost']
+                if strategy_info['computational_cost'] > max_cost:
+                    penalty = (strategy_info['computational_cost'] - max_cost) * 0.5
+                    constrained_scores[strategy] = max(0.0, score - penalty)
+            
+            # Check time constraint
+            if 'max_time_ms' in constraints:
+                max_time = constraints['max_time_ms']
+                if strategy in ['reinforcement_guided', 'genetic_evolution'] and max_time < 100:
+                    constrained_scores[strategy] *= 0.5  # Penalize slow strategies for fast requirements
+        
+        return constrained_scores
+    
+    def _select_best_strategy(self, scores: Dict[str, float], 
+                            task_context: Dict[str, Any]) -> Tuple[str, float]:
+        """Select best strategy with confidence scoring."""
+        if not scores:
+            return 'semantic_search', 0.5  # Safe fallback
+        
+        # Find best strategy
+        best_strategy = max(scores.keys(), key=lambda k: scores[k])
+        best_score = scores[best_strategy]
+        
+        # Compute confidence based on score distribution
+        sorted_scores = sorted(scores.values(), reverse=True)
+        if len(sorted_scores) >= 2:
+            confidence = (sorted_scores[0] - sorted_scores[1]) + 0.5  # Margin + base confidence
+        else:
+            confidence = best_score
+        
+        confidence = min(1.0, max(0.0, confidence))
+        
+        return best_strategy, confidence
+    
+    def _get_fallback_strategy(self, task_context: Dict[str, Any]) -> Dict[str, Any]:
+        """Get safe fallback strategy when ML guidance fails."""
+        # Simple heuristic fallback
+        if 'speed' in str(task_context).lower():
+            fallback = 'semantic_search'
+        elif 'complex' in str(task_context).lower():
+            fallback = 'genetic_evolution'
+        else:
+            fallback = 'multi_objective'
+        
+        return {
+            'strategy': fallback,
+            'confidence': 0.4,
+            'source': 'fallback',
+            'selection_time_ms': 1.0
+        }
+    
+    def _hash_context(self, context: Dict[str, Any]) -> str:
+        """Create hash for context caching."""
+        # Simple context hashing for caching
+        context_str = str(sorted(context.items()))
+        return str(hash(context_str))
+    
+    def _encode_context_for_rl(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Encode context for RL engine consumption."""
+        return {
+            'location_hash': hash(str(context.get('location', 'unknown'))) % 1000,
+            'objective_hash': hash(str(context.get('objective', 'unknown'))) % 1000,
+            'complexity': len(str(context)) / 100.0,  # Normalized complexity
+        }
+    
+    def _decode_rl_action(self, action: Dict[str, Any]) -> Dict[str, float]:
+        """Decode RL action into strategy preferences."""
+        # Simple mapping from RL action to strategy preferences
+        preferences = {}
+        
+        if 'exploration_weight' in action:
+            weight = action['exploration_weight']
+            preferences['genetic_evolution'] = weight
+            preferences['reinforcement_guided'] = weight * 0.8
+        
+        if 'exploitation_weight' in action:
+            weight = action['exploitation_weight']
+            preferences['semantic_search'] = weight
+            preferences['pattern_synthesis'] = weight * 0.9
+        
+        return preferences
+    
+    def _compute_context_match(self, context: Dict[str, Any], best_contexts: List[str]) -> float:
+        """Compute how well context matches strategy's best contexts."""
+        context_str = str(context).lower()
+        matches = sum(1 for bc in best_contexts if bc in context_str)
+        return matches / max(len(best_contexts), 1)
+    
+    def _get_historical_performance(self, strategy: str, context: Dict[str, Any]) -> float:
+        """Get historical performance for strategy in similar contexts."""
+        context_hash = self._hash_context(context)
+        
+        if context_hash in self.context_strategy_mapping:
+            history = self.context_strategy_mapping[context_hash]
+            strategy_history = [score for strat, score in history if strat == strategy]
+            if strategy_history:
+                return sum(strategy_history) / len(strategy_history)
+        
+        # Fallback to global strategy performance
+        if strategy in self.strategy_success_rates:
+            success_history = self.strategy_success_rates[strategy]
+            if success_history:
+                return sum(success_history) / len(success_history)
+        
+        return 0.5  # Neutral score
+    
+    def _compute_performance_score(self, metrics: Dict[str, float], success: bool) -> float:
+        """Compute overall performance score from metrics."""
+        base_score = 1.0 if success else 0.0
+        
+        # Adjust based on performance metrics
+        if 'execution_time_ms' in metrics:
+            time_score = max(0.0, 1.0 - metrics['execution_time_ms'] / 1000.0)  # Normalize to 1s
+            base_score = base_score * 0.7 + time_score * 0.3
+        
+        if 'quality_score' in metrics:
+            quality_score = min(1.0, metrics['quality_score'])
+            base_score = base_score * 0.8 + quality_score * 0.2
+        
+        return min(1.0, max(0.0, base_score))
+    
+    def _record_selection_time(self, selection_time: float) -> None:
+        """Record selection time for performance monitoring."""
+        self.selection_times.append(selection_time)
+        
+        # Keep only recent times
+        if len(self.selection_times) > 100:
+            self.selection_times = self.selection_times[-50:]
+        
+        # Log warning if selection is slow
+        if selection_time > 0.05:  # 50ms target
+            logger.warning(f"Strategy selection took {selection_time*1000:.1f}ms, exceeds 50ms target")
+    
+    def get_performance_stats(self) -> Dict[str, Any]:
+        """Get performance statistics for monitoring."""
+        if not self.selection_times:
+            return {'status': 'no_data'}
+        
+        avg_time_ms = (sum(self.selection_times) / len(self.selection_times)) * 1000
+        max_time_ms = max(self.selection_times) * 1000
+        
+        return {
+            'average_selection_time_ms': avg_time_ms,
+            'max_selection_time_ms': max_time_ms,
+            'total_selections': len(self.selection_times),
+            'performance_target_met': avg_time_ms < 50.0,
+            'cache_size': len(self.selection_cache),
+            'strategy_usage': {
+                strategy: len(history) 
+                for strategy, history in self.strategy_success_rates.items()
+            }
+        }
 
 
 class MultiObjectiveOptimizer:
@@ -954,10 +1329,15 @@ class GeneticPopulation:
         elite = self.get_elite()[:elite_count]
         new_generation = [variant.copy() for variant in elite]
         
-        # Maintain diversity through diverse selection
-        diversity_count = int(self.population_size * self.diversity_maintenance_rate)
-        diverse_variants = self._select_diverse_variants(diversity_count)
-        new_generation.extend([variant.copy() for variant in diverse_variants])
+        # Maintain diversity through diverse selection, but ensure total doesn't exceed population size
+        remaining_slots = self.population_size - elite_count
+        diversity_count = min(remaining_slots, int(self.population_size * self.diversity_maintenance_rate))
+        if diversity_count > 0:
+            # Select diverse variants excluding already selected elite variants
+            elite_ids = {variant.variant_id for variant in elite}
+            non_elite_variants = [v for v in self.variants if v.variant_id not in elite_ids]
+            diverse_variants = self._select_diverse_variants_from_pool(non_elite_variants, diversity_count)
+            new_generation.extend([variant.copy() for variant in diverse_variants])
         
         # Generate offspring using advanced operators
         while len(new_generation) < self.population_size:
@@ -993,6 +1373,8 @@ class GeneticPopulation:
                 
             new_generation.append(offspring)
             
+        # Ensure exact population size is maintained
+        new_generation = new_generation[:self.population_size]
         self.variants = new_generation
         self.generation += 1
         
@@ -1029,12 +1411,16 @@ class GeneticPopulation:
     
     def _select_diverse_variants(self, count: int) -> List[ScriptVariant]:
         """Select variants that maximize population diversity."""
-        if count <= 0 or not self.variants:
+        return self._select_diverse_variants_from_pool(self.variants, count)
+    
+    def _select_diverse_variants_from_pool(self, variant_pool: List[ScriptVariant], count: int) -> List[ScriptVariant]:
+        """Select variants that maximize population diversity from a specific pool."""
+        if count <= 0 or not variant_pool:
             return []
             
-        # Calculate diversity metrics for all variants
+        # Calculate diversity metrics for all variants in pool
         diversity_scores = []
-        for variant in self.variants:
+        for variant in variant_pool:
             novelty_score = self._compute_pattern_novelty(variant)
             diversity_scores.append((variant, novelty_score))
         
@@ -1474,10 +1860,10 @@ class RealTimePerformanceMonitor:
         
         # Adaptive thresholds and parameters
         self.adaptive_parameters = {
-            'max_iterations': CONFIG.script_development.DEFAULT_MAX_ITERATIONS,
-            'population_size': CONFIG.script_development.GENETIC_POPULATION_SIZE,
-            'mutation_rate': CONFIG.script_development.MUTATION_RATE,
-            'success_threshold': CONFIG.script_development.SUCCESS_QUALITY_THRESHOLD
+            'max_iterations': CONFIG.script_development['DEFAULT_MAX_ITERATIONS'],
+            'population_size': CONFIG.script_development['GENETIC_POPULATION_SIZE'],
+            'mutation_rate': CONFIG.script_development['mutation_rate'],
+            'success_threshold': CONFIG.script_development['SUCCESS_QUALITY_THRESHOLD']
         }
         
         # Performance trend analysis
@@ -1677,9 +2063,9 @@ class RealTimePerformanceMonitor:
                                     success_rate: float, iteration_usage_ratio: float) -> None:
         """Apply balanced optimizations to maintain overall system performance."""
         # Make small adjustments to maintain stability
-        base_max_iter = CONFIG.script_development.DEFAULT_MAX_ITERATIONS
-        base_pop_size = CONFIG.script_development.GENETIC_POPULATION_SIZE
-        base_mutation_rate = CONFIG.script_development.MUTATION_RATE
+        base_max_iter = CONFIG.script_development['DEFAULT_MAX_ITERATIONS']
+        base_pop_size = CONFIG.script_development['GENETIC_POPULATION_SIZE']
+        base_mutation_rate = CONFIG.script_development['mutation_rate']
         
         # Gradually return parameters to baseline if performance is stable
         if abs(self.adaptive_parameters['max_iterations'] - base_max_iter) > 1:
@@ -1772,10 +2158,10 @@ class RealTimePerformanceMonitor:
     def reset_adaptations(self) -> None:
         """Reset adaptive parameters to baseline configuration."""
         self.adaptive_parameters = {
-            'max_iterations': CONFIG.script_development.DEFAULT_MAX_ITERATIONS,
-            'population_size': CONFIG.script_development.GENETIC_POPULATION_SIZE,
-            'mutation_rate': CONFIG.script_development.MUTATION_RATE,
-            'success_threshold': CONFIG.script_development.SUCCESS_QUALITY_THRESHOLD
+            'max_iterations': CONFIG.script_development['DEFAULT_MAX_ITERATIONS'],
+            'population_size': CONFIG.script_development['GENETIC_POPULATION_SIZE'],
+            'mutation_rate': CONFIG.script_development['mutation_rate'],
+            'success_threshold': CONFIG.script_development['SUCCESS_QUALITY_THRESHOLD']
         }
         self.current_optimization_mode = 'balanced_optimization'
         logger.info("Reset adaptive parameters to baseline configuration")
@@ -2203,6 +2589,927 @@ class CrossWorkerPatternSynthesis:
         return best_strategy
 
 
+class PatternProcessor:
+    """Advanced pattern processing and cross-worker pattern synthesis.
+    
+    Provides a clean API for pattern synthesis, validation, and cross-worker
+    pattern sharing while leveraging the existing CrossWorkerPatternSynthesis
+    infrastructure for advanced synthesis capabilities.
+    """
+    
+    def __init__(self, cross_worker_synthesis: Optional['CrossWorkerPatternSynthesis'] = None):
+        # Use provided synthesis engine or create new one
+        self.synthesis_engine = cross_worker_synthesis or CrossWorkerPatternSynthesis()
+        
+        # Pattern processing metrics
+        self.processing_times: List[float] = []
+        self.synthesis_success_rate = 0.0
+        self.processed_pattern_count = 0
+        
+        # Pattern validation and quality tracking
+        self.pattern_quality_scores: Dict[str, List[float]] = {}
+        self.synthesis_strategy_performance: Dict[str, List[float]] = {}
+        
+        # Pattern classification and tagging
+        self.pattern_categories = {
+            'movement': ['UP', 'DOWN', 'LEFT', 'RIGHT'],
+            'action': ['A', 'B', 'START', 'SELECT'],
+            'timing': ['WAIT'],
+            'complex': ['OBSERVE', 'IF', 'THEN', 'ELSE', 'REPEAT']
+        }
+    
+    def process_patterns(self, source_patterns: List[Dict[str, Any]], 
+                        target_context: Dict[str, Any],
+                        processing_options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Process and synthesize patterns for a target context.
+        
+        Args:
+            source_patterns: List of source patterns from different workers
+            target_context: Target context for pattern synthesis
+            processing_options: Optional processing configuration
+            
+        Returns:
+            Dictionary with processed patterns and synthesis metadata
+        """
+        processing_start = time.time()
+        
+        try:
+            # Set default processing options
+            options = processing_options or {}
+            synthesis_count = options.get('synthesis_count', 3)
+            quality_threshold = options.get('quality_threshold', 0.6)
+            enable_validation = options.get('enable_validation', True)
+            
+            # Pre-process patterns for synthesis
+            validated_patterns = self._validate_source_patterns(source_patterns)
+            if not validated_patterns:
+                return self._get_empty_processing_result("no_valid_patterns")
+            
+            # Classify patterns for better synthesis
+            classified_patterns = self._classify_patterns(validated_patterns)
+            
+            # Perform pattern synthesis using the underlying engine
+            synthesized_patterns = self.synthesis_engine.synthesize_patterns(
+                validated_patterns, target_context, synthesis_count
+            )
+            
+            # Post-process and validate synthesized patterns
+            if enable_validation:
+                synthesized_patterns = self._validate_synthesized_patterns(
+                    synthesized_patterns, target_context, quality_threshold
+                )
+            
+            # Track performance metrics
+            processing_time = time.time() - processing_start
+            self._record_processing_metrics(processing_time, len(synthesized_patterns) > 0)
+            
+            # Build comprehensive result
+            result = {
+                'synthesized_patterns': synthesized_patterns,
+                'pattern_metadata': {
+                    'source_pattern_count': len(source_patterns),
+                    'validated_pattern_count': len(validated_patterns),
+                    'synthesis_count': len(synthesized_patterns),
+                    'pattern_classification': classified_patterns['classification_summary'],
+                    'processing_time_ms': processing_time * 1000
+                },
+                'quality_metrics': self._compute_quality_metrics(synthesized_patterns),
+                'synthesis_strategies_used': [
+                    p.get('synthesis_strategy', 'unknown') for p in synthesized_patterns
+                ],
+                'processing_success': len(synthesized_patterns) > 0
+            }
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Pattern processing failed: {e}")
+            return self._get_empty_processing_result("processing_error", str(e))
+    
+    def merge_worker_patterns(self, worker_patterns: Dict[str, List[Dict[str, Any]]], 
+                            merge_strategy: str = 'quality_weighted') -> List[Dict[str, Any]]:
+        """Merge patterns from multiple workers using specified strategy.
+        
+        Args:
+            worker_patterns: Dict mapping worker_id to their patterns
+            merge_strategy: Strategy for merging ('quality_weighted', 'diversity_focused', 'performance_based')
+            
+        Returns:
+            List of merged patterns with worker attribution
+        """
+        if not worker_patterns:
+            return []
+        
+        # Flatten all patterns with worker attribution
+        all_patterns = []
+        for worker_id, patterns in worker_patterns.items():
+            for pattern in patterns:
+                attributed_pattern = pattern.copy()
+                attributed_pattern['source_worker'] = worker_id
+                attributed_pattern['merge_timestamp'] = time.time()
+                all_patterns.append(attributed_pattern)
+        
+        # Apply merge strategy
+        if merge_strategy == 'quality_weighted':
+            return self._merge_quality_weighted(all_patterns)
+        elif merge_strategy == 'diversity_focused':
+            return self._merge_diversity_focused(all_patterns)
+        elif merge_strategy == 'performance_based':
+            return self._merge_performance_based(all_patterns)
+        else:
+            # Default: simple concatenation
+            return all_patterns
+    
+    def analyze_pattern_evolution(self, pattern_history: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Analyze how patterns have evolved over time across workers."""
+        if not pattern_history:
+            return {'status': 'no_data'}
+        
+        # Sort patterns by timestamp
+        sorted_patterns = sorted(pattern_history, 
+                               key=lambda p: p.get('timestamp', p.get('synthesis_timestamp', 0)))
+        
+        evolution_metrics = {
+            'pattern_count_over_time': [],
+            'quality_trend': [],
+            'complexity_trend': [],
+            'worker_contribution_trend': {},
+            'synthesis_strategy_evolution': {}
+        }
+        
+        # Track metrics over time windows
+        window_size = max(1, len(sorted_patterns) // 10)  # 10 time windows
+        
+        for i in range(0, len(sorted_patterns), window_size):
+            window_patterns = sorted_patterns[i:i+window_size]
+            
+            # Pattern count in window
+            evolution_metrics['pattern_count_over_time'].append(len(window_patterns))
+            
+            # Average quality in window
+            qualities = [p.get('success_rate', p.get('quality_score', 0.5)) for p in window_patterns]
+            avg_quality = sum(qualities) / len(qualities) if qualities else 0.5
+            evolution_metrics['quality_trend'].append(avg_quality)
+            
+            # Average complexity in window
+            complexities = [self._compute_pattern_complexity(p) for p in window_patterns]
+            avg_complexity = sum(complexities) / len(complexities) if complexities else 0.5
+            evolution_metrics['complexity_trend'].append(avg_complexity)
+            
+            # Worker contributions in window
+            for pattern in window_patterns:
+                worker = pattern.get('discovered_by', pattern.get('source_worker', 'unknown'))
+                if worker not in evolution_metrics['worker_contribution_trend']:
+                    evolution_metrics['worker_contribution_trend'][worker] = []
+                evolution_metrics['worker_contribution_trend'][worker].append(1)
+            
+            # Synthesis strategies used
+            for pattern in window_patterns:
+                strategy = pattern.get('synthesis_strategy', 'none')
+                if strategy not in evolution_metrics['synthesis_strategy_evolution']:
+                    evolution_metrics['synthesis_strategy_evolution'][strategy] = []
+                evolution_metrics['synthesis_strategy_evolution'][strategy].append(1)
+        
+        return evolution_metrics
+    
+    def optimize_pattern_selection(self, available_patterns: List[Dict[str, Any]], 
+                                 optimization_criteria: Dict[str, float]) -> List[Dict[str, Any]]:
+        """Optimize pattern selection based on multiple criteria.
+        
+        Args:
+            available_patterns: List of available patterns to choose from
+            optimization_criteria: Dict with criteria weights (quality, diversity, performance, etc.)
+            
+        Returns:
+            Optimized list of selected patterns
+        """
+        if not available_patterns:
+            return []
+        
+        # Score each pattern based on optimization criteria
+        pattern_scores = []
+        
+        for pattern in available_patterns:
+            score = 0.0
+            
+            # Quality criterion
+            quality_weight = optimization_criteria.get('quality', 0.4)
+            quality_score = pattern.get('success_rate', pattern.get('quality_score', 0.5))
+            score += quality_weight * quality_score
+            
+            # Diversity criterion
+            diversity_weight = optimization_criteria.get('diversity', 0.3)
+            diversity_score = self._compute_pattern_diversity_score(pattern, available_patterns)
+            score += diversity_weight * diversity_score
+            
+            # Performance criterion
+            performance_weight = optimization_criteria.get('performance', 0.2)
+            performance_score = self._estimate_pattern_performance(pattern)
+            score += performance_weight * performance_score
+            
+            # Recency criterion
+            recency_weight = optimization_criteria.get('recency', 0.1)
+            recency_score = self._compute_pattern_recency_score(pattern)
+            score += recency_weight * recency_score
+            
+            pattern_scores.append((pattern, score))
+        
+        # Sort by score and return top patterns
+        sorted_patterns = sorted(pattern_scores, key=lambda x: x[1], reverse=True)
+        
+        # Select top patterns (up to optimization limit)
+        max_patterns = optimization_criteria.get('max_patterns', 10)
+        selected_patterns = [pattern for pattern, score in sorted_patterns[:max_patterns]]
+        
+        return selected_patterns
+    
+    def _validate_source_patterns(self, patterns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Validate source patterns for synthesis processing."""
+        validated = []
+        
+        for pattern in patterns:
+            # Check required fields
+            if not pattern.get('pattern_sequence'):
+                continue
+                
+            # Check pattern sequence validity
+            sequence = pattern['pattern_sequence']
+            if not isinstance(sequence, list) or len(sequence) == 0:
+                continue
+            
+            # Check for valid commands
+            valid_commands = set()
+            for category, commands in self.pattern_categories.items():
+                valid_commands.update(commands)
+            
+            invalid_commands = [cmd for cmd in sequence if cmd not in valid_commands and not isinstance(cmd, int)]
+            if len(invalid_commands) > len(sequence) * 0.5:  # More than 50% invalid
+                continue
+            
+            validated.append(pattern)
+        
+        return validated
+    
+    def _classify_patterns(self, patterns: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Classify patterns by type and complexity."""
+        classification = {
+            'by_category': {category: [] for category in self.pattern_categories.keys()},
+            'by_complexity': {'simple': [], 'medium': [], 'complex': []},
+            'by_length': {'short': [], 'medium': [], 'long': []},
+            'classification_summary': {}
+        }
+        
+        for pattern in patterns:
+            sequence = pattern.get('pattern_sequence', [])
+            
+            # Classify by command category
+            for category, commands in self.pattern_categories.items():
+                if any(cmd in commands for cmd in sequence):
+                    classification['by_category'][category].append(pattern)
+            
+            # Classify by complexity
+            complexity = self._compute_pattern_complexity(pattern)
+            if complexity < 0.3:
+                classification['by_complexity']['simple'].append(pattern)
+            elif complexity < 0.7:
+                classification['by_complexity']['medium'].append(pattern)
+            else:
+                classification['by_complexity']['complex'].append(pattern)
+            
+            # Classify by length
+            length = len(sequence)
+            if length < 5:
+                classification['by_length']['short'].append(pattern)
+            elif length < 15:
+                classification['by_length']['medium'].append(pattern)
+            else:
+                classification['by_length']['long'].append(pattern)
+        
+        # Create summary
+        classification['classification_summary'] = {
+            'total_patterns': len(patterns),
+            'category_distribution': {cat: len(pats) for cat, pats in classification['by_category'].items()},
+            'complexity_distribution': {comp: len(pats) for comp, pats in classification['by_complexity'].items()},
+            'length_distribution': {length: len(pats) for length, pats in classification['by_length'].items()}
+        }
+        
+        return classification
+    
+    def _validate_synthesized_patterns(self, patterns: List[Dict[str, Any]], 
+                                     context: Dict[str, Any], 
+                                     quality_threshold: float) -> List[Dict[str, Any]]:
+        """Validate synthesized patterns against quality threshold."""
+        validated = []
+        
+        for pattern in patterns:
+            # Basic validation
+            if not pattern.get('pattern_sequence'):
+                continue
+            
+            # Estimate quality score if not present
+            if 'estimated_quality' not in pattern:
+                pattern['estimated_quality'] = self._estimate_pattern_quality(pattern, context)
+            
+            # Apply quality threshold
+            quality_score = pattern.get('estimated_quality', pattern.get('success_rate', 0.5))
+            if quality_score >= quality_threshold:
+                validated.append(pattern)
+        
+        return validated
+    
+    def _compute_quality_metrics(self, patterns: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Compute quality metrics for synthesized patterns."""
+        if not patterns:
+            return {'status': 'no_patterns'}
+        
+        qualities = [p.get('estimated_quality', p.get('success_rate', 0.5)) for p in patterns]
+        complexities = [self._compute_pattern_complexity(p) for p in patterns]
+        
+        return {
+            'average_quality': sum(qualities) / len(qualities),
+            'max_quality': max(qualities),
+            'min_quality': min(qualities),
+            'quality_variance': self._compute_variance(qualities),
+            'average_complexity': sum(complexities) / len(complexities),
+            'pattern_count': len(patterns),
+            'synthesis_strategies': list(set(p.get('synthesis_strategy', 'unknown') for p in patterns))
+        }
+    
+    def _compute_pattern_complexity(self, pattern: Dict[str, Any]) -> float:
+        """Compute complexity score for a pattern."""
+        sequence = pattern.get('pattern_sequence', [])
+        if not sequence:
+            return 0.0
+        
+        complexity_factors = 0.0
+        
+        # Length factor
+        complexity_factors += min(1.0, len(sequence) / 20.0) * 0.3
+        
+        # Command diversity factor
+        unique_commands = len(set(sequence))
+        complexity_factors += min(1.0, unique_commands / 10.0) * 0.3
+        
+        # Control structure factor (IF, REPEAT, etc.)
+        control_commands = sum(1 for cmd in sequence if cmd in self.pattern_categories.get('complex', []))
+        complexity_factors += min(1.0, control_commands / 5.0) * 0.4
+        
+        return complexity_factors
+    
+    def _merge_quality_weighted(self, patterns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Merge patterns using quality-weighted selection."""
+        # Sort by quality and select top patterns
+        quality_scored = [(p, p.get('success_rate', p.get('quality_score', 0.5))) for p in patterns]
+        sorted_patterns = sorted(quality_scored, key=lambda x: x[1], reverse=True)
+        
+        # Take top 50% by quality
+        top_count = max(1, len(patterns) // 2)
+        return [pattern for pattern, quality in sorted_patterns[:top_count]]
+    
+    def _merge_diversity_focused(self, patterns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Merge patterns focusing on diversity."""
+        if not patterns:
+            return []
+        
+        selected = [patterns[0]]  # Start with first pattern
+        
+        for pattern in patterns[1:]:
+            # Check diversity against already selected patterns
+            is_diverse = True
+            for selected_pattern in selected:
+                similarity = self._compute_pattern_similarity(pattern, selected_pattern)
+                if similarity > 0.8:  # Too similar
+                    is_diverse = False
+                    break
+            
+            if is_diverse:
+                selected.append(pattern)
+        
+        return selected
+    
+    def _merge_performance_based(self, patterns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Merge patterns based on performance estimates."""
+        performance_scored = [(p, self._estimate_pattern_performance(p)) for p in patterns]
+        sorted_patterns = sorted(performance_scored, key=lambda x: x[1], reverse=True)
+        
+        # Take top 60% by performance
+        top_count = max(1, int(len(patterns) * 0.6))
+        return [pattern for pattern, performance in sorted_patterns[:top_count]]
+    
+    def _compute_pattern_similarity(self, pattern1: Dict[str, Any], pattern2: Dict[str, Any]) -> float:
+        """Compute similarity between two patterns."""
+        seq1 = pattern1.get('pattern_sequence', [])
+        seq2 = pattern2.get('pattern_sequence', [])
+        
+        if not seq1 or not seq2:
+            return 0.0
+        
+        # Simple similarity based on common commands
+        set1 = set(seq1)
+        set2 = set(seq2)
+        intersection = set1.intersection(set2)
+        union = set1.union(set2)
+        
+        return len(intersection) / max(len(union), 1)
+    
+    def _estimate_pattern_quality(self, pattern: Dict[str, Any], context: Dict[str, Any]) -> float:
+        """Estimate quality score for a pattern in context."""
+        base_quality = 0.5
+        
+        # Factor in pattern complexity
+        complexity = self._compute_pattern_complexity(pattern)
+        base_quality += complexity * 0.2
+        
+        # Factor in context relevance (simplified)
+        sequence = pattern.get('pattern_sequence', [])
+        context_relevance = 0.0
+        
+        if 'location' in context:
+            # Simple heuristic: movement commands more relevant for location-based tasks
+            movement_ratio = sum(1 for cmd in sequence if cmd in self.pattern_categories.get('movement', [])) / max(len(sequence), 1)
+            context_relevance += movement_ratio * 0.3
+        
+        return min(1.0, base_quality + context_relevance)
+    
+    def _estimate_pattern_performance(self, pattern: Dict[str, Any]) -> float:
+        """Estimate performance score for pattern."""
+        # Simple heuristic based on pattern characteristics
+        sequence = pattern.get('pattern_sequence', [])
+        if not sequence:
+            return 0.0
+        
+        # Shorter patterns generally perform better
+        length_score = max(0.0, 1.0 - len(sequence) / 30.0)
+        
+        # Patterns with fewer timing commands may be faster
+        timing_commands = sum(1 for cmd in sequence if isinstance(cmd, int) or cmd in ['WAIT'])
+        timing_penalty = timing_commands / max(len(sequence), 1) * 0.3
+        
+        return max(0.1, length_score - timing_penalty)
+    
+    def _compute_pattern_diversity_score(self, pattern: Dict[str, Any], all_patterns: List[Dict[str, Any]]) -> float:
+        """Compute diversity score for pattern against all patterns."""
+        if len(all_patterns) <= 1:
+            return 1.0
+        
+        similarities = [self._compute_pattern_similarity(pattern, other) 
+                       for other in all_patterns if other != pattern]
+        
+        # Diversity is inverse of average similarity
+        avg_similarity = sum(similarities) / len(similarities) if similarities else 0.0
+        return 1.0 - avg_similarity
+    
+    def _compute_pattern_recency_score(self, pattern: Dict[str, Any]) -> float:
+        """Compute recency score for pattern."""
+        timestamp = pattern.get('synthesis_timestamp', pattern.get('timestamp', 0))
+        if timestamp == 0:
+            return 0.5  # Neutral for unknown timestamps
+        
+        current_time = time.time()
+        age_hours = (current_time - timestamp) / 3600.0
+        
+        # Patterns from last 24 hours get full score, older patterns decay
+        return max(0.1, 1.0 - age_hours / 24.0)
+    
+    def _compute_variance(self, values: List[float]) -> float:
+        """Compute variance of a list of values."""
+        if len(values) <= 1:
+            return 0.0
+        
+        mean = sum(values) / len(values)
+        squared_diffs = [(x - mean) ** 2 for x in values]
+        return sum(squared_diffs) / len(squared_diffs)
+    
+    def _record_processing_metrics(self, processing_time: float, success: bool) -> None:
+        """Record processing metrics for monitoring."""
+        self.processing_times.append(processing_time)
+        self.processed_pattern_count += 1
+        
+        # Update success rate
+        success_value = 1.0 if success else 0.0
+        alpha = 0.1
+        self.synthesis_success_rate = alpha * success_value + (1 - alpha) * self.synthesis_success_rate
+        
+        # Keep only recent processing times
+        if len(self.processing_times) > 100:
+            self.processing_times = self.processing_times[-50:]
+    
+    def _get_empty_processing_result(self, reason: str, error_details: Optional[str] = None) -> Dict[str, Any]:
+        """Get empty processing result with error information."""
+        return {
+            'synthesized_patterns': [],
+            'pattern_metadata': {
+                'source_pattern_count': 0,
+                'validated_pattern_count': 0,
+                'synthesis_count': 0,
+                'pattern_classification': {},
+                'processing_time_ms': 1.0
+            },
+            'quality_metrics': {'status': 'no_patterns'},
+            'synthesis_strategies_used': [],
+            'processing_success': False,
+            'error_reason': reason,
+            'error_details': error_details
+        }
+    
+    def get_processing_stats(self) -> Dict[str, Any]:
+        """Get pattern processing performance statistics."""
+        if not self.processing_times:
+            return {'status': 'no_data'}
+        
+        avg_time_ms = (sum(self.processing_times) / len(self.processing_times)) * 1000
+        max_time_ms = max(self.processing_times) * 1000
+        
+        return {
+            'average_processing_time_ms': avg_time_ms,
+            'max_processing_time_ms': max_time_ms,
+            'total_patterns_processed': self.processed_pattern_count,
+            'synthesis_success_rate': self.synthesis_success_rate,
+            'processing_success': True
+        }
+
+
+class ParallelExecutionCoordinator:
+    """Coordinates parallel execution across workers with performance monitoring.
+    
+    Orchestrates concurrent script development tasks across multiple workers,
+    ensuring optimal resource utilization while maintaining performance targets.
+    
+    Performance Target: <100ms coordination overhead
+    """
+    
+    def __init__(self):
+        self.active_executions: Dict[str, Dict[str, Any]] = {}  # execution_id -> execution info
+        self.worker_load_tracker: Dict[str, float] = {}  # worker_id -> current load score
+        self.coordination_times: List[float] = []
+        self.execution_queue = queue.PriorityQueue()  # (priority, execution_request)
+        self.coordination_lock = threading.Lock()
+        
+        # Performance monitoring
+        self.coordination_metrics = {
+            'total_coordinated_executions': 0,
+            'average_coordination_time_ms': 0.0,
+            'concurrent_execution_peak': 0,
+            'coordination_success_rate': 0.0
+        }
+        
+        # Execution coordination strategies
+        self.coordination_strategies = {
+            'load_balanced': self._coordinate_load_balanced,
+            'priority_based': self._coordinate_priority_based,
+            'affinity_aware': self._coordinate_affinity_aware,
+            'performance_optimized': self._coordinate_performance_optimized
+        }
+        
+        self.default_coordination_strategy = 'load_balanced'
+    
+    def coordinate_parallel_execution(self, execution_requests: List[Dict[str, Any]], 
+                                    worker_pool: 'SonnetWorkerPool',
+                                    coordination_strategy: Optional[str] = None) -> Dict[str, Any]:
+        """Coordinate parallel execution of multiple requests across workers.
+        
+        Args:
+            execution_requests: List of execution requests with task details
+            worker_pool: SonnetWorkerPool instance for worker access
+            coordination_strategy: Strategy for coordinating execution ('load_balanced', 'priority_based', etc.)
+            
+        Returns:
+            Dictionary with coordination results and execution tracking info
+        """
+        coordination_start = time.time()
+        
+        try:
+            with self.coordination_lock:
+                # Select coordination strategy
+                strategy = coordination_strategy or self.default_coordination_strategy
+                strategy_func = self.coordination_strategies.get(strategy, self._coordinate_load_balanced)
+                
+                # Execute coordination strategy
+                coordination_result = strategy_func(execution_requests, worker_pool)
+                
+                # Track coordination time
+                coordination_time = time.time() - coordination_start
+                self._record_coordination_time(coordination_time)
+                
+                # Update metrics
+                self.coordination_metrics['total_coordinated_executions'] += len(execution_requests)
+                
+                # Add coordination metadata
+                coordination_result.update({
+                    'coordination_strategy': strategy,
+                    'coordination_time_ms': coordination_time * 1000,
+                    'total_requests': len(execution_requests),
+                    'coordination_timestamp': time.time()
+                })
+                
+                return coordination_result
+                
+        except Exception as e:
+            logger.error(f"Parallel execution coordination failed: {e}")
+            return self._get_fallback_coordination(execution_requests, worker_pool)
+    
+    def monitor_execution_progress(self, execution_id: str) -> Optional[Dict[str, Any]]:
+        """Monitor progress of a coordinated execution."""
+        if execution_id not in self.active_executions:
+            return None
+        
+        execution_info = self.active_executions[execution_id]
+        current_time = time.time()
+        
+        # Calculate progress metrics
+        start_time = execution_info.get('start_time', current_time)
+        elapsed_time = current_time - start_time
+        estimated_duration = execution_info.get('estimated_duration_ms', 5000) / 1000.0
+        progress_percentage = min(100.0, (elapsed_time / estimated_duration) * 100)
+        
+        return {
+            'execution_id': execution_id,
+            'worker_id': execution_info.get('worker_id'),
+            'status': execution_info.get('status', 'unknown'),
+            'progress_percentage': progress_percentage,
+            'elapsed_time_ms': elapsed_time * 1000,
+            'estimated_completion_ms': max(0, (estimated_duration - elapsed_time) * 1000)
+        }
+    
+    def handle_execution_completion(self, execution_id: str, result: Dict[str, Any]) -> None:
+        """Handle completion of a coordinated execution."""
+        if execution_id not in self.active_executions:
+            logger.warning(f"Completion reported for unknown execution {execution_id}")
+            return
+        
+        execution_info = self.active_executions[execution_id]
+        worker_id = execution_info.get('worker_id')
+        
+        # Update worker load tracking
+        if worker_id in self.worker_load_tracker:
+            self.worker_load_tracker[worker_id] = max(0.0, self.worker_load_tracker[worker_id] - 0.3)
+        
+        # Record completion metrics
+        start_time = execution_info.get('start_time', time.time())
+        completion_time = time.time() - start_time
+        success = result.get('success', False)
+        
+        # Update success rate
+        total_executions = self.coordination_metrics['total_coordinated_executions']
+        if total_executions > 0:
+            current_success_rate = self.coordination_metrics['coordination_success_rate']
+            new_success_value = 1.0 if success else 0.0
+            alpha = 0.1  # Learning rate
+            self.coordination_metrics['coordination_success_rate'] = (
+                alpha * new_success_value + (1 - alpha) * current_success_rate
+            )
+        
+        # Clean up execution tracking
+        del self.active_executions[execution_id]
+        
+        logger.debug(f"Execution {execution_id} completed in {completion_time*1000:.1f}ms, success={success}")
+    
+    def get_optimal_worker_assignment(self, task_requirements: Dict[str, Any], 
+                                    available_workers: List[str]) -> Optional[str]:
+        """Get optimal worker for task assignment based on current coordination state."""
+        if not available_workers:
+            return None
+        
+        # Calculate worker scores based on multiple factors
+        worker_scores = {}
+        
+        for worker_id in available_workers:
+            score = 1.0
+            
+            # Factor 1: Current load (lower is better)
+            current_load = self.worker_load_tracker.get(worker_id, 0.0)
+            load_score = max(0.0, 1.0 - current_load)
+            score *= load_score * 0.4
+            
+            # Factor 2: Task affinity (based on requirements)
+            affinity_score = self._compute_task_affinity(worker_id, task_requirements)
+            score *= affinity_score * 0.3
+            
+            # Factor 3: Recent performance
+            performance_score = self._get_worker_recent_performance(worker_id)
+            score *= performance_score * 0.3
+            
+            worker_scores[worker_id] = score
+        
+        # Select worker with highest score
+        optimal_worker = max(worker_scores.keys(), key=lambda w: worker_scores[w])
+        return optimal_worker
+    
+    def update_worker_load(self, worker_id: str, load_delta: float) -> None:
+        """Update worker load tracking for coordination decisions."""
+        if worker_id not in self.worker_load_tracker:
+            self.worker_load_tracker[worker_id] = 0.0
+        
+        # Update load with bounds checking
+        new_load = self.worker_load_tracker[worker_id] + load_delta
+        self.worker_load_tracker[worker_id] = max(0.0, min(1.0, new_load))
+    
+    def _coordinate_load_balanced(self, requests: List[Dict[str, Any]], 
+                                worker_pool: 'SonnetWorkerPool') -> Dict[str, Any]:
+        """Coordinate using load balancing strategy."""
+        assigned_executions = []
+        failed_assignments = []
+        
+        for request in requests:
+            available_workers = [wid for wid, info in worker_pool.workers.items() 
+                               if info.get('healthy', False) and info.get('status') == 'ready']
+            
+            if not available_workers:
+                failed_assignments.append({
+                    'request': request,
+                    'reason': 'no_available_workers'
+                })
+                continue
+            
+            # Select worker with lowest load
+            optimal_worker = min(available_workers, 
+                               key=lambda w: self.worker_load_tracker.get(w, 0.0))
+            
+            # Create execution tracking
+            execution_id = f"exec_{uuid.uuid4().hex[:8]}"
+            execution_info = {
+                'execution_id': execution_id,
+                'worker_id': optimal_worker,
+                'request': request,
+                'start_time': time.time(),
+                'status': 'assigned',
+                'estimated_duration_ms': request.get('estimated_duration_ms', 5000)
+            }
+            
+            self.active_executions[execution_id] = execution_info
+            self.update_worker_load(optimal_worker, 0.3)  # Increase load
+            
+            assigned_executions.append(execution_info)
+        
+        return {
+            'assigned_executions': assigned_executions,
+            'failed_assignments': failed_assignments,
+            'strategy': 'load_balanced'
+        }
+    
+    def _coordinate_priority_based(self, requests: List[Dict[str, Any]], 
+                                 worker_pool: 'SonnetWorkerPool') -> Dict[str, Any]:
+        """Coordinate using priority-based strategy."""
+        # Sort requests by priority
+        prioritized_requests = sorted(requests, 
+                                    key=lambda r: r.get('priority', 0.5), 
+                                    reverse=True)
+        
+        return self._coordinate_load_balanced(prioritized_requests, worker_pool)
+    
+    def _coordinate_affinity_aware(self, requests: List[Dict[str, Any]], 
+                                 worker_pool: 'SonnetWorkerPool') -> Dict[str, Any]:
+        """Coordinate using task-worker affinity strategy."""
+        assigned_executions = []
+        failed_assignments = []
+        
+        for request in requests:
+            available_workers = [wid for wid, info in worker_pool.workers.items() 
+                               if info.get('healthy', False) and info.get('status') == 'ready']
+            
+            if not available_workers:
+                failed_assignments.append({
+                    'request': request,
+                    'reason': 'no_available_workers'
+                })
+                continue
+            
+            # Select worker based on task affinity
+            optimal_worker = self.get_optimal_worker_assignment(
+                request.get('task_requirements', {}), 
+                available_workers
+            )
+            
+            if not optimal_worker:
+                failed_assignments.append({
+                    'request': request,
+                    'reason': 'no_suitable_worker'
+                })
+                continue
+            
+            # Create execution tracking
+            execution_id = f"exec_{uuid.uuid4().hex[:8]}"
+            execution_info = {
+                'execution_id': execution_id,
+                'worker_id': optimal_worker,
+                'request': request,
+                'start_time': time.time(),
+                'status': 'assigned',
+                'estimated_duration_ms': request.get('estimated_duration_ms', 5000)
+            }
+            
+            self.active_executions[execution_id] = execution_info
+            self.update_worker_load(optimal_worker, 0.3)
+            
+            assigned_executions.append(execution_info)
+        
+        return {
+            'assigned_executions': assigned_executions,
+            'failed_assignments': failed_assignments,
+            'strategy': 'affinity_aware'
+        }
+    
+    def _coordinate_performance_optimized(self, requests: List[Dict[str, Any]], 
+                                        worker_pool: 'SonnetWorkerPool') -> Dict[str, Any]:
+        """Coordinate using performance optimization strategy."""
+        # Group requests by complexity/requirements
+        high_priority = [r for r in requests if r.get('priority', 0.5) > 0.7]
+        normal_priority = [r for r in requests if 0.3 <= r.get('priority', 0.5) <= 0.7]
+        low_priority = [r for r in requests if r.get('priority', 0.5) < 0.3]
+        
+        # Process high priority first with best workers
+        assigned_executions = []
+        failed_assignments = []
+        
+        for priority_group in [high_priority, normal_priority, low_priority]:
+            result = self._coordinate_affinity_aware(priority_group, worker_pool)
+            assigned_executions.extend(result['assigned_executions'])
+            failed_assignments.extend(result['failed_assignments'])
+        
+        return {
+            'assigned_executions': assigned_executions,
+            'failed_assignments': failed_assignments,
+            'strategy': 'performance_optimized'
+        }
+    
+    def _get_fallback_coordination(self, requests: List[Dict[str, Any]], 
+                                 worker_pool: 'SonnetWorkerPool') -> Dict[str, Any]:
+        """Provide fallback coordination when main coordination fails."""
+        return {
+            'assigned_executions': [],
+            'failed_assignments': [{'request': r, 'reason': 'coordination_failure'} for r in requests],
+            'strategy': 'fallback',
+            'coordination_time_ms': 1.0,
+            'total_requests': len(requests)
+        }
+    
+    def _compute_task_affinity(self, worker_id: str, task_requirements: Dict[str, Any]) -> float:
+        """Compute affinity between worker and task requirements."""
+        # Simple affinity computation based on task characteristics
+        base_affinity = 0.5
+        
+        # Check for complexity match
+        task_complexity = task_requirements.get('complexity', 'medium')
+        if task_complexity == 'high':
+            # Prefer workers that aren't overloaded for complex tasks
+            current_load = self.worker_load_tracker.get(worker_id, 0.0)
+            base_affinity += (1.0 - current_load) * 0.3
+        
+        # Check for performance requirements
+        if 'performance_target' in task_requirements:
+            target = task_requirements['performance_target']
+            if target == 'speed':
+                base_affinity += 0.2  # All workers are equally fast for now
+            elif target == 'quality':
+                base_affinity += 0.1  # Slight preference for less loaded workers
+        
+        return min(1.0, base_affinity)
+    
+    def _get_worker_recent_performance(self, worker_id: str) -> float:
+        """Get recent performance score for worker (simplified)."""
+        # For now, return based on current load (less loaded = better recent performance assumption)
+        current_load = self.worker_load_tracker.get(worker_id, 0.0)
+        return max(0.3, 1.0 - current_load * 0.5)
+    
+    def _record_coordination_time(self, coordination_time: float) -> None:
+        """Record coordination time for performance monitoring."""
+        self.coordination_times.append(coordination_time)
+        
+        # Keep only recent times
+        if len(self.coordination_times) > 100:
+            self.coordination_times = self.coordination_times[-50:]
+        
+        # Update average coordination time
+        avg_time_ms = (sum(self.coordination_times) / len(self.coordination_times)) * 1000
+        self.coordination_metrics['average_coordination_time_ms'] = avg_time_ms
+        
+        # Log warning if coordination is slow
+        if coordination_time > 0.1:  # 100ms target
+            logger.warning(f"Coordination took {coordination_time*1000:.1f}ms, exceeds 100ms target")
+    
+    def get_coordination_stats(self) -> Dict[str, Any]:
+        """Get coordination performance statistics."""
+        if not self.coordination_times:
+            return {'status': 'no_data'}
+        
+        avg_time_ms = (sum(self.coordination_times) / len(self.coordination_times)) * 1000
+        max_time_ms = max(self.coordination_times) * 1000
+        current_executions = len(self.active_executions)
+        
+        # Update peak concurrent executions
+        if current_executions > self.coordination_metrics['concurrent_execution_peak']:
+            self.coordination_metrics['concurrent_execution_peak'] = current_executions
+        
+        return {
+            'average_coordination_time_ms': avg_time_ms,
+            'max_coordination_time_ms': max_time_ms,
+            'performance_target_met': avg_time_ms < 100.0,
+            'active_executions': current_executions,
+            'worker_load_status': dict(self.worker_load_tracker),
+            'coordination_metrics': self.coordination_metrics.copy()
+        }
+
+
 class AdaptiveQualityThresholds:
     """Dynamic quality threshold system that adapts based on worker performance history."""
     
@@ -2214,8 +3521,8 @@ class AdaptiveQualityThresholds:
         self.max_threshold = 0.95
         
         # Base thresholds from config
-        self.base_success_threshold = CONFIG.script_development.SUCCESS_QUALITY_THRESHOLD
-        self.base_acceptable_threshold = CONFIG.script_development.ACCEPTABLE_QUALITY_THRESHOLD
+        self.base_success_threshold = CONFIG.script_development['SUCCESS_QUALITY_THRESHOLD']
+        self.base_acceptable_threshold = CONFIG.script_development['ACCEPTABLE_QUALITY_THRESHOLD']
         
         # Adaptive thresholds
         self.current_success_threshold = self.base_success_threshold
@@ -2371,6 +3678,13 @@ class SonnetWorkerPool:
         self._cross_worker_pattern_synthesis = None
         self._performance_monitor = None
         self._multi_objective_optimizer = None
+        self._genetic_population = None
+        
+        # Core script development engine components
+        self._experiment_selector = None
+        self._parallel_execution_coordinator = None
+        self._pattern_processor = None
+        self._worker_distributor = None
         
         # Performance tracking
         self.development_metrics = {
@@ -2402,6 +3716,16 @@ class SonnetWorkerPool:
         if self._quality_assessor is None:
             self._quality_assessor = ScriptQualityAssessor(self.script_compiler)
         return self._quality_assessor
+    
+    @quality_assessor.setter
+    def quality_assessor(self, value: ScriptQualityAssessor):
+        """Setter for testing compatibility."""
+        self._quality_assessor = value
+    
+    @quality_assessor.deleter
+    def quality_assessor(self):
+        """Deleter for testing compatibility."""
+        self._quality_assessor = None
     
     @property
     def pattern_refiner(self) -> PatternRefiner:
@@ -2451,6 +3775,54 @@ class SonnetWorkerPool:
         if self._multi_objective_optimizer is None:
             self._multi_objective_optimizer = MultiObjectiveOptimizer()
         return self._multi_objective_optimizer
+    
+    @property
+    def genetic_population(self) -> GeneticPopulation:
+        """Lazy initialization of GeneticPopulation for testing compatibility."""
+        if self._genetic_population is None:
+            self._genetic_population = GeneticPopulation(
+                population_size=CONFIG.script_development['GENETIC_POPULATION_SIZE'],
+                elite_size=CONFIG.script_development['GENETIC_ELITE_SIZE']
+            )
+        return self._genetic_population
+    
+    @genetic_population.setter
+    def genetic_population(self, value: GeneticPopulation):
+        """Setter for testing compatibility."""
+        self._genetic_population = value
+    
+    @genetic_population.deleter
+    def genetic_population(self):
+        """Deleter for testing compatibility."""
+        self._genetic_population = None
+    
+    @property
+    def experiment_selector(self) -> 'ExperimentSelector':
+        """Lazy initialization of ExperimentSelector for testing compatibility."""
+        if self._experiment_selector is None:
+            self._experiment_selector = ExperimentSelector()
+        return self._experiment_selector
+    
+    @property
+    def parallel_execution_coordinator(self) -> 'ParallelExecutionCoordinator':
+        """Lazy initialization of ParallelExecutionCoordinator for testing compatibility."""
+        if self._parallel_execution_coordinator is None:
+            self._parallel_execution_coordinator = ParallelExecutionCoordinator()
+        return self._parallel_execution_coordinator
+    
+    @property
+    def pattern_processor(self) -> 'PatternProcessor':
+        """Lazy initialization of PatternProcessor for testing compatibility."""
+        if self._pattern_processor is None:
+            self._pattern_processor = PatternProcessor(self.cross_worker_pattern_synthesis)
+        return self._pattern_processor
+    
+    @property
+    def worker_distributor(self) -> 'WorkerDistributor':
+        """Lazy initialization of WorkerDistributor for testing compatibility."""
+        if self._worker_distributor is None:
+            self._worker_distributor = WorkerDistributor()
+        return self._worker_distributor
 
     def initialize(self, worker_count: int = None) -> bool:
         """
@@ -2783,7 +4155,7 @@ class SonnetWorkerPool:
             
         # Get semantically relevant patterns
         semantically_relevant = self.semantic_pattern_engine.get_contextual_pattern_recommendations(
-            all_patterns, task_context, top_k=CONFIG.script_development.MAX_PATTERNS_IN_PROMPT
+            all_patterns, task_context, top_k=CONFIG.script_development['MAX_PATTERNS_IN_PROMPT']
         )
         
         # Apply cross-worker pattern synthesis for innovation
@@ -2797,7 +4169,7 @@ class SonnetWorkerPool:
             combined_patterns = synthesized_patterns + semantically_relevant
             
             # Limit total patterns to avoid overwhelming the prompt
-            max_patterns = CONFIG.script_development.MAX_PATTERNS_IN_PROMPT
+            max_patterns = CONFIG.script_development['MAX_PATTERNS_IN_PROMPT']
             final_patterns = combined_patterns[:max_patterns]
             
             logger.debug(f"Retrieved {len(semantically_relevant)} semantic patterns and {len(synthesized_patterns)} synthesized patterns")
@@ -2818,7 +4190,7 @@ class SonnetWorkerPool:
         
         # Get adaptive parameters from performance monitor
         adaptive_params = self.performance_monitor.get_current_parameters()
-        max_iterations = adaptive_params.get('max_iterations', task.get("max_iterations", CONFIG.script_development.DEFAULT_MAX_ITERATIONS))
+        max_iterations = adaptive_params.get('max_iterations', task.get("max_iterations", CONFIG.script_development['DEFAULT_MAX_ITERATIONS']))
         
         current_script = None
         quality_score = 0.0
@@ -2840,7 +4212,7 @@ class SonnetWorkerPool:
             validation_errors = iteration_result["validation_errors"]
             
             # Check success criteria with adaptive threshold
-            adaptive_success_threshold = adaptive_params.get('success_threshold', CONFIG.script_development.SUCCESS_QUALITY_THRESHOLD)
+            adaptive_success_threshold = adaptive_params.get('success_threshold', CONFIG.script_development['SUCCESS_QUALITY_THRESHOLD'])
             if quality_score >= adaptive_success_threshold or iteration == max_iterations - 1:
                 break
         
@@ -2888,8 +4260,8 @@ class SonnetWorkerPool:
         # Initialize genetic population on first iteration
         if iteration == 0:
             self._genetic_population = GeneticPopulation(
-                population_size=CONFIG.script_development.GENETIC_POPULATION_SIZE,
-                elite_size=CONFIG.script_development.GENETIC_ELITE_SIZE
+                population_size=CONFIG.script_development['GENETIC_POPULATION_SIZE'],
+                elite_size=CONFIG.script_development['GENETIC_ELITE_SIZE']
             )
             self._genetic_population.initialize_from_patterns(relevant_patterns, current_script)
             
@@ -2930,7 +4302,7 @@ class SonnetWorkerPool:
         if iteration < max_iterations - 1:
             # Check population diversity to prevent premature convergence
             diversity = self._genetic_population.get_diversity_score()
-            if diversity < CONFIG.script_development.DIVERSITY_THRESHOLD:
+            if diversity < CONFIG.script_development['DIVERSITY_THRESHOLD']:
                 logger.debug("Low diversity detected, injecting new variants with RL guidance")
                 self._inject_diversity_with_rl_guidance(rl_action)
             
@@ -2985,7 +4357,7 @@ class SonnetWorkerPool:
         # Adjust population parameters based on RL recommendations
         if rl_action['parameter'] == 'increase_population':
             # Temporarily expand population by adding more variants
-            if len(population.variants) < CONFIG.script_development.GENETIC_POPULATION_SIZE * 1.5:
+            if len(population.variants) < CONFIG.script_development['GENETIC_POPULATION_SIZE'] * 1.5:
                 for _ in range(2):  # Add 2 new variants
                     if population.variants:
                         base_variant = random.choice(population.variants)
@@ -2996,7 +4368,7 @@ class SonnetWorkerPool:
         
         elif rl_action['parameter'] == 'decrease_population':
             # Remove weakest variants to focus evolution
-            if len(population.variants) > CONFIG.script_development.GENETIC_POPULATION_SIZE // 2:
+            if len(population.variants) > CONFIG.script_development['GENETIC_POPULATION_SIZE'] // 2:
                 population.variants.sort(key=lambda v: v.fitness, reverse=True)
                 population.variants = population.variants[:max(4, len(population.variants) - 2)]
         
@@ -3226,7 +4598,7 @@ class SonnetWorkerPool:
         worker_info["status"] = "ready"
         
         # Update performance metrics
-        success = result["quality_score"] >= CONFIG.script_development.ACCEPTABLE_QUALITY_THRESHOLD
+        success = result["quality_score"] >= CONFIG.script_development['ACCEPTABLE_QUALITY_THRESHOLD']
         self._update_development_metrics(result["development_time_ms"], success)
         
         logger.info(f"Worker {worker_id} completed script development in {result['development_time_ms']:.1f}ms with quality score {result['quality_score']:.2f}")
@@ -3680,7 +5052,7 @@ Focus on frame-perfect execution and optimal path planning."""
         ]
         
         if relevant_patterns:
-            for pattern in relevant_patterns[:CONFIG.script_development.MAX_PATTERNS_IN_PROMPT]:
+            for pattern in relevant_patterns[:CONFIG.script_development['MAX_PATTERNS_IN_PROMPT']]:
                 success_rate = pattern.get("success_rate", 0.0) * 100
                 prompt_parts.append(f"- {pattern.get('name', 'Unknown')}: {pattern.get('description', 'No description')} (Success: {success_rate:.1f}%)")
         else:
@@ -3781,18 +5153,18 @@ Focus on frame-perfect execution and optimal path planning."""
         if metrics["total_scripts_developed"] == 1:
             metrics["average_development_time_ms"] = development_time_ms
         else:
-            alpha = CONFIG.script_development.METRICS_LEARNING_RATE
+            alpha = CONFIG.script_development['METRICS_LEARNING_RATE']
             metrics["average_development_time_ms"] = (
                 alpha * development_time_ms + 
                 (1 - alpha) * metrics["average_development_time_ms"]
             )
         
         # Update success rate (exponential moving average)
-        success_value = CONFIG.script_development.SUCCESS_RATE_INIT if success else CONFIG.script_development.FAILED_RATE_INIT
+        success_value = CONFIG.script_development['SUCCESS_RATE_INIT'] if success else CONFIG.script_development['FAILED_RATE_INIT']
         if metrics["total_scripts_developed"] == 1:
             metrics["success_rate"] = success_value
         else:
-            alpha = CONFIG.script_development.METRICS_LEARNING_RATE
+            alpha = CONFIG.script_development['METRICS_LEARNING_RATE']
             metrics["success_rate"] = (
                 alpha * success_value + 
                 (1 - alpha) * metrics["success_rate"]
@@ -3835,3 +5207,598 @@ Please provide specific suggestions for improving the script based on this resul
 
         self.workers.clear()
         self._initialized = False
+
+
+class WorkerDistributor:
+    """Intelligent load balancing and worker distribution system.
+    
+    Provides advanced worker selection and load balancing capabilities that
+    go beyond simple round-robin assignment, using performance metrics,
+    task affinity, and predictive modeling for optimal task distribution.
+    """
+    
+    def __init__(self):
+        # Worker performance tracking
+        self.worker_performance_history: Dict[str, List[float]] = {}
+        self.worker_task_completion_times: Dict[str, List[float]] = {}
+        self.worker_success_rates: Dict[str, float] = {}
+        self.worker_specializations: Dict[str, Dict[str, float]] = {}
+        
+        # Load tracking and prediction
+        self.current_worker_loads: Dict[str, float] = {}
+        self.predicted_completion_times: Dict[str, float] = {}
+        self.task_complexity_cache: Dict[str, float] = {}
+        
+        # Distribution strategies
+        self.distribution_strategies = {
+            'round_robin': self._distribute_round_robin,
+            'least_loaded': self._distribute_least_loaded,
+            'performance_weighted': self._distribute_performance_weighted,
+            'affinity_based': self._distribute_affinity_based,
+            'predictive': self._distribute_predictive,
+            'hybrid': self._distribute_hybrid
+        }
+        
+        self.default_strategy = 'hybrid'
+        self.distribution_metrics = {
+            'total_distributions': 0,
+            'distribution_times': [],
+            'strategy_success_rates': {}
+        }
+        
+        # Worker affinity learning
+        self.task_type_performance: Dict[str, Dict[str, List[float]]] = {}
+        self.context_worker_mapping: Dict[str, List[Tuple[str, float]]] = {}
+        
+    def distribute_task(self, task: Dict[str, Any], 
+                       available_workers: List[str],
+                       distribution_strategy: Optional[str] = None,
+                       constraints: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Distribute task to optimal worker using intelligent selection.
+        
+        Args:
+            task: Task to be distributed with context and requirements
+            available_workers: List of available worker IDs
+            distribution_strategy: Strategy to use for distribution
+            constraints: Optional constraints for distribution
+            
+        Returns:
+            Distribution result with selected worker and metadata
+        """
+        distribution_start = time.time()
+        
+        try:
+            if not available_workers:
+                return self._get_empty_distribution_result("no_available_workers")
+            
+            # Select distribution strategy
+            strategy = distribution_strategy or self.default_strategy
+            strategy_func = self.distribution_strategies.get(strategy, self._distribute_hybrid)
+            
+            # Apply constraints if specified
+            filtered_workers = self._apply_distribution_constraints(available_workers, constraints)
+            if not filtered_workers:
+                return self._get_empty_distribution_result("constraints_too_restrictive")
+            
+            # Perform distribution
+            distribution_result = strategy_func(task, filtered_workers)
+            
+            # Track distribution metrics
+            distribution_time = time.time() - distribution_start
+            self._record_distribution_metrics(strategy, distribution_time)
+            
+            # Add metadata to result
+            distribution_result.update({
+                'distribution_strategy': strategy,
+                'distribution_time_ms': distribution_time * 1000,
+                'available_worker_count': len(available_workers),
+                'filtered_worker_count': len(filtered_workers),
+                'distribution_timestamp': time.time()
+            })
+            
+            # Update worker load if distribution succeeded
+            if distribution_result.get('selected_worker'):
+                self._update_worker_load(distribution_result['selected_worker'], task)
+            
+            return distribution_result
+            
+        except Exception as e:
+            logger.error(f"Task distribution failed: {e}")
+            return self._get_empty_distribution_result("distribution_error", str(e))
+    
+    def update_worker_performance(self, worker_id: str, task: Dict[str, Any], 
+                                 result: Dict[str, Any]) -> None:
+        """Update worker performance history for better distribution decisions."""
+        success = result.get('success', False)
+        completion_time = result.get('execution_time_ms', 0) / 1000.0
+        quality_score = result.get('quality_score', 0.5)
+        
+        # Update performance history
+        if worker_id not in self.worker_performance_history:
+            self.worker_performance_history[worker_id] = []
+        
+        performance_score = 0.6 * (1.0 if success else 0.0) + 0.4 * quality_score
+        self.worker_performance_history[worker_id].append(performance_score)
+        
+        # Keep only recent history
+        if len(self.worker_performance_history[worker_id]) > 50:
+            self.worker_performance_history[worker_id] = self.worker_performance_history[worker_id][-25:]
+        
+        # Update completion times
+        if worker_id not in self.worker_task_completion_times:
+            self.worker_task_completion_times[worker_id] = []
+        
+        if completion_time > 0:
+            self.worker_task_completion_times[worker_id].append(completion_time)
+            if len(self.worker_task_completion_times[worker_id]) > 20:
+                self.worker_task_completion_times[worker_id] = self.worker_task_completion_times[worker_id][-10:]
+        
+        # Update success rate
+        current_success_rate = self.worker_success_rates.get(worker_id, 0.5)
+        alpha = 0.1
+        self.worker_success_rates[worker_id] = (
+            alpha * (1.0 if success else 0.0) + (1 - alpha) * current_success_rate
+        )
+        
+        # Update task type performance
+        task_type = self._classify_task_type(task)
+        if task_type not in self.task_type_performance:
+            self.task_type_performance[task_type] = {}
+        if worker_id not in self.task_type_performance[task_type]:
+            self.task_type_performance[task_type][worker_id] = []
+        
+        self.task_type_performance[task_type][worker_id].append(performance_score)
+        if len(self.task_type_performance[task_type][worker_id]) > 10:
+            self.task_type_performance[task_type][worker_id] = (
+                self.task_type_performance[task_type][worker_id][-5:]
+            )
+        
+        # Update worker load (decrease after task completion)
+        if worker_id in self.current_worker_loads:
+            task_complexity = self._estimate_task_complexity(task)
+            load_decrease = min(task_complexity * 0.3, self.current_worker_loads[worker_id])
+            self.current_worker_loads[worker_id] = max(0.0, 
+                self.current_worker_loads[worker_id] - load_decrease
+            )
+        
+        logger.debug(f"Updated performance for {worker_id}: success={success}, "
+                    f"quality={quality_score:.3f}, time={completion_time:.1f}s")
+    
+    def predict_worker_performance(self, worker_id: str, task: Dict[str, Any]) -> Dict[str, float]:
+        """Predict worker performance for a specific task."""
+        predictions = {
+            'success_probability': 0.5,
+            'expected_completion_time': 5.0,
+            'expected_quality_score': 0.5,
+            'confidence': 0.5
+        }
+        
+        # Get historical performance
+        history = self.worker_performance_history.get(worker_id, [])
+        if not history:
+            return predictions
+        
+        # Base success probability on recent performance
+        recent_performance = history[-5:] if len(history) >= 5 else history
+        predictions['success_probability'] = sum(recent_performance) / len(recent_performance)
+        
+        # Predict completion time from historical data
+        completion_times = self.worker_task_completion_times.get(worker_id, [])
+        if completion_times:
+            task_complexity = self._estimate_task_complexity(task)
+            base_time = sum(completion_times) / len(completion_times)
+            predictions['expected_completion_time'] = base_time * (0.5 + task_complexity)
+        
+        # Predict quality based on task type affinity
+        task_type = self._classify_task_type(task)
+        if task_type in self.task_type_performance and worker_id in self.task_type_performance[task_type]:
+            type_performance = self.task_type_performance[task_type][worker_id]
+            predictions['expected_quality_score'] = sum(type_performance) / len(type_performance)
+        
+        # Confidence based on data availability
+        data_points = len(history) + len(completion_times)
+        predictions['confidence'] = min(1.0, data_points / 20.0)
+        
+        return predictions
+    
+    def get_optimal_worker_distribution(self, tasks: List[Dict[str, Any]], 
+                                      available_workers: List[str]) -> Dict[str, Any]:
+        """Get optimal distribution of multiple tasks across workers."""
+        if not tasks or not available_workers:
+            return {'distributions': [], 'optimization_score': 0.0}
+        
+        distributions = []
+        worker_loads = {worker: 0.0 for worker in available_workers}
+        
+        # Sort tasks by priority and complexity
+        sorted_tasks = sorted(tasks, 
+                            key=lambda t: (t.get('priority', 0.5), 
+                                         self._estimate_task_complexity(t)),
+                            reverse=True)
+        
+        for task in sorted_tasks:
+            # Find best worker considering current load distribution
+            best_worker = self._find_optimal_worker_for_batch(
+                task, available_workers, worker_loads
+            )
+            
+            if best_worker:
+                distributions.append({
+                    'task': task,
+                    'worker': best_worker,
+                    'estimated_load': worker_loads[best_worker]
+                })
+                
+                # Update load for next iteration
+                task_complexity = self._estimate_task_complexity(task)
+                worker_loads[best_worker] += task_complexity * 0.3
+            else:
+                distributions.append({
+                    'task': task,
+                    'worker': None,
+                    'reason': 'no_suitable_worker'
+                })
+        
+        # Calculate optimization score
+        successful_distributions = [d for d in distributions if d.get('worker')]
+        if successful_distributions:
+            load_variance = self._calculate_load_variance(worker_loads)
+            optimization_score = 1.0 - load_variance  # Lower variance = better distribution
+        else:
+            optimization_score = 0.0
+        
+        return {
+            'distributions': distributions,
+            'optimization_score': optimization_score,
+            'worker_load_balance': worker_loads
+        }
+    
+    def _distribute_round_robin(self, task: Dict[str, Any], workers: List[str]) -> Dict[str, Any]:
+        """Simple round-robin distribution."""
+        if not hasattr(self, '_round_robin_index'):
+            self._round_robin_index = 0
+        
+        selected_worker = workers[self._round_robin_index % len(workers)]
+        self._round_robin_index += 1
+        
+        return {
+            'selected_worker': selected_worker,
+            'confidence': 0.5,
+            'selection_reason': 'round_robin'
+        }
+    
+    def _distribute_least_loaded(self, task: Dict[str, Any], workers: List[str]) -> Dict[str, Any]:
+        """Distribute to least loaded worker."""
+        worker_loads = [(w, self.current_worker_loads.get(w, 0.0)) for w in workers]
+        selected_worker = min(worker_loads, key=lambda x: x[1])[0]
+        
+        return {
+            'selected_worker': selected_worker,
+            'confidence': 0.7,
+            'selection_reason': 'least_loaded',
+            'worker_load': self.current_worker_loads.get(selected_worker, 0.0)
+        }
+    
+    def _distribute_performance_weighted(self, task: Dict[str, Any], workers: List[str]) -> Dict[str, Any]:
+        """Distribute based on historical performance."""
+        worker_scores = []
+        
+        for worker in workers:
+            performance_history = self.worker_performance_history.get(worker, [0.5])
+            avg_performance = sum(performance_history) / len(performance_history)
+            
+            # Penalize for high current load
+            current_load = self.current_worker_loads.get(worker, 0.0)
+            load_penalty = current_load * 0.3
+            
+            score = avg_performance - load_penalty
+            worker_scores.append((worker, score))
+        
+        selected_worker = max(worker_scores, key=lambda x: x[1])[0]
+        confidence = min(1.0, max(worker_scores, key=lambda x: x[1])[1])
+        
+        return {
+            'selected_worker': selected_worker,
+            'confidence': confidence,
+            'selection_reason': 'performance_weighted'
+        }
+    
+    def _distribute_affinity_based(self, task: Dict[str, Any], workers: List[str]) -> Dict[str, Any]:
+        """Distribute based on task-worker affinity."""
+        task_type = self._classify_task_type(task)
+        worker_scores = []
+        
+        for worker in workers:
+            # Get task type performance
+            if task_type in self.task_type_performance and worker in self.task_type_performance[task_type]:
+                type_performance = self.task_type_performance[task_type][worker]
+                affinity_score = sum(type_performance) / len(type_performance)
+            else:
+                affinity_score = 0.5  # Neutral for unknown combinations
+            
+            # Factor in current load
+            current_load = self.current_worker_loads.get(worker, 0.0)
+            adjusted_score = affinity_score * (1.0 - current_load * 0.4)
+            
+            worker_scores.append((worker, adjusted_score))
+        
+        selected_worker = max(worker_scores, key=lambda x: x[1])[0]
+        confidence = max(worker_scores, key=lambda x: x[1])[1]
+        
+        return {
+            'selected_worker': selected_worker,
+            'confidence': confidence,
+            'selection_reason': 'affinity_based',
+            'task_type': task_type
+        }
+    
+    def _distribute_predictive(self, task: Dict[str, Any], workers: List[str]) -> Dict[str, Any]:
+        """Distribute using predictive performance modeling."""
+        predictions = {}
+        best_worker = None
+        best_score = -1
+        
+        for worker in workers:
+            prediction = self.predict_worker_performance(worker, task)
+            
+            # Composite score considering multiple factors
+            score = (
+                0.4 * prediction['success_probability'] +
+                0.3 * (1.0 - min(1.0, prediction['expected_completion_time'] / 10.0)) +
+                0.2 * prediction['expected_quality_score'] +
+                0.1 * prediction['confidence']
+            )
+            
+            predictions[worker] = prediction
+            if score > best_score:
+                best_score = score
+                best_worker = worker
+        
+        return {
+            'selected_worker': best_worker,
+            'confidence': predictions[best_worker]['confidence'] if best_worker else 0.0,
+            'selection_reason': 'predictive',
+            'prediction': predictions.get(best_worker, {})
+        }
+    
+    def _distribute_hybrid(self, task: Dict[str, Any], workers: List[str]) -> Dict[str, Any]:
+        """Hybrid distribution combining multiple strategies."""
+        # Get scores from different strategies
+        performance_result = self._distribute_performance_weighted(task, workers)
+        affinity_result = self._distribute_affinity_based(task, workers)
+        predictive_result = self._distribute_predictive(task, workers)
+        
+        # Combine scores with weights
+        worker_combined_scores = {}
+        
+        for worker in workers:
+            score = 0.0
+            
+            # Performance weight (30%)
+            if performance_result['selected_worker'] == worker:
+                score += 0.3 * performance_result['confidence']
+            
+            # Affinity weight (30%)
+            if affinity_result['selected_worker'] == worker:
+                score += 0.3 * affinity_result['confidence']
+            
+            # Predictive weight (40%)
+            if predictive_result['selected_worker'] == worker:
+                score += 0.4 * predictive_result['confidence']
+            
+            worker_combined_scores[worker] = score
+        
+        # Select best worker
+        selected_worker = max(worker_combined_scores.keys(), 
+                            key=lambda w: worker_combined_scores[w])
+        
+        return {
+            'selected_worker': selected_worker,
+            'confidence': worker_combined_scores[selected_worker],
+            'selection_reason': 'hybrid',
+            'strategy_contributions': {
+                'performance': performance_result['selected_worker'] == selected_worker,
+                'affinity': affinity_result['selected_worker'] == selected_worker,
+                'predictive': predictive_result['selected_worker'] == selected_worker
+            }
+        }
+    
+    def _apply_distribution_constraints(self, workers: List[str], 
+                                      constraints: Optional[Dict[str, Any]]) -> List[str]:
+        """Apply constraints to filter available workers."""
+        if not constraints:
+            return workers
+        
+        filtered_workers = workers[:]
+        
+        # Max load constraint
+        if 'max_load' in constraints:
+            max_load = constraints['max_load']
+            filtered_workers = [w for w in filtered_workers 
+                              if self.current_worker_loads.get(w, 0.0) <= max_load]
+        
+        # Min performance constraint
+        if 'min_performance' in constraints:
+            min_performance = constraints['min_performance']
+            filtered_workers = [w for w in filtered_workers 
+                              if self.worker_success_rates.get(w, 0.5) >= min_performance]
+        
+        # Excluded workers
+        if 'excluded_workers' in constraints:
+            excluded = set(constraints['excluded_workers'])
+            filtered_workers = [w for w in filtered_workers if w not in excluded]
+        
+        # Required workers (if specified, only these are considered)
+        if 'required_workers' in constraints:
+            required = set(constraints['required_workers'])
+            filtered_workers = [w for w in filtered_workers if w in required]
+        
+        return filtered_workers
+    
+    def _classify_task_type(self, task: Dict[str, Any]) -> str:
+        """Classify task type for affinity-based distribution."""
+        context = task.get('context', {})
+        
+        # Simple classification based on context
+        if 'optimization' in str(context).lower():
+            return 'optimization'
+        elif 'exploration' in str(context).lower():
+            return 'exploration'
+        elif 'battle' in str(context).lower():
+            return 'battle'
+        elif 'movement' in str(context).lower():
+            return 'movement'
+        else:
+            return 'general'
+    
+    def _estimate_task_complexity(self, task: Dict[str, Any]) -> float:
+        """Estimate task complexity for load balancing."""
+        # Create task signature for caching
+        task_signature = str(hash(str(sorted(task.items()))))
+        
+        if task_signature in self.task_complexity_cache:
+            return self.task_complexity_cache[task_signature]
+        
+        complexity = 0.5  # Base complexity
+        
+        # Factor in context complexity
+        context = task.get('context', {})
+        context_str = str(context)
+        
+        # More complex contexts indicate higher complexity
+        if len(context_str) > 100:
+            complexity += 0.2
+        
+        if 'complex' in context_str.lower() or 'difficult' in context_str.lower():
+            complexity += 0.3
+        
+        # Factor in estimated duration
+        if 'estimated_duration_ms' in task:
+            duration_factor = min(0.3, task['estimated_duration_ms'] / 10000.0)  # Max 0.3 for 10s+
+            complexity += duration_factor
+        
+        complexity = min(1.0, max(0.1, complexity))
+        
+        # Cache result
+        self.task_complexity_cache[task_signature] = complexity
+        
+        return complexity
+    
+    def _update_worker_load(self, worker_id: str, task: Dict[str, Any]) -> None:
+        """Update worker load when task is assigned."""
+        if worker_id not in self.current_worker_loads:
+            self.current_worker_loads[worker_id] = 0.0
+        
+        task_complexity = self._estimate_task_complexity(task)
+        load_increase = task_complexity * 0.3
+        
+        self.current_worker_loads[worker_id] = min(1.0, 
+            self.current_worker_loads[worker_id] + load_increase
+        )
+    
+    def _find_optimal_worker_for_batch(self, task: Dict[str, Any], 
+                                     workers: List[str], 
+                                     current_loads: Dict[str, float]) -> Optional[str]:
+        """Find optimal worker considering current batch load distribution."""
+        best_worker = None
+        best_score = -1
+        
+        for worker in workers:
+            # Consider multiple factors
+            base_performance = self.worker_success_rates.get(worker, 0.5)
+            current_load = current_loads.get(worker, 0.0)
+            load_penalty = current_load * 0.4
+            
+            # Task affinity
+            task_type = self._classify_task_type(task)
+            if (task_type in self.task_type_performance and 
+                worker in self.task_type_performance[task_type]):
+                type_performance = self.task_type_performance[task_type][worker]
+                affinity_bonus = (sum(type_performance) / len(type_performance) - 0.5) * 0.2
+            else:
+                affinity_bonus = 0.0
+            
+            score = base_performance - load_penalty + affinity_bonus
+            
+            if score > best_score:
+                best_score = score
+                best_worker = worker
+        
+        return best_worker
+    
+    def _calculate_load_variance(self, worker_loads: Dict[str, float]) -> float:
+        """Calculate variance in worker loads."""
+        if len(worker_loads) <= 1:
+            return 0.0
+        
+        loads = list(worker_loads.values())
+        mean_load = sum(loads) / len(loads)
+        variance = sum((load - mean_load) ** 2 for load in loads) / len(loads)
+        
+        return variance
+    
+    def _record_distribution_metrics(self, strategy: str, distribution_time: float) -> None:
+        """Record distribution metrics for performance monitoring."""
+        self.distribution_metrics['total_distributions'] += 1
+        self.distribution_metrics['distribution_times'].append(distribution_time)
+        
+        # Keep only recent times
+        if len(self.distribution_metrics['distribution_times']) > 100:
+            self.distribution_metrics['distribution_times'] = (
+                self.distribution_metrics['distribution_times'][-50:]
+            )
+        
+        # Track strategy usage
+        if strategy not in self.distribution_metrics['strategy_success_rates']:
+            self.distribution_metrics['strategy_success_rates'][strategy] = []
+    
+    def _get_empty_distribution_result(self, reason: str, 
+                                     error_details: Optional[str] = None) -> Dict[str, Any]:
+        """Get empty distribution result with error information."""
+        return {
+            'selected_worker': None,
+            'confidence': 0.0,
+            'selection_reason': 'error',
+            'error_reason': reason,
+            'error_details': error_details,
+            'distribution_success': False
+        }
+    
+    def get_distribution_stats(self) -> Dict[str, Any]:
+        """Get distribution performance statistics."""
+        distribution_times = self.distribution_metrics['distribution_times']
+        
+        if not distribution_times:
+            return {'status': 'no_data'}
+        
+        avg_time_ms = (sum(distribution_times) / len(distribution_times)) * 1000
+        max_time_ms = max(distribution_times) * 1000
+        
+        # Worker load statistics
+        load_stats = {}
+        if self.current_worker_loads:
+            loads = list(self.current_worker_loads.values())
+            load_stats = {
+                'average_load': sum(loads) / len(loads),
+                'max_load': max(loads),
+                'min_load': min(loads),
+                'load_variance': self._calculate_load_variance(self.current_worker_loads)
+            }
+        
+        return {
+            'total_distributions': self.distribution_metrics['total_distributions'],
+            'average_distribution_time_ms': avg_time_ms,
+            'max_distribution_time_ms': max_time_ms,
+            'load_statistics': load_stats,
+            'strategy_usage': self.distribution_metrics['strategy_success_rates'],
+            'worker_performance_summary': {
+                worker: {
+                    'success_rate': self.worker_success_rates.get(worker, 0.5),
+                    'avg_completion_time': (
+                        sum(times) / len(times) if times else 0.0
+                        for times in [self.worker_task_completion_times.get(worker, [])]
+                    )
+                }
+                for worker in self.current_worker_loads.keys()
+            }
+        }
