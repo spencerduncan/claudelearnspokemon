@@ -495,7 +495,9 @@ class TestParallelResultsAnalysis(unittest.TestCase):
 
         # Verify analysis result structure
         self.assertIsInstance(analysis_result, list)
-        self.assertEqual(len(analysis_result), 3)  # pattern_identification, statistical_correlation, strategic_insights
+        self.assertEqual(
+            len(analysis_result), 3
+        )  # pattern_identification, statistical_correlation, strategic_insights
 
         # Verify analysis types are present
         analysis_types = [result["analysis_type"] for result in analysis_result]
@@ -513,9 +515,11 @@ class TestParallelResultsAnalysis(unittest.TestCase):
         self.assertIn("CORRELATION ANALYSIS", call_args)
 
         # Verify strategic insights contain expected pattern information
-        strategic_insights_result = next(r for r in analysis_result if r["analysis_type"] == "strategic_insights")
+        strategic_insights_result = next(
+            r for r in analysis_result if r["analysis_type"] == "strategic_insights"
+        )
         insights_data = strategic_insights_result["results"]
-        
+
         self.assertIn("identified_patterns", insights_data)
         self.assertIn("strategic_insights", insights_data)
         self.assertIn("menu_optimization", str(insights_data))
@@ -543,11 +547,13 @@ class TestParallelResultsAnalysis(unittest.TestCase):
         # Verify correlation analysis was performed
         self.assertIsNotNone(analysis_result)
         self.assertIsInstance(analysis_result, list)
-        
+
         # Find statistical correlation result
-        correlation_result = next(r for r in analysis_result if r["analysis_type"] == "statistical_correlation")
+        correlation_result = next(
+            r for r in analysis_result if r["analysis_type"] == "statistical_correlation"
+        )
         self.assertIsNotNone(correlation_result)
-        
+
         # Strategic process should receive structured correlation request
         call_message = self.mock_strategic_process.send_message.call_args[0][0]
         self.assertIn("CORRELATION ANALYSIS", call_message)
@@ -565,7 +571,7 @@ class TestParallelResultsAnalysis(unittest.TestCase):
             "optimization_opportunities": [],
             "risk_factors": []
         }"""
-        
+
         _ = self.strategist.analyze_parallel_results(self.parallel_results)
 
         # Verify strategic process analyzes pattern frequencies
@@ -585,7 +591,7 @@ class TestParallelResultsAnalysis(unittest.TestCase):
             "optimization_opportunities": ["Focus on successful patterns"],
             "risk_factors": [{"pattern": "failed_sequence", "failure_rate": 0.25}]
         }"""
-        
+
         # Results contain both successes and failures
         mixed_results = self.parallel_results  # Already contains success/failure mix
 
