@@ -901,7 +901,6 @@ class TestErrorHandling:
 class TestScientificValidation:
     """Scientific validation tests requiring statistical analysis."""
 
-    @pytest.mark.fast
     def test_statistical_significance_of_performance_improvements(self, integration):
         """Test statistical significance of integration performance improvements."""
         # This test would compare integrated vs non-integrated performance

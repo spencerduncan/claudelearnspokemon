@@ -103,6 +103,7 @@ class TestMessageRouterIntegration:
         self.mock_claude_manager.start_all_processes.assert_called_once()
         self.mock_worker_pool.initialize.assert_called_once()
 
+    @pytest.mark.performance
     def test_strategic_message_routing(self):
         """Test end-to-end strategic message routing."""
         # Start router
