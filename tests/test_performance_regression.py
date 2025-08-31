@@ -29,6 +29,7 @@ from claudelearnspokemon.language_evolution import (
 )
 
 
+@pytest.mark.performance
 @pytest.mark.fast
 class TestPerformanceRegression(unittest.TestCase):
     """

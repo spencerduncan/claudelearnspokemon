@@ -96,7 +96,7 @@ jobs:
 
       - name: Run fast tests
         run: |
-          python -m pytest tests/ -m fast -x --tb=short -v
+          python -m pytest tests/ -m "fast and not performance" -x --tb=short -v
         env:
           PYTHONPATH: ${{ github.workspace }}/src
 

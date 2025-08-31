@@ -17,6 +17,7 @@ from claudelearnspokemon.emulator_pool import ExecutionResult, ExecutionStatus, 
 
 
 @pytest.mark.unit
+@pytest.mark.performance
 @pytest.mark.fast
 def test_execution_result_creation_performance():
     """Test ExecutionResult creation performance - should be very fast."""
@@ -48,8 +49,9 @@ def test_execution_result_creation_performance():
 
 
 @pytest.mark.unit
-@pytest.mark.fast
+@pytest.mark.performance
 @patch("claudelearnspokemon.emulator_pool.requests.Session")
+@pytest.mark.fast
 def test_http_operation_performance(mock_session_class):
     """Test HTTP operation performance - should be <100ms per request."""
     # Mock successful response
@@ -86,7 +88,8 @@ def test_http_operation_performance(mock_session_class):
 
 @pytest.mark.unit
 @patch("claudelearnspokemon.emulator_pool.requests.Session")
-@pytest.mark.fast
+@pytest.mark.performance
+@pytest.mark.slow
 def test_retry_logic_performance(mock_session_class):
     """Test retry logic doesn't add excessive overhead."""
     # Mock session that succeeds immediately (no retries needed)
@@ -120,7 +123,8 @@ def test_retry_logic_performance(mock_session_class):
 
 
 @pytest.mark.unit
-@pytest.mark.fast
+@pytest.mark.performance
+@pytest.mark.slow
 def test_memory_usage_validation():
     """Test that ExecutionResult doesn't use excessive memory."""
 

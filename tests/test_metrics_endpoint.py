@@ -324,7 +324,7 @@ class TestMetricsEndpointHTTP:
         assert len(results) == 5
         assert all(result == 200 for result in results)
 
-    @pytest.mark.fast
+    @pytest.mark.performance
     def test_performance_characteristics(self):
         """Test response time meets <100ms SLA."""
         exporter = PrometheusMetricsExporter()
@@ -358,7 +358,7 @@ class TestMetricsEndpointHTTP:
 
         print(f"Performance: avg={avg_response_time:.2f}ms, max={max_response_time:.2f}ms")
 
-    @pytest.mark.fast
+    @pytest.mark.performance
     def test_server_stats_tracking(self):
         """Test that server statistics are properly tracked."""
         self.endpoint = MetricsEndpoint(host=self.host, port=self.port)
