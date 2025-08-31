@@ -25,8 +25,8 @@ from unittest.mock import Mock
 import pytest
 
 from src.claudelearnspokemon.language_evolution import (
-    LanguageAnalyzer,
     EvolutionProposalGenerator,
+    LanguageAnalyzer,
     LanguageValidator,
 )
 
@@ -109,14 +109,20 @@ class TestLanguageAnalyzer(unittest.TestCase):
         self.assertGreater(len(opportunities), 0, "Should identify improvement opportunities")
         # Check if low success rate patterns are identified as opportunities
         all_pattern_names = [name for opp in opportunities for name in opp.pattern_names]
-        self.assertIn("item_selection", all_pattern_names, "Low success pattern should be identified")
+        self.assertIn(
+            "item_selection", all_pattern_names, "Low success pattern should be identified"
+        )
 
         # Performance assertion: <200ms for analysis with real measurement
         start_time = time.perf_counter()
         test_opportunities = analyzer.identify_evolution_opportunities(mock_patterns)
         analysis_time = (time.perf_counter() - start_time) * 1000
-        self.assertLess(analysis_time, 200, f"Analysis took {analysis_time:.2f}ms, target is <200ms")
-        self.assertEqual(len(test_opportunities), len(opportunities), "Consistent results across runs")
+        self.assertLess(
+            analysis_time, 200, f"Analysis took {analysis_time:.2f}ms, target is <200ms"
+        )
+        self.assertEqual(
+            len(test_opportunities), len(opportunities), "Consistent results across runs"
+        )
 
     def test_pattern_frequency_analysis_identifies_common_sequences(self):
         """Test identification of frequently used input sequences for macro creation."""
@@ -209,9 +215,10 @@ class TestEvolutionProposalGenerator(unittest.TestCase):
 
         # Create mock opportunities for performance testing
         from src.claudelearnspokemon.language_evolution import (
-            EvolutionOpportunity, EvolutionOpportunityType
+            EvolutionOpportunity,
+            EvolutionOpportunityType,
         )
-        
+
         mock_opportunities = [
             EvolutionOpportunity(
                 opportunity_id="perf_test_1",
@@ -223,20 +230,26 @@ class TestEvolutionProposalGenerator(unittest.TestCase):
                 improvement_potential=0.3,
             )
         ]
-        
+
         generator = EvolutionProposalGenerator()
-        
+
         # Performance measurement with real timing
         start_time = time.perf_counter()
         proposals = generator.generate_proposals(mock_opportunities)
         generation_time = (time.perf_counter() - start_time) * 1000
-        
+
         # Performance assertion
-        self.assertLess(generation_time, 100, f"Generation took {generation_time:.2f}ms, target is <100ms")
-        
+        self.assertLess(
+            generation_time, 100, f"Generation took {generation_time:.2f}ms, target is <100ms"
+        )
+
         # Functional assertions
         self.assertGreater(len(proposals), 0, "Should generate proposals from opportunities")
-        self.assertEqual(len(proposals), len(mock_opportunities), "Should generate one proposal per supported opportunity")
+        self.assertEqual(
+            len(proposals),
+            len(mock_opportunities),
+            "Should generate one proposal per supported opportunity",
+        )
 
     def test_proposal_prioritization_by_expected_impact(self):
         """Test that proposals are prioritized by expected success rate improvement."""
@@ -299,13 +312,16 @@ class TestLanguageValidator(unittest.TestCase):
 
         # Create realistic validation workload with multiple proposals
         validator = LanguageValidator()
-        
+
         # Create realistic evolution proposals for performance testing
         from src.claudelearnspokemon.language_evolution import (
-            EvolutionProposal, EvolutionOpportunity, ProposalType, ImplementationComplexity,
-            EvolutionOpportunityType
+            EvolutionOpportunity,
+            EvolutionOpportunityType,
+            EvolutionProposal,
+            ImplementationComplexity,
+            ProposalType,
         )
-        
+
         mock_proposals = []
         for i in range(30):  # Typical number of proposals from production data
             # Create a real opportunity basis
@@ -316,44 +332,54 @@ class TestLanguageValidator(unittest.TestCase):
                 common_sequence=["A", "START"],
                 frequency=10 + i,
                 average_success_rate=0.6,
-                improvement_potential=0.3
+                improvement_potential=0.3,
             )
-            
+
             # Create a real proposal object
             proposal = EvolutionProposal(
                 proposal_id=f"perf_test_{i}",
                 proposal_type=ProposalType.MACRO_EXTENSION,
                 opportunity_basis=opportunity,
                 dsl_changes={"new_macros": {f"TEST_MACRO_{i}": [f"ACTION_{i}"]}},
-                expected_improvement={"execution_time_reduction": 0.1, "pattern_simplification": 0.2},
+                expected_improvement={
+                    "execution_time_reduction": 0.1,
+                    "pattern_simplification": 0.2,
+                },
                 validation_score=0.0,
                 implementation_complexity=ImplementationComplexity.LOW,
                 estimated_development_time=1.0,
-                risk_assessment={"complexity": "low"}
+                risk_assessment={"complexity": "low"},
             )
             mock_proposals.append(proposal)
 
         # Measure validation performance with statistical accuracy
         times = []
-        for iteration in range(10):  # 10 iterations for statistical measurement
+        for _iteration in range(10):  # 10 iterations for statistical measurement
             start_time = time.perf_counter()
-            validated_proposals = validator.validate_proposals(mock_proposals)
+            validator.validate_proposals(mock_proposals)
             end_time = time.perf_counter()
             times.append((end_time - start_time) * 1000)  # Convert to milliseconds
 
         # Statistical analysis
         avg_time = sum(times) / len(times)
-        std_dev = (sum((t - avg_time) ** 2 for t in times) / len(times)) ** 0.5 if len(times) > 1 else 0
+        std_dev = (
+            (sum((t - avg_time) ** 2 for t in times) / len(times)) ** 0.5 if len(times) > 1 else 0
+        )
 
         # Performance validation (target: <50ms)
-        self.assertLess(avg_time, 50, 
-                       f"Validation took {avg_time:.2f}±{std_dev:.2f}ms for {len(mock_proposals)} proposals, target <50ms")
-        
+        self.assertLess(
+            avg_time,
+            50,
+            f"Validation took {avg_time:.2f}±{std_dev:.2f}ms for {len(mock_proposals)} proposals, target <50ms",
+        )
+
         # Validate that validation actually works
         final_validated = validator.validate_proposals(mock_proposals)
         self.assertGreaterEqual(len(final_validated), 0, "Should successfully validate proposals")
         for proposal in final_validated:
-            self.assertGreaterEqual(proposal.validation_score, 0.0, "All proposals should have validation scores")
+            self.assertGreaterEqual(
+                proposal.validation_score, 0.0, "All proposals should have validation scores"
+            )
 
     def test_detect_potential_breaking_changes(self):
         """Test detection of proposals that could break existing patterns."""
@@ -470,65 +496,81 @@ class TestPerformanceTargets(unittest.TestCase):
         # Create representative workload for performance testing - dictionaries as expected by LanguageAnalyzer
         mock_patterns = []
         for i in range(100):  # Realistic pattern set size
-            mock_patterns.append({
-                "name": f"pattern_{i}",
-                "success_rate": 0.5 + (i % 50) / 100,
-                "usage_frequency": 10 + (i % 20),
-                "input_sequence": [f"ACTION_{j}" for j in range(1 + i % 5)],
-                "context": {"location": f"area_{i % 10}", "level": i % 20},
-                "evolution_metadata": {}
-            })
+            mock_patterns.append(
+                {
+                    "name": f"pattern_{i}",
+                    "success_rate": 0.5 + (i % 50) / 100,
+                    "usage_frequency": 10 + (i % 20),
+                    "input_sequence": [f"ACTION_{j}" for j in range(1 + i % 5)],
+                    "context": {"location": f"area_{i % 10}", "level": i % 20},
+                    "evolution_metadata": {},
+                }
+            )
 
         # Implement actual performance measurement as identified by John Botmack
         start_time = time.perf_counter()
         analyzer = LanguageAnalyzer()
         opportunities = analyzer.identify_evolution_opportunities(mock_patterns)
         analysis_time = (time.perf_counter() - start_time) * 1000
-        
+
         # Validate performance target with realistic dataset (100 patterns)
         self.assertLess(analysis_time, 200, f"Analysis took {analysis_time:.2f}ms, target <200ms")
-        
+
         # Validate that opportunities were actually found
-        self.assertGreater(len(opportunities), 0, "Should identify evolution opportunities from 100 patterns")
+        self.assertGreater(
+            len(opportunities), 0, "Should identify evolution opportunities from 100 patterns"
+        )
 
     def test_proposal_generation_under_100ms_target(self):
         """Test that proposal generation meets <100ms performance target."""
         # Create realistic evolution opportunities for performance testing
-        from src.claudelearnspokemon.language_evolution import EvolutionOpportunity, EvolutionOpportunityType
-        
+        from src.claudelearnspokemon.language_evolution import (
+            EvolutionOpportunity,
+            EvolutionOpportunityType,
+        )
+
         mock_opportunities = []
         for i in range(20):  # Realistic opportunity set size
-            mock_opportunities.append(EvolutionOpportunity(
-                opportunity_id=f"perf_opportunity_{i}",
-                opportunity_type=EvolutionOpportunityType.COMMON_SEQUENCE,
-                pattern_names=[f"pattern_{j}" for j in range(i % 5 + 3)],
-                common_sequence=[f"ACTION_{k}" for k in range(3 + i % 4)],
-                frequency=20 + i * 3,
-                average_success_rate=0.3 + (i % 40) / 100.0,
-                improvement_potential=0.10 + (i % 20) / 200.0,
-                context_dependencies={"area": f"zone_{i % 8}", "complexity": "medium"}
-            ))
+            mock_opportunities.append(
+                EvolutionOpportunity(
+                    opportunity_id=f"perf_opportunity_{i}",
+                    opportunity_type=EvolutionOpportunityType.COMMON_SEQUENCE,
+                    pattern_names=[f"pattern_{j}" for j in range(i % 5 + 3)],
+                    common_sequence=[f"ACTION_{k}" for k in range(3 + i % 4)],
+                    frequency=20 + i * 3,
+                    average_success_rate=0.3 + (i % 40) / 100.0,
+                    improvement_potential=0.10 + (i % 20) / 200.0,
+                    context_dependencies={"area": f"zone_{i % 8}", "complexity": "medium"},
+                )
+            )
 
         # Implement actual performance measurement as identified by John Botmack
         start_time = time.perf_counter()
         generator = EvolutionProposalGenerator()
         proposals = generator.generate_proposals(mock_opportunities)
         generation_time = (time.perf_counter() - start_time) * 1000
-        
+
         # Validate performance target with realistic dataset (20 opportunities)
-        self.assertLess(generation_time, 100, f"Generation took {generation_time:.2f}ms, target <100ms")
-        
+        self.assertLess(
+            generation_time, 100, f"Generation took {generation_time:.2f}ms, target <100ms"
+        )
+
         # Validate that proposals were actually generated
-        self.assertGreater(len(proposals), 0, "Should generate evolution proposals from 20 opportunities")
+        self.assertGreater(
+            len(proposals), 0, "Should generate evolution proposals from 20 opportunities"
+        )
 
     def test_validation_under_50ms_target(self):
         """Test that validation meets <50ms performance target."""
         # Create realistic evolution proposals for performance testing
         from src.claudelearnspokemon.language_evolution import (
-            EvolutionProposal, ProposalType, EvolutionOpportunity, 
-            EvolutionOpportunityType, ImplementationComplexity
+            EvolutionOpportunity,
+            EvolutionOpportunityType,
+            EvolutionProposal,
+            ImplementationComplexity,
+            ProposalType,
         )
-        
+
         # Create base opportunity for proposals
         base_opportunity = EvolutionOpportunity(
             opportunity_id="base_perf_opportunity",
@@ -538,35 +580,46 @@ class TestPerformanceTargets(unittest.TestCase):
             frequency=50,
             average_success_rate=0.4,
             improvement_potential=0.25,
-            context_dependencies={"area": "menu", "complexity": "medium"}
+            context_dependencies={"area": "menu", "complexity": "medium"},
         )
-        
+
         mock_proposals = []
         for i in range(10):  # Realistic proposal set size
-            mock_proposals.append(EvolutionProposal(
-                proposal_id=f"perf_validation_proposal_{i}",
-                proposal_type=ProposalType.MACRO_EXTENSION,
-                opportunity_basis=base_opportunity,
-                dsl_changes={"new_macros": {f"MACRO_{i}": [f"ACTION_{j}" for j in range(3)]}},
-                expected_improvement={"success_rate": 0.08 + (i % 10) / 100.0, "execution_time": 0.05},
-                validation_score=0.0,  # Will be computed during validation
-                implementation_complexity=ImplementationComplexity.LOW,
-                estimated_development_time=1.5 + (i % 5) * 0.5
-            ))
+            mock_proposals.append(
+                EvolutionProposal(
+                    proposal_id=f"perf_validation_proposal_{i}",
+                    proposal_type=ProposalType.MACRO_EXTENSION,
+                    opportunity_basis=base_opportunity,
+                    dsl_changes={"new_macros": {f"MACRO_{i}": [f"ACTION_{j}" for j in range(3)]}},
+                    expected_improvement={
+                        "success_rate": 0.08 + (i % 10) / 100.0,
+                        "execution_time": 0.05,
+                    },
+                    validation_score=0.0,  # Will be computed during validation
+                    implementation_complexity=ImplementationComplexity.LOW,
+                    estimated_development_time=1.5 + (i % 5) * 0.5,
+                )
+            )
 
         # Implement actual performance measurement as identified by John Botmack
         start_time = time.perf_counter()
         validator = LanguageValidator()
         validated_proposals = validator.validate_proposals(mock_proposals)
         validation_time = (time.perf_counter() - start_time) * 1000
-        
+
         # Validate performance target with realistic dataset (10 proposals)
-        self.assertLess(validation_time, 50, f"Validation took {validation_time:.2f}ms, target <50ms")
-        
+        self.assertLess(
+            validation_time, 50, f"Validation took {validation_time:.2f}ms, target <50ms"
+        )
+
         # Validate that proposals were actually validated
-        self.assertEqual(len(validated_proposals), len(mock_proposals), "Should validate all proposals")
+        self.assertEqual(
+            len(validated_proposals), len(mock_proposals), "Should validate all proposals"
+        )
         for proposal in validated_proposals:
-            self.assertGreaterEqual(proposal.validation_score, 0.0, "Proposals should have validation scores")
+            self.assertGreaterEqual(
+                proposal.validation_score, 0.0, "Proposals should have validation scores"
+            )
 
     def test_end_to_end_language_evolution_performance(self):
         """Test complete language evolution pipeline performance."""
@@ -581,9 +634,11 @@ class TestPerformanceTargets(unittest.TestCase):
                 "name": f"production_pattern_{i}",
                 "success_rate": 0.5 + (i % 10) * 0.05,  # Varies from 0.5 to 0.95
                 "usage_frequency": 10 + i % 50,
-                "input_sequence": [f"ACTION_{j}" for j in range(2 + i % 6)],  # 2-7 actions per pattern
+                "input_sequence": [
+                    f"ACTION_{j}" for j in range(2 + i % 6)
+                ],  # 2-7 actions per pattern
                 "context": {"location": f"area_{i % 12}", "level": i % 25},
-                "evolution_metadata": {}
+                "evolution_metadata": {},
             }
             production_patterns.append(pattern)
 
@@ -594,31 +649,36 @@ class TestPerformanceTargets(unittest.TestCase):
 
         # Measure end-to-end performance with multiple iterations
         times = []
-        for iteration in range(5):  # 5 iterations for statistical accuracy
+        for _iteration in range(5):  # 5 iterations for statistical accuracy
             start_time = time.perf_counter()
-            
+
             # Full pipeline execution
             opportunities = analyzer.identify_evolution_opportunities(production_patterns)
             proposals = generator.generate_proposals(opportunities)
-            validated_proposals = validator.validate_proposals(proposals)
-            
+            validator.validate_proposals(proposals)
+
             end_time = time.perf_counter()
             times.append((end_time - start_time) * 1000)  # Convert to milliseconds
 
         # Statistical analysis
         avg_time = sum(times) / len(times)
-        std_dev = (sum((t - avg_time) ** 2 for t in times) / len(times)) ** 0.5 if len(times) > 1 else 0
+        std_dev = (
+            (sum((t - avg_time) ** 2 for t in times) / len(times)) ** 0.5 if len(times) > 1 else 0
+        )
 
         # Performance validation (target: <350ms as per honest_performance_validation.py)
-        self.assertLess(avg_time, 350, 
-                       f"End-to-end pipeline took {avg_time:.2f}±{std_dev:.2f}ms, target <350ms")
-        
+        self.assertLess(
+            avg_time, 350, f"End-to-end pipeline took {avg_time:.2f}±{std_dev:.2f}ms, target <350ms"
+        )
+
         # Validate that the pipeline actually produces results
         final_opportunities = analyzer.identify_evolution_opportunities(production_patterns)
         final_proposals = generator.generate_proposals(final_opportunities)
         final_validated = validator.validate_proposals(final_proposals)
-        
-        self.assertGreater(len(final_opportunities), 0, "Should identify opportunities from production patterns")
+
+        self.assertGreater(
+            len(final_opportunities), 0, "Should identify opportunities from production patterns"
+        )
         self.assertGreater(len(final_proposals), 0, "Should generate proposals from opportunities")
         self.assertGreaterEqual(len(final_validated), 0, "Should validate proposals successfully")
 

@@ -18,8 +18,9 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, cast
 
-import docker
 import requests
+
+import docker
 from docker.errors import APIError, DockerException, ImageNotFound
 
 # Import compatibility layer factory for transparent adapter selection
@@ -81,15 +82,15 @@ class ExecutionStatus(Enum):
 class ContainerHealthStatus(Enum):
     """
     Health status enumeration for EmulatorPool container instances.
-    
+
     Provides clear state tracking for workstation development with
     explicit status transitions and structured monitoring.
     """
 
-    HEALTHY = "healthy"          # Container running and responsive
-    UNHEALTHY = "unhealthy"      # Container running but not responsive
-    STOPPED = "stopped"          # Container exists but not running
-    UNKNOWN = "unknown"          # Container state cannot be determined
+    HEALTHY = "healthy"  # Container running and responsive
+    UNHEALTHY = "unhealthy"  # Container running but not responsive
+    STOPPED = "stopped"  # Container exists but not running
+    UNKNOWN = "unknown"  # Container state cannot be determined
 
     def __str__(self) -> str:
         """Return enum value for display."""
@@ -189,37 +190,37 @@ class ExecutionResult:
 class ContainerHealthInfo:
     """
     Structured health information for individual container instances.
-    
+
     Provides comprehensive tracking of container state with timestamps
     for workstation development monitoring and debugging.
     """
 
-    container_id: str                           # Docker container ID (short form)
-    port: int                                  # HTTP port for communication
-    status: ContainerHealthStatus              # Current health status
-    last_check_time: float                     # Unix timestamp of last health check
-    docker_status: str                         # Docker container status (running, stopped, etc.)
-    
+    container_id: str  # Docker container ID (short form)
+    port: int  # HTTP port for communication
+    status: ContainerHealthStatus  # Current health status
+    last_check_time: float  # Unix timestamp of last health check
+    docker_status: str  # Docker container status (running, stopped, etc.)
+
     # Optional diagnostic information
-    error_message: str | None = None           # Last error encountered
-    response_time_ms: float | None = None      # Latest health check response time
-    consecutive_failures: int = 0              # Count of consecutive health check failures
-    
+    error_message: str | None = None  # Last error encountered
+    response_time_ms: float | None = None  # Latest health check response time
+    consecutive_failures: int = 0  # Count of consecutive health check failures
+
     def __post_init__(self) -> None:
         """Ensure container_id is in short form."""
         if len(self.container_id) > 12:
             self.container_id = self.container_id[:12]
-    
+
     @property
     def age_seconds(self) -> float:
         """Get age of this health status in seconds."""
         return time.time() - self.last_check_time
-    
+
     @property
     def is_stale(self, max_age_seconds: float = 60.0) -> bool:
         """Check if health status is stale (older than max_age_seconds)."""
         return self.age_seconds > max_age_seconds
-        
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for logging and API responses."""
         return {
@@ -251,11 +252,11 @@ class PokemonGymClient:
 
     # Workstation-appropriate thresholds (simpler than production)
     MAX_CONSECUTIVE_FAILURES = 3  # Fail fast for development
-    FAILURE_RESET_TIMEOUT = 10   # Quick recovery for development iteration
-    
+    FAILURE_RESET_TIMEOUT = 10  # Quick recovery for development iteration
+
     # Simple retry configuration
-    MAX_RETRIES = 2              # Fewer retries for faster feedback
-    RETRY_DELAY = 0.5           # Simple fixed delay, no exponential backoff
+    MAX_RETRIES = 2  # Fewer retries for faster feedback
+    RETRY_DELAY = 0.5  # Simple fixed delay, no exponential backoff
 
     def __init__(self, port: int, container_id: str):
         """
@@ -343,7 +344,6 @@ class PokemonGymClient:
             self._update_performance_metrics(time.perf_counter() - start_time)
             return response.status_code == 200
         except requests.RequestException:
-            self._record_circuit_breaker_failure()
             return False
 
     def close(self) -> None:
@@ -501,7 +501,7 @@ class PokemonGymClient:
     def _is_temporarily_disabled(self) -> bool:
         """
         Check if emulator is temporarily disabled due to consecutive failures.
-        
+
         Simplified workstation logic with fail-fast behavior.
 
         Returns:
@@ -527,7 +527,7 @@ class PokemonGymClient:
         with self._failure_lock:
             self._consecutive_failures += 1
             self._last_failure_time = time.time()
-            
+
             if self._consecutive_failures >= self.MAX_CONSECUTIVE_FAILURES:
                 logger.warning(
                     f"Emulator {self} temporarily disabled after {self._consecutive_failures} "
@@ -540,7 +540,9 @@ class PokemonGymClient:
         """
         with self._failure_lock:
             if self._consecutive_failures > 0:
-                logger.info(f"Emulator {self} recovered after {self._consecutive_failures} failures")
+                logger.info(
+                    f"Emulator {self} recovered after {self._consecutive_failures} failures"
+                )
                 self._consecutive_failures = 0
                 self._last_failure_time = 0.0
 
@@ -1333,11 +1335,11 @@ class EmulatorPool:
         status: ContainerHealthStatus,
         docker_status: str,
         error_message: str | None = None,
-        response_time_ms: float | None = None
+        response_time_ms: float | None = None,
     ) -> None:
         """
         Update health status for a specific container with structured logging.
-        
+
         Args:
             port: Container HTTP port
             container_id: Docker container ID
@@ -1348,18 +1350,18 @@ class EmulatorPool:
         """
         with self._health_lock:
             current_time = time.time()
-            
+
             # Get current health info to track status changes
             current_health = self.container_health.get(port)
             status_changed = current_health is None or current_health.status != status
-            
+
             # Track consecutive failures
             consecutive_failures = 0
             if current_health and status != ContainerHealthStatus.HEALTHY:
                 consecutive_failures = current_health.consecutive_failures + 1
             elif status == ContainerHealthStatus.HEALTHY:
                 consecutive_failures = 0
-            
+
             # Update health status
             self.container_health[port] = ContainerHealthInfo(
                 container_id=container_id,
@@ -1369,9 +1371,9 @@ class EmulatorPool:
                 docker_status=docker_status,
                 error_message=error_message,
                 response_time_ms=response_time_ms,
-                consecutive_failures=consecutive_failures
+                consecutive_failures=consecutive_failures,
             )
-            
+
             # Structured logging for health status changes
             if status_changed:
                 old_status = current_health.status.value if current_health else "unknown"
@@ -1379,7 +1381,7 @@ class EmulatorPool:
                     f"Container health status changed: port={port} container={container_id[:12]} "
                     f"{old_status} -> {status.value} docker_status={docker_status}"
                 )
-                
+
                 # Log additional context for unhealthy states
                 if status != ContainerHealthStatus.HEALTHY:
                     logger.warning(
@@ -1391,10 +1393,10 @@ class EmulatorPool:
     def get_container_health_status(self, port: int) -> ContainerHealthInfo | None:
         """
         Get current health status for a specific container.
-        
+
         Args:
             port: Container HTTP port
-            
+
         Returns:
             ContainerHealthInfo if container exists, None otherwise
         """
@@ -1404,7 +1406,7 @@ class EmulatorPool:
     def get_all_container_health(self) -> dict[int, ContainerHealthInfo]:
         """
         Get health status for all containers.
-        
+
         Returns:
             Dictionary mapping ports to ContainerHealthInfo
         """
@@ -1414,7 +1416,7 @@ class EmulatorPool:
     def health_check(self) -> dict[str, Any]:
         """
         Comprehensive health check with Docker status and enum-based status tracking.
-        
+
         Performs both HTTP connectivity checks and Docker container status validation
         for complete workstation health monitoring.
 
@@ -1423,23 +1425,23 @@ class EmulatorPool:
         """
         if not self.containers:
             return {
-                "status": "not_initialized", 
-                "healthy_count": 0, 
+                "status": "not_initialized",
+                "healthy_count": 0,
                 "total_count": 0,
-                "containers": []
+                "containers": [],
             }
 
         health_results = {}
         healthy_count = 0
-        
+
         # Create a mapping of ports to containers for Docker status checking
         container_by_port = {}
         for container in self.containers:
-            if hasattr(container, 'attrs') and 'NetworkSettings' in container.attrs:
-                ports = container.attrs['NetworkSettings'].get('Ports', {})
+            if hasattr(container, "attrs") and "NetworkSettings" in container.attrs:
+                ports = container.attrs["NetworkSettings"].get("Ports", {})
                 for port_spec, bindings in ports.items():
-                    if bindings and port_spec.endswith('/tcp'):
-                        host_port = int(bindings[0]['HostPort'])
+                    if bindings and port_spec.endswith("/tcp"):
+                        host_port = int(bindings[0]["HostPort"])
                         container_by_port[host_port] = container
 
         for port, client in self.clients_by_port.items():
@@ -1448,14 +1450,14 @@ class EmulatorPool:
             status = ContainerHealthStatus.UNKNOWN
             error_message = None
             response_time_ms = None
-            
+
             # Check Docker container status first
-            container = container_by_port.get(port)
-            if container:
+            current_container: Any | None = container_by_port.get(port)
+            if current_container:
                 try:
-                    container.reload()
-                    docker_status = container.status
-                    
+                    current_container.reload()
+                    docker_status = current_container.status
+
                     if docker_status != "running":
                         status = ContainerHealthStatus.STOPPED
                         error_message = f"Docker container not running: {docker_status}"
@@ -1465,18 +1467,18 @@ class EmulatorPool:
                         try:
                             is_responsive = client.is_healthy()
                             response_time_ms = (time.time() - start_time) * 1000
-                            
+
                             if is_responsive:
                                 status = ContainerHealthStatus.HEALTHY
                             else:
                                 status = ContainerHealthStatus.UNHEALTHY
                                 error_message = "Container running but not responsive"
-                                
+
                         except Exception as e:
                             response_time_ms = (time.time() - start_time) * 1000
                             status = ContainerHealthStatus.UNHEALTHY
                             error_message = f"HTTP health check failed: {str(e)}"
-                            
+
                 except Exception as e:
                     status = ContainerHealthStatus.UNKNOWN
                     error_message = f"Docker status check failed: {str(e)}"
@@ -1492,7 +1494,7 @@ class EmulatorPool:
                 status=status,
                 docker_status=docker_status,
                 error_message=error_message,
-                response_time_ms=response_time_ms
+                response_time_ms=response_time_ms,
             )
 
             # Build health result
@@ -1505,7 +1507,7 @@ class EmulatorPool:
                 "response_time_ms": response_time_ms,
                 "needs_restart": status.needs_restart,
             }
-            
+
             if status.is_available:
                 healthy_count += 1
 

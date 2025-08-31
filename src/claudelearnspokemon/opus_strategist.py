@@ -11,7 +11,12 @@ import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .predictive_planning import (
+        PredictivePlanningResult,
+    )
 
 from .circuit_breaker import CircuitBreaker, CircuitConfig
 from .claude_code_manager import ClaudeCodeManager
@@ -28,27 +33,44 @@ from .opus_strategist_exceptions import (
     ResponseTimeoutError,
     StrategyValidationError,
 )
-# Optional predictive planning imports - graceful fallback if not available
-try:
-    from .predictive_planning import (
-        BayesianPredictor,
-        ContingencyGenerator,
-        ExecutionPatternAnalyzer,
-        PredictionCache,
-        PredictivePlanningResult,
-    )
-    PREDICTIVE_PLANNING_AVAILABLE = True
-except ImportError:
-    # Graceful fallback when predictive planning module is not available
-    PREDICTIVE_PLANNING_AVAILABLE = False
-    BayesianPredictor = None
-    ContingencyGenerator = None
-    ExecutionPatternAnalyzer = None
-    PredictionCache = None
-    PredictivePlanningResult = None
 from .strategy_response import FallbackStrategy, StrategyResponse
 from .strategy_response_cache import ResponseCache
 from .strategy_response_parser import StrategyResponseParser, ValidationRule
+
+# Optional predictive planning imports - graceful fallback if not available
+PREDICTIVE_PLANNING_AVAILABLE = False
+_BayesianPredictor: type | None = None
+_ContingencyGenerator: type | None = None
+_ExecutionPatternAnalyzer: type | None = None
+_PredictionCache: type | None = None
+_PredictivePlanningResult: type | None = None
+
+try:
+    from .predictive_planning import (
+        BayesianPredictor as _BayesianPredictorCls,
+    )
+    from .predictive_planning import (
+        ContingencyGenerator as _ContingencyGeneratorCls,
+    )
+    from .predictive_planning import (
+        ExecutionPatternAnalyzer as _ExecutionPatternAnalyzerCls,
+    )
+    from .predictive_planning import (
+        PredictionCache as _PredictionCacheCls,
+    )
+    from .predictive_planning import (
+        PredictivePlanningResult as _PredictivePlanningResultCls,
+    )
+
+    _BayesianPredictor = _BayesianPredictorCls
+    _ContingencyGenerator = _ContingencyGeneratorCls
+    _ExecutionPatternAnalyzer = _ExecutionPatternAnalyzerCls
+    _PredictionCache = _PredictionCacheCls
+    _PredictivePlanningResult = _PredictivePlanningResultCls
+    PREDICTIVE_PLANNING_AVAILABLE = True
+except ImportError:
+    # Use defaults set above
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -138,37 +160,48 @@ class OpusStrategist:
         self.language_validator = LanguageValidator()
 
         # Predictive planning components (optional)
-        self.enable_predictive_planning = enable_predictive_planning and PREDICTIVE_PLANNING_AVAILABLE
-        if self.enable_predictive_planning:
-            self.pattern_analyzer = ExecutionPatternAnalyzer(
+        self.enable_predictive_planning = (
+            enable_predictive_planning and PREDICTIVE_PLANNING_AVAILABLE
+        )
+        if self.enable_predictive_planning and _ExecutionPatternAnalyzer is not None:
+            self.pattern_analyzer = _ExecutionPatternAnalyzer(
                 max_patterns=pattern_analyzer_max_patterns,
                 similarity_threshold=0.75,
                 min_frequency_threshold=3,
             )
 
-            self.bayesian_predictor = BayesianPredictor(
-                alpha_prior=1.0,
-                beta_prior=1.0,
-                forgetting_factor=0.95,
-                min_samples=5,
-            )
+            if _BayesianPredictor is not None:
+                self.bayesian_predictor = _BayesianPredictor(
+                    alpha_prior=1.0,
+                    beta_prior=1.0,
+                    forgetting_factor=0.95,
+                    min_samples=5,
+                )
+            else:
+                self.bayesian_predictor = None
 
-            self.contingency_generator = ContingencyGenerator(
-                fallback_strategy_pool_size=20,
-                scenario_coverage_threshold=0.8,
-                strategy_template_cache_size=100,
-            )
+            if _ContingencyGenerator is not None:
+                self.contingency_generator = _ContingencyGenerator(
+                    fallback_strategy_pool_size=20,
+                    scenario_coverage_threshold=0.8,
+                    strategy_template_cache_size=100,
+                )
+            else:
+                self.contingency_generator = None
 
-            self.prediction_cache = PredictionCache(
-                max_entries=prediction_cache_size,
-                default_ttl=180.0,  # 3 minutes for predictions
-                cleanup_interval=50,
-            )
+            if _PredictionCache is not None:
+                self.prediction_cache = _PredictionCache(
+                    max_entries=prediction_cache_size,
+                    default_ttl=180.0,  # 3 minutes for predictions
+                    cleanup_interval=50,
+                )
+            else:
+                self.prediction_cache = None
         else:
-            self.pattern_analyzer = None  # type: ignore
-            self.bayesian_predictor = None  # type: ignore
-            self.contingency_generator = None  # type: ignore
-            self.prediction_cache = None  # type: ignore
+            self.pattern_analyzer = None
+            self.bayesian_predictor = None
+            self.contingency_generator = None
+            self.prediction_cache = None
 
             # Log reason for predictive planning being disabled
             if enable_predictive_planning and not PREDICTIVE_PLANNING_AVAILABLE:
@@ -399,7 +432,6 @@ class OpusStrategist:
                 f"Failed to extract directives: {str(e)}", strategy_response.to_dict()
             ) from e
 
-
     def update_prediction_results(
         self,
         experiment_id: str,
@@ -413,7 +445,7 @@ class OpusStrategist:
         This method should be called after experiments complete to improve
         prediction accuracy over time.
         """
-        if not self.enable_predictive_planning:
+        if not self.enable_predictive_planning or self.bayesian_predictor is None:
             return
 
         try:
@@ -445,14 +477,20 @@ class OpusStrategist:
         # Add predictive planning metrics if enabled
         if self.enable_predictive_planning:
             metrics["predictive_planning_enabled"] = True
-            metrics["pattern_analyzer_metrics"] = self.pattern_analyzer.get_performance_metrics()
-            metrics["bayesian_predictor_metrics"] = (
-                self.bayesian_predictor.get_performance_metrics()
-            )
-            metrics["contingency_generator_metrics"] = (
-                self.contingency_generator.get_performance_metrics()
-            )
-            metrics["prediction_cache_metrics"] = self.prediction_cache.get_statistics()
+            if self.pattern_analyzer is not None:
+                metrics["pattern_analyzer_metrics"] = (
+                    self.pattern_analyzer.get_performance_metrics()
+                )
+            if self.bayesian_predictor is not None:
+                metrics["bayesian_predictor_metrics"] = (
+                    self.bayesian_predictor.get_performance_metrics()
+                )
+            if self.contingency_generator is not None:
+                metrics["contingency_generator_metrics"] = (
+                    self.contingency_generator.get_performance_metrics()
+                )
+            if self.prediction_cache is not None:
+                metrics["prediction_cache_metrics"] = self.prediction_cache.get_statistics()
         else:
             metrics["predictive_planning_enabled"] = False
 
@@ -696,7 +734,7 @@ class OpusStrategist:
         current_experiments: list[dict[str, Any]],
         execution_patterns: dict[str, Any],
         horizon: int = 3,
-    ) -> PredictivePlanningResult:
+    ) -> "PredictivePlanningResult":
         """
         Generate predictive planning analysis with contingency strategies - Target <100ms.
 
@@ -720,6 +758,9 @@ class OpusStrategist:
             else:
                 raise OpusStrategistError("Predictive planning is disabled")
 
+        if self.prediction_cache is None:
+            raise OpusStrategistError("Prediction cache not available")
+
         start_time = time.time()
 
         try:
@@ -738,9 +779,13 @@ class OpusStrategist:
                 return cached_result
 
             # Perform pattern analysis
-            pattern_analysis = self.pattern_analyzer.analyze_execution_patterns(
-                current_experiments, execution_patterns.get("historical_results")
-            )
+            pattern_analysis = {}
+            if self.pattern_analyzer is not None:
+                pattern_analysis = self.pattern_analyzer.analyze_execution_patterns(
+                    current_experiments, execution_patterns.get("historical_results")
+                )
+            else:
+                pattern_analysis = {"fallback_analysis": True, "similar_patterns": []}
 
             if pattern_analysis.get("error"):
                 logger.warning(f"Pattern analysis failed: {pattern_analysis['error']}")
@@ -751,31 +796,34 @@ class OpusStrategist:
             outcome_predictions = {}
             similar_patterns = pattern_analysis.get("similar_patterns", [])
 
-            for experiment in current_experiments:
-                exp_id = experiment.get("id", f"exp_{int(time.time())}")
+            if self.bayesian_predictor is not None:
+                for experiment in current_experiments:
+                    exp_id = experiment.get("id", f"exp_{int(time.time())}")
 
-                try:
-                    prediction = self.bayesian_predictor.predict_outcome(
-                        experiment_id=exp_id,
-                        experiment_features=experiment,
-                        similar_patterns=similar_patterns,
-                    )
-                    outcome_predictions[exp_id] = prediction
+                    try:
+                        prediction = self.bayesian_predictor.predict_outcome(
+                            experiment_id=exp_id,
+                            experiment_features=experiment,
+                            similar_patterns=similar_patterns,
+                        )
+                        outcome_predictions[exp_id] = prediction
 
-                except Exception as e:
-                    logger.warning(f"Failed to predict outcome for {exp_id}: {e}")
-                    # Continue with other predictions
+                    except Exception as e:
+                        logger.warning(f"Failed to predict outcome for {exp_id}: {e}")
+                        # Continue with other predictions
 
             # Create primary strategy (simplified for this context)
             primary_strategy = self._create_primary_strategy_from_experiments(current_experiments)
 
             # Generate contingency strategies
-            contingencies = self.contingency_generator.generate_contingencies(
-                primary_strategy=primary_strategy,
-                execution_patterns=pattern_analysis,
-                outcome_predictions=outcome_predictions,
-                horizon=horizon,
-            )
+            contingencies = []
+            if self.contingency_generator is not None:
+                contingencies = self.contingency_generator.generate_contingencies(
+                    primary_strategy=primary_strategy,
+                    execution_patterns=pattern_analysis,
+                    outcome_predictions=outcome_predictions,
+                    horizon=horizon,
+                )
 
             # Calculate confidence scores
             confidence_scores = self._calculate_confidence_scores(
@@ -787,7 +835,10 @@ class OpusStrategist:
 
             # Create prediction result
             planning_id = f"planning_{int(time.time())}"
-            result = PredictivePlanningResult(
+            if _PredictivePlanningResult is None:
+                raise OpusStrategistError("PredictivePlanningResult not available")
+
+            result = _PredictivePlanningResult(
                 planning_id=planning_id,
                 primary_strategy=primary_strategy,
                 contingencies=contingencies,
@@ -803,7 +854,8 @@ class OpusStrategist:
             )
 
             # Cache result for future use
-            self.prediction_cache.put(cache_key, result, ttl=180.0)  # 3-minute TTL
+            if self.prediction_cache is not None:
+                self.prediction_cache.put(cache_key, result, ttl=180.0)  # 3-minute TTL
 
             logger.info(
                 f"Predictive planning completed in {execution_time:.2f}ms: "
@@ -817,35 +869,6 @@ class OpusStrategist:
 
             # Graceful degradation with minimal result
             return self._create_minimal_prediction_result(current_experiments, str(e))
-
-    def update_prediction_results(
-        self,
-        experiment_id: str,
-        actual_success: bool,
-        actual_execution_time: float,
-        actual_performance_score: float,
-    ) -> None:
-        """
-        Update prediction algorithms with actual results for learning.
-
-        This method should be called after experiments complete to improve
-        prediction accuracy over time.
-        """
-        if not self.enable_predictive_planning:
-            return
-
-        try:
-            self.bayesian_predictor.update_with_result(
-                experiment_id=experiment_id,
-                actual_success=actual_success,
-                actual_execution_time=actual_execution_time,
-                actual_performance_score=actual_performance_score,
-            )
-
-            logger.debug(f"Updated prediction models with results for {experiment_id}")
-
-        except Exception as e:
-            logger.warning(f"Failed to update prediction results: {str(e)}")
 
     def _create_primary_strategy_from_experiments(
         self, experiments: list[dict[str, Any]]
@@ -927,7 +950,7 @@ class OpusStrategist:
 
     def _create_minimal_prediction_result(
         self, experiments: list[dict[str, Any]], error_reason: str
-    ) -> PredictivePlanningResult:
+    ) -> "PredictivePlanningResult":
         """Create minimal prediction result for graceful degradation."""
         from .strategy_response import FallbackStrategy
 
@@ -939,7 +962,10 @@ class OpusStrategist:
             }
         )
 
-        return PredictivePlanningResult(
+        if _PredictivePlanningResult is None:
+            raise OpusStrategistError("PredictivePlanningResult not available")
+
+        return _PredictivePlanningResult(
             planning_id=f"minimal_{int(time.time())}",
             primary_strategy=primary_strategy,
             contingencies=[],
@@ -1288,7 +1314,9 @@ class OpusStrategist:
                 f"Invalid strategic plan structure: {str(e)}", None
             ) from e
 
-    def analyze_parallel_results(self, parallel_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def analyze_parallel_results(
+        self, parallel_results: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         """
         Analyze results from parallel execution streams for strategic insights.
 
@@ -1321,7 +1349,7 @@ class OpusStrategist:
         Performance Targets:
             - Total processing time: <200ms for 4 parallel results
             - Pattern identification: <100ms
-            - Statistical analysis: <50ms  
+            - Statistical analysis: <50ms
             - Strategic insight generation: <50ms
         """
         start_time = time.time()
@@ -1390,13 +1418,17 @@ class OpusStrategist:
 
             # Validate performance targets
             if total_time > 200.0:
-                logger.warning(f"Parallel results analysis exceeded 200ms target: {total_time:.2f}ms")
+                logger.warning(
+                    f"Parallel results analysis exceeded 200ms target: {total_time:.2f}ms"
+                )
 
             return analysis_results
 
         except Exception as e:
             processing_time = (time.time() - start_time) * 1000
-            logger.error(f"Parallel results analysis failed after {processing_time:.2f}ms: {str(e)}")
+            logger.error(
+                f"Parallel results analysis failed after {processing_time:.2f}ms: {str(e)}"
+            )
             raise OpusStrategistError(f"Parallel results analysis failed: {str(e)}") from e
 
     def _aggregate_parallel_results(self, parallel_results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1408,7 +1440,7 @@ class OpusStrategist:
         """
         try:
             # Initialize aggregation data structures
-            aggregated_data = {
+            aggregated_data: dict[str, Any] = {
                 "total_results": len(parallel_results),
                 "successful_results": 0,
                 "failed_results": 0,
@@ -1422,10 +1454,30 @@ class OpusStrategist:
 
             # Process each result for aggregation
             for result in parallel_results:
-                worker_id = result.get("worker_id", "unknown")
-                success = result.get("success", False)
-                execution_time = result.get("execution_time", 0.0)
-                
+                # Handle both dict and ExecutionResult objects
+                if hasattr(result, "get"):
+                    # Dictionary-style access
+                    worker_id = result.get("worker_id", "unknown")
+                    success = result.get("success", False)
+                    execution_time = result.get("execution_time", 0.0)
+                    perf_metrics = result.get("performance_metrics", {})
+                    patterns = result.get("discovered_patterns", [])
+                    actions = result.get("actions_taken", [])
+                    final_state = result.get("final_state", {})
+                else:
+                    # ExecutionResult object access
+                    worker_id = getattr(
+                        result,
+                        "worker_id",
+                        f"worker_{getattr(result, 'script_id', getattr(result, 'execution_id', 'unknown'))[:8]}",
+                    )
+                    success = getattr(result, "success", False)
+                    execution_time = getattr(result, "execution_time", 0.0)
+                    perf_metrics = getattr(result, "performance_metrics", {})
+                    patterns = getattr(result, "discovered_patterns", [])
+                    actions = getattr(result, "actions_taken", [])
+                    final_state = getattr(result, "final_state", {})
+
                 # Count successes and failures
                 if success:
                     aggregated_data["successful_results"] += 1
@@ -1436,14 +1488,12 @@ class OpusStrategist:
                 aggregated_data["execution_times"].append(execution_time)
 
                 # Aggregate performance metrics
-                perf_metrics = result.get("performance_metrics", {})
                 for metric, value in perf_metrics.items():
                     if metric not in aggregated_data["performance_metrics"]:
                         aggregated_data["performance_metrics"][metric] = []
                     aggregated_data["performance_metrics"][metric].append(value)
 
                 # Count discovered patterns
-                patterns = result.get("discovered_patterns", [])
                 for pattern in patterns:
                     if pattern not in aggregated_data["discovered_patterns"]:
                         aggregated_data["discovered_patterns"][pattern] = {
@@ -1451,29 +1501,32 @@ class OpusStrategist:
                             "success_rate": 0,
                             "associated_workers": set(),
                         }
-                    
+
                     aggregated_data["discovered_patterns"][pattern]["frequency"] += 1
-                    aggregated_data["discovered_patterns"][pattern]["associated_workers"].add(worker_id)
-                    
+                    aggregated_data["discovered_patterns"][pattern]["associated_workers"].add(
+                        worker_id
+                    )
+
                     if success:
                         aggregated_data["discovered_patterns"][pattern]["success_rate"] += 1
 
                 # Collect action sequences and final states
-                actions = result.get("actions_taken", [])
-                final_state = result.get("final_state", {})
-                
-                aggregated_data["action_sequences"].append({
-                    "worker_id": worker_id,
-                    "actions": actions,
-                    "success": success,
-                    "execution_time": execution_time,
-                })
-                
-                aggregated_data["final_states"].append({
-                    "worker_id": worker_id,
-                    "state": final_state,
-                    "success": success,
-                })
+                aggregated_data["action_sequences"].append(
+                    {
+                        "worker_id": worker_id,
+                        "actions": actions,
+                        "success": success,
+                        "execution_time": execution_time,
+                    }
+                )
+
+                aggregated_data["final_states"].append(
+                    {
+                        "worker_id": worker_id,
+                        "state": final_state,
+                        "success": success,
+                    }
+                )
 
                 # Track worker performance
                 if worker_id not in aggregated_data["worker_performance"]:
@@ -1483,7 +1536,7 @@ class OpusStrategist:
                         "total_time": 0.0,
                         "average_time": 0.0,
                     }
-                
+
                 worker_perf = aggregated_data["worker_performance"][worker_id]
                 worker_perf["executions"] += 1
                 if success:
@@ -1494,13 +1547,16 @@ class OpusStrategist:
             # Calculate pattern success rates
             for pattern_data in aggregated_data["discovered_patterns"].values():
                 if pattern_data["frequency"] > 0:
-                    pattern_data["success_rate"] = pattern_data["success_rate"] / pattern_data["frequency"]
+                    pattern_data["success_rate"] = (
+                        pattern_data["success_rate"] / pattern_data["frequency"]
+                    )
                 pattern_data["associated_workers"] = list(pattern_data["associated_workers"])
 
             # Calculate overall success rate
             aggregated_data["overall_success_rate"] = (
                 aggregated_data["successful_results"] / aggregated_data["total_results"]
-                if aggregated_data["total_results"] > 0 else 0.0
+                if aggregated_data["total_results"] > 0
+                else 0.0
             )
 
             return aggregated_data
@@ -1516,7 +1572,7 @@ class OpusStrategist:
         high-value patterns for strategic optimization.
         """
         try:
-            pattern_analysis = {
+            pattern_analysis: dict[str, Any] = {
                 "high_frequency_patterns": [],
                 "high_success_patterns": [],
                 "problematic_patterns": [],
@@ -1530,48 +1586,61 @@ class OpusStrategist:
             for pattern, data in discovered_patterns.items():
                 frequency = data["frequency"]
                 success_rate = data["success_rate"]
-                
+
                 if frequency >= 2:  # Pattern appears in multiple results
-                    pattern_analysis["high_frequency_patterns"].append({
-                        "pattern": pattern,
-                        "frequency": frequency,
-                        "success_rate": success_rate,
-                        "workers": data["associated_workers"],
-                    })
+                    pattern_analysis["high_frequency_patterns"].append(
+                        {
+                            "pattern": pattern,
+                            "frequency": frequency,
+                            "success_rate": success_rate,
+                            "workers": data["associated_workers"],
+                        }
+                    )
 
                 # Identify high-success patterns (>80% success rate)
                 if success_rate >= 0.8 and frequency > 0:
-                    pattern_analysis["high_success_patterns"].append({
-                        "pattern": pattern,
-                        "success_rate": success_rate,
-                        "frequency": frequency,
-                        "reliability": "high",
-                    })
+                    pattern_analysis["high_success_patterns"].append(
+                        {
+                            "pattern": pattern,
+                            "success_rate": success_rate,
+                            "frequency": frequency,
+                            "reliability": "high",
+                        }
+                    )
 
                 # Identify problematic patterns (<50% success rate)
                 if success_rate < 0.5 and frequency > 0:
-                    pattern_analysis["problematic_patterns"].append({
-                        "pattern": pattern,
-                        "success_rate": success_rate,
-                        "frequency": frequency,
-                        "risk_level": "high" if success_rate < 0.3 else "medium",
-                    })
+                    pattern_analysis["problematic_patterns"].append(
+                        {
+                            "pattern": pattern,
+                            "success_rate": success_rate,
+                            "frequency": frequency,
+                            "risk_level": "high" if success_rate < 0.3 else "medium",
+                        }
+                    )
 
             # Analyze performance patterns
             execution_times = aggregated_data.get("execution_times", [])
             if execution_times:
                 import statistics
+
                 pattern_analysis["performance_patterns"] = {
                     "average_execution_time": statistics.mean(execution_times),
                     "median_execution_time": statistics.median(execution_times),
-                    "execution_time_variance": statistics.variance(execution_times) if len(execution_times) > 1 else 0.0,
+                    "execution_time_variance": (
+                        statistics.variance(execution_times) if len(execution_times) > 1 else 0.0
+                    ),
                     "fastest_execution": min(execution_times),
                     "slowest_execution": max(execution_times),
                 }
 
             # Sort patterns by strategic value
-            pattern_analysis["high_frequency_patterns"].sort(key=lambda x: (x["frequency"], x["success_rate"]), reverse=True)
-            pattern_analysis["high_success_patterns"].sort(key=lambda x: x["success_rate"], reverse=True)
+            pattern_analysis["high_frequency_patterns"].sort(
+                key=lambda x: (x["frequency"], x["success_rate"]), reverse=True
+            )
+            pattern_analysis["high_success_patterns"].sort(
+                key=lambda x: x["success_rate"], reverse=True
+            )
             pattern_analysis["problematic_patterns"].sort(key=lambda x: x["success_rate"])
 
             return pattern_analysis
@@ -1579,7 +1648,9 @@ class OpusStrategist:
         except Exception as e:
             raise OpusStrategistError(f"Pattern identification failed: {str(e)}") from e
 
-    def _perform_statistical_correlation_analysis(self, aggregated_data: dict[str, Any]) -> dict[str, Any]:
+    def _perform_statistical_correlation_analysis(
+        self, aggregated_data: dict[str, Any]
+    ) -> dict[str, Any]:
         """
         Perform statistical correlation analysis on parallel execution data.
 
@@ -1587,7 +1658,7 @@ class OpusStrategist:
         using statistical methods with 95% confidence intervals.
         """
         try:
-            correlation_analysis = {
+            correlation_analysis: dict[str, Any] = {
                 "significant_correlations": [],
                 "performance_correlations": {},
                 "success_correlations": {},
@@ -1597,28 +1668,38 @@ class OpusStrategist:
             # Analyze performance metric correlations
             performance_metrics = aggregated_data.get("performance_metrics", {})
             execution_times = aggregated_data.get("execution_times", [])
-            
+
             if len(execution_times) > 1:
                 for metric_name, metric_values in performance_metrics.items():
                     if len(metric_values) == len(execution_times) and len(metric_values) > 1:
                         try:
                             # Calculate Pearson correlation coefficient
-                            correlation_coef = self._calculate_correlation(metric_values, execution_times)
-                            
+                            correlation_coef = self._calculate_correlation(
+                                metric_values, execution_times
+                            )
+
                             if abs(correlation_coef) > 0.3:  # Meaningful correlation threshold
                                 correlation_analysis["performance_correlations"][metric_name] = {
                                     "correlation_coefficient": correlation_coef,
-                                    "strength": self._interpret_correlation_strength(correlation_coef),
-                                    "relationship": "negative" if correlation_coef < 0 else "positive",
+                                    "strength": self._interpret_correlation_strength(
+                                        correlation_coef
+                                    ),
+                                    "relationship": (
+                                        "negative" if correlation_coef < 0 else "positive"
+                                    ),
                                     "sample_size": len(metric_values),
                                 }
-                                
-                                correlation_analysis["significant_correlations"].append({
-                                    "variables": [metric_name, "execution_time"],
-                                    "correlation": correlation_coef,
-                                    "significance": "high" if abs(correlation_coef) > 0.7 else "medium",
-                                    "p_value": 0.05,  # Simplified for this implementation
-                                })
+
+                                correlation_analysis["significant_correlations"].append(
+                                    {
+                                        "variables": [metric_name, "execution_time"],
+                                        "correlation": correlation_coef,
+                                        "significance": (
+                                            "high" if abs(correlation_coef) > 0.7 else "medium"
+                                        ),
+                                        "p_value": 0.05,  # Simplified for this implementation
+                                    }
+                                )
 
                         except (ValueError, ZeroDivisionError):
                             continue  # Skip problematic correlations
@@ -1635,7 +1716,9 @@ class OpusStrategist:
             # Worker performance correlations
             worker_performance = aggregated_data.get("worker_performance", {})
             if worker_performance:
-                correlation_analysis["worker_correlations"] = self._analyze_worker_correlations(worker_performance)
+                correlation_analysis["worker_correlations"] = self._analyze_worker_correlations(
+                    worker_performance
+                )
 
             return correlation_analysis
 
@@ -1649,20 +1732,22 @@ class OpusStrategist:
 
         try:
             import statistics
-            
+
             x_mean = statistics.mean(x_values)
             y_mean = statistics.mean(y_values)
-            
-            numerator = sum((x - x_mean) * (y - y_mean) for x, y in zip(x_values, y_values))
-            
+
+            numerator = sum(
+                (x - x_mean) * (y - y_mean) for x, y in zip(x_values, y_values, strict=False)
+            )
+
             x_variance = sum((x - x_mean) ** 2 for x in x_values)
             y_variance = sum((y - y_mean) ** 2 for y in y_values)
-            
+
             denominator = (x_variance * y_variance) ** 0.5
-            
+
             if denominator == 0:
                 return 0.0
-                
+
             return numerator / denominator
 
         except (ValueError, ZeroDivisionError):
@@ -1671,7 +1756,7 @@ class OpusStrategist:
     def _interpret_correlation_strength(self, correlation_coef: float) -> str:
         """Interpret correlation coefficient strength."""
         abs_coef = abs(correlation_coef)
-        
+
         if abs_coef >= 0.9:
             return "very_strong"
         elif abs_coef >= 0.7:
@@ -1691,12 +1776,14 @@ class OpusStrategist:
         discovered_patterns = aggregated_data.get("discovered_patterns", {})
         for pattern, data in discovered_patterns.items():
             if data["success_rate"] >= 0.8 and data["frequency"] >= 2:
-                success_factors.append({
-                    "factor": f"pattern_{pattern}",
-                    "success_rate": data["success_rate"],
-                    "frequency": data["frequency"],
-                    "factor_type": "behavioral_pattern",
-                })
+                success_factors.append(
+                    {
+                        "factor": f"pattern_{pattern}",
+                        "success_rate": data["success_rate"],
+                        "frequency": data["frequency"],
+                        "factor_type": "behavioral_pattern",
+                    }
+                )
 
         # Analyze performance metric thresholds
         performance_metrics = aggregated_data.get("performance_metrics", {})
@@ -1704,12 +1791,15 @@ class OpusStrategist:
             if len(values) >= 2:
                 try:
                     import statistics
+
                     threshold = statistics.median(values)
-                    success_factors.append({
-                        "factor": f"performance_{metric_name}",
-                        "threshold": threshold,
-                        "factor_type": "performance_metric",
-                    })
+                    success_factors.append(
+                        {
+                            "factor": f"performance_{metric_name}",
+                            "threshold": threshold,
+                            "factor_type": "performance_metric",
+                        }
+                    )
                 except statistics.StatisticsError:
                     continue
 
@@ -1722,18 +1812,20 @@ class OpusStrategist:
         discovered_patterns = aggregated_data.get("discovered_patterns", {})
         for pattern, data in discovered_patterns.items():
             if data["success_rate"] < 0.5 and data["frequency"] >= 1:
-                failure_patterns.append({
-                    "pattern": pattern,
-                    "failure_rate": 1.0 - data["success_rate"],
-                    "frequency": data["frequency"],
-                    "risk_level": "high" if data["success_rate"] < 0.3 else "medium",
-                })
+                failure_patterns.append(
+                    {
+                        "pattern": pattern,
+                        "failure_rate": 1.0 - data["success_rate"],
+                        "frequency": data["frequency"],
+                        "risk_level": "high" if data["success_rate"] < 0.3 else "medium",
+                    }
+                )
 
         return failure_patterns
 
     def _analyze_worker_correlations(self, worker_performance: dict[str, Any]) -> dict[str, Any]:
         """Analyze performance correlations between workers."""
-        worker_correlations = {
+        worker_correlations: dict[str, Any] = {
             "performance_variance": {},
             "consistency_analysis": {},
         }
@@ -1742,8 +1834,8 @@ class OpusStrategist:
             # Calculate performance variance across workers
             success_rates = []
             avg_times = []
-            
-            for worker_id, perf in worker_performance.items():
+
+            for _worker_id, perf in worker_performance.items():
                 if perf["executions"] > 0:
                     worker_success_rate = perf["successes"] / perf["executions"]
                     success_rates.append(worker_success_rate)
@@ -1751,16 +1843,20 @@ class OpusStrategist:
 
             if len(success_rates) > 1:
                 import statistics
+
                 worker_correlations["performance_variance"] = {
                     "success_rate_variance": statistics.variance(success_rates),
                     "execution_time_variance": statistics.variance(avg_times),
-                    "consistency_score": 1.0 - statistics.variance(success_rates),  # Higher = more consistent
+                    "consistency_score": 1.0
+                    - statistics.variance(success_rates),  # Higher = more consistent
                 }
 
             # Individual worker analysis
             for worker_id, perf in worker_performance.items():
                 worker_correlations["consistency_analysis"][worker_id] = {
-                    "success_rate": perf["successes"] / perf["executions"] if perf["executions"] > 0 else 0.0,
+                    "success_rate": (
+                        perf["successes"] / perf["executions"] if perf["executions"] > 0 else 0.0
+                    ),
                     "average_execution_time": perf["average_time"],
                     "total_executions": perf["executions"],
                     "performance_rating": self._rate_worker_performance(perf),
@@ -1792,7 +1888,7 @@ class OpusStrategist:
     def _generate_strategic_insights_from_analysis(
         self,
         pattern_analysis: dict[str, Any],
-        correlation_analysis: dict[str, Any], 
+        correlation_analysis: dict[str, Any],
         parallel_results: list[dict[str, Any]],
     ) -> dict[str, Any]:
         """
@@ -1810,8 +1906,12 @@ class OpusStrategist:
             # Check circuit breaker before requesting strategic analysis
             if not self.circuit_breaker.is_available():
                 self._record_metric("circuit_breaker_trips", 1)
-                logger.warning("Circuit breaker open for strategic analysis, using fallback insights")
-                return self._create_fallback_strategic_insights(pattern_analysis, correlation_analysis)
+                logger.warning(
+                    "Circuit breaker open for strategic analysis, using fallback insights"
+                )
+                return self._create_fallback_strategic_insights(
+                    pattern_analysis, correlation_analysis
+                )
 
             try:
                 # Request strategic insights from Opus
@@ -1820,7 +1920,7 @@ class OpusStrategist:
                     raise ConnectionError("No strategic process available for analysis")
 
                 raw_response = strategic_process.send_message(analysis_prompt)
-                
+
                 if not raw_response or not raw_response.strip():
                     raise MalformedResponseError("Empty strategic analysis response from Opus")
 
@@ -1835,7 +1935,9 @@ class OpusStrategist:
                 # Record failure and use fallback
                 self.circuit_breaker.metrics.record_failure()
                 logger.warning(f"Strategic insight generation failed: {str(e)}")
-                return self._create_fallback_strategic_insights(pattern_analysis, correlation_analysis)
+                return self._create_fallback_strategic_insights(
+                    pattern_analysis, correlation_analysis
+                )
 
         except Exception as e:
             logger.error(f"Strategic insight generation error: {str(e)}")
@@ -1886,10 +1988,12 @@ class OpusStrategist:
                 )
 
         # Add correlation analysis results
-        prompt_parts.extend([
-            "",
-            "STATISTICAL CORRELATION ANALYSIS:",
-        ])
+        prompt_parts.extend(
+            [
+                "",
+                "STATISTICAL CORRELATION ANALYSIS:",
+            ]
+        )
 
         significant_correlations = correlation_analysis.get("significant_correlations", [])
         if significant_correlations:
@@ -1910,38 +2014,42 @@ class OpusStrategist:
                     f"strength={data['strength']}"
                 )
 
-        prompt_parts.extend([
-            "",
-            "STRATEGIC ANALYSIS REQUEST:",
-            "Please provide strategic insights in JSON format with:",
-            "- identified_patterns: Key patterns with strategic value",
-            "- correlations: Important correlations for optimization", 
-            "- strategic_insights: Actionable strategic recommendations",
-            "- optimization_opportunities: Specific optimization suggestions",
-            "- risk_factors: Patterns to avoid or mitigate",
-            "",
-            "Focus on actionable insights that can improve parallel execution",
-            "performance and success rates based on the statistical analysis.",
-        ])
+        prompt_parts.extend(
+            [
+                "",
+                "STRATEGIC ANALYSIS REQUEST:",
+                "Please provide strategic insights in JSON format with:",
+                "- identified_patterns: Key patterns with strategic value",
+                "- correlations: Important correlations for optimization",
+                "- strategic_insights: Actionable strategic recommendations",
+                "- optimization_opportunities: Specific optimization suggestions",
+                "- risk_factors: Patterns to avoid or mitigate",
+                "",
+                "Focus on actionable insights that can improve parallel execution",
+                "performance and success rates based on the statistical analysis.",
+            ]
+        )
 
         return "\n".join(prompt_parts)
 
     def _parse_strategic_insights_response(self, raw_response: str) -> dict[str, Any]:
         """Parse strategic insights response from Opus."""
         import json
-        
+
         try:
             # Attempt to parse JSON response
             strategic_insights = json.loads(raw_response)
 
             # Validate response structure
             if not isinstance(strategic_insights, dict):
-                raise MalformedResponseError("Strategic insights response is not a valid JSON object")
+                raise MalformedResponseError(
+                    "Strategic insights response is not a valid JSON object"
+                )
 
             # Ensure required fields exist with defaults
             required_fields = [
                 "identified_patterns",
-                "correlations", 
+                "correlations",
                 "strategic_insights",
                 "optimization_opportunities",
                 "risk_factors",
@@ -1955,15 +2063,17 @@ class OpusStrategist:
 
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse strategic insights JSON response: {str(e)}")
-            raise MalformedResponseError(f"Invalid JSON in strategic insights response: {str(e)}") from e
+            raise MalformedResponseError(
+                f"Invalid JSON in strategic insights response: {str(e)}"
+            ) from e
 
     def _create_fallback_strategic_insights(
         self, pattern_analysis: dict[str, Any], correlation_analysis: dict[str, Any]
     ) -> dict[str, Any]:
         """Create fallback strategic insights when Opus analysis fails."""
         self._record_metric("fallback_responses", 1)
-        
-        fallback_insights = {
+
+        fallback_insights: dict[str, Any] = {
             "identified_patterns": [],
             "correlations": [],
             "strategic_insights": [],
@@ -1978,12 +2088,14 @@ class OpusStrategist:
         # Extract insights from pattern analysis
         high_success_patterns = pattern_analysis.get("high_success_patterns", [])
         for pattern in high_success_patterns[:3]:
-            fallback_insights["identified_patterns"].append({
-                "pattern": pattern["pattern"],
-                "success_rate": pattern["success_rate"],
-                "strategic_value": "high",
-            })
-            
+            fallback_insights["identified_patterns"].append(
+                {
+                    "pattern": pattern["pattern"],
+                    "success_rate": pattern["success_rate"],
+                    "strategic_value": "high",
+                }
+            )
+
             fallback_insights["strategic_insights"].append(
                 f"Pattern '{pattern['pattern']}' shows {pattern['success_rate']:.1%} success rate - prioritize for replication"
             )
@@ -1991,12 +2103,14 @@ class OpusStrategist:
         # Extract risk factors
         problematic_patterns = pattern_analysis.get("problematic_patterns", [])
         for pattern in problematic_patterns[:2]:
-            fallback_insights["risk_factors"].append({
-                "pattern": pattern["pattern"],
-                "failure_rate": 1.0 - pattern["success_rate"],
-                "risk_level": pattern["risk_level"],
-            })
-            
+            fallback_insights["risk_factors"].append(
+                {
+                    "pattern": pattern["pattern"],
+                    "failure_rate": 1.0 - pattern["success_rate"],
+                    "risk_level": pattern["risk_level"],
+                }
+            )
+
             fallback_insights["strategic_insights"].append(
                 f"Avoid pattern '{pattern['pattern']}' - shows high failure rate ({1.0 - pattern['success_rate']:.1%})"
             )
@@ -2004,11 +2118,13 @@ class OpusStrategist:
         # Extract correlations
         significant_correlations = correlation_analysis.get("significant_correlations", [])
         for corr in significant_correlations[:2]:
-            fallback_insights["correlations"].append({
-                "variables": corr["variables"],
-                "correlation": corr["correlation"],
-                "significance": corr["significance"],
-            })
+            fallback_insights["correlations"].append(
+                {
+                    "variables": corr["variables"],
+                    "correlation": corr["correlation"],
+                    "significance": corr["significance"],
+                }
+            )
 
         # Basic optimization opportunities
         fallback_insights["optimization_opportunities"] = [
@@ -2115,7 +2231,7 @@ class OpusStrategist:
 # Re-export classes for easier imports
 __all__ = [
     "OpusStrategist",
-    "StrategyPriority", 
+    "StrategyPriority",
     "StrategyRequest",
     "StrategyResponse",
     "StrategyResponseParser",

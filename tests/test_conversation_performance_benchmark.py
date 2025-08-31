@@ -20,6 +20,7 @@ from claudelearnspokemon.prompts import ProcessType
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestConversationSetupPerformance(unittest.TestCase):
     """Performance benchmarks for conversation setup operations."""
 
@@ -103,6 +104,7 @@ class TestConversationSetupPerformance(unittest.TestCase):
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestParallelConversationInitialization(unittest.TestCase):
     """Performance benchmarks for parallel conversation initialization."""
 
@@ -253,6 +255,7 @@ class TestParallelConversationInitialization(unittest.TestCase):
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestConversationMemoryEfficiency(unittest.TestCase):
     """Test memory efficiency of conversation state management."""
 

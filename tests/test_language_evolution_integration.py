@@ -26,6 +26,7 @@ from src.claudelearnspokemon.language_evolution import (
 
 @pytest.mark.integration
 @pytest.mark.medium
+@pytest.mark.fast
 class TestLanguageEvolutionSystemIntegration(unittest.TestCase):
     """Integration tests for the complete Language Evolution System."""
 
@@ -324,6 +325,7 @@ class TestLanguageEvolutionSystemIntegration(unittest.TestCase):
 
 @pytest.mark.integration
 @pytest.mark.medium
+@pytest.mark.fast
 class TestOpusStrategistLanguageEvolutionIntegration(unittest.TestCase):
     """Test OpusStrategist integration with Language Evolution System."""
 
