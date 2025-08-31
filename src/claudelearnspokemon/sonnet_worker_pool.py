@@ -28,7 +28,7 @@ import uuid
 from typing import Any
 
 from .claude_code_manager import ClaudeCodeManager
-from .mcp_data_patterns import PokemonStrategy
+from .mcp_data_patterns import PokemonStrategy, QueryBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -543,9 +543,8 @@ class SonnetWorkerPool:
             )
 
             # Store pattern using MCP memory integration
-            # TODO: Properly integrate with MCP memory system
-            # For now, simulate successful storage
-            result = {"success": True, "memory_id": f"pattern_{strategy.id}"}
+            query_builder = QueryBuilder()
+            result = query_builder.store_pattern(strategy)
 
             if result.get("success", False):
                 pattern_id = result.get("memory_id")
@@ -579,7 +578,8 @@ class SonnetWorkerPool:
             List of pattern dictionaries matching the filter criteria
         """
         try:
-            # Build query based on filter (for future MCP integration)
+            # Build query based on filter
+            query_builder = QueryBuilder()
             if context_filter:
                 # Use context information to build targeted query
                 search_terms = []
@@ -587,13 +587,11 @@ class SonnetWorkerPool:
                     search_terms.append(f"location:{context_filter['location']}")
                 if "objective" in context_filter:
                     search_terms.append(f"objective:{context_filter['objective']}")
-                # query = " ".join(search_terms) if search_terms else "PokemonStrategy"
-            # else:
-            #     query = "PokemonStrategy"
+                query = " ".join(search_terms) if search_terms else "PokemonStrategy"
+            else:
+                query = "PokemonStrategy"
 
-            # TODO: Properly integrate with MCP memory system for pattern retrieval
-            # For now, simulate successful retrieval
-            result = {"success": True, "results": []}
+            result = query_builder.search_patterns(query)
 
             if result.get("success", False):
                 patterns = []

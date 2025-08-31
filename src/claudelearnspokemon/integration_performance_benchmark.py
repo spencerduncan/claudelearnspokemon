@@ -166,7 +166,7 @@ class IntegrationPerformanceBenchmark:
     def run_comprehensive_benchmark(
         self,
         test_iterations: int = 100,
-        game_state_complexity_levels: list[str] = None,
+        game_state_complexity_levels: list[str] | None = None,
         include_stress_testing: bool = True,
     ) -> BenchmarkSuite:
         """
@@ -597,7 +597,7 @@ class IntegrationPerformanceBenchmark:
         total_duration = end_time - start_time
 
         # Group measurements by operation type
-        measurements_by_type = {}
+        measurements_by_type: dict[str, list[Any]] = {}
         for measurement in self._measurements:
             op_type = measurement.operation_type
             if op_type not in measurements_by_type:
@@ -650,8 +650,8 @@ class IntegrationPerformanceBenchmark:
         )
 
         # Statistical validity analysis (if enabled)
-        statistical_validity = {}
-        regression_analysis = {}
+        statistical_validity: dict[str, Any] = {}
+        regression_analysis: dict[str, Any] = {}
         if self.enable_statistical_analysis:
             statistical_validity, regression_analysis = self._perform_statistical_analysis(
                 measurements_by_type
@@ -892,7 +892,7 @@ class IntegrationPerformanceBenchmark:
 
 
 def run_scientific_benchmark(
-    iterations: int = 100, output_path: Path = None, enable_stress_testing: bool = True
+    iterations: int = 100, output_path: Path | None = None, enable_stress_testing: bool = True
 ) -> BenchmarkSuite:
     """
     Run scientific performance benchmark of TileObserver-CheckpointManager integration.

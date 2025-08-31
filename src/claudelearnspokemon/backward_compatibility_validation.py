@@ -152,6 +152,7 @@ class BackwardCompatibilityValidator:
                     "callable": hasattr(observer, method_name)
                     and callable(getattr(observer, method_name)),
                     "functional": False,  # Will test below
+                    "error": None,  # Initialize error field for string assignments
                 }
 
             # Test functional compatibility
