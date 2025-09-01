@@ -28,7 +28,7 @@ import uuid
 from typing import Any
 
 from .claude_code_manager import ClaudeCodeManager
-from .mcp_data_patterns import PokemonStrategy
+from .mcp_data_patterns import PokemonStrategy, QueryBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -542,10 +542,18 @@ class SonnetWorkerPool:
                 optimization_history=pattern_data.get("optimization_history", []),
             )
 
-            # Store pattern using MCP memory integration
-            # TODO: Properly integrate with MCP memory system
-            # For now, simulate successful storage
-            result = {"success": True, "memory_id": f"pattern_{strategy.id}"}
+            # Store pattern using MCP memory integration via QueryBuilder
+            try:
+                query_builder = QueryBuilder()
+                result = query_builder.store_pattern(strategy)
+                if result.get("success"):
+                    logger.debug(f"Stored pattern {strategy.id} via QueryBuilder (memory_id={result.get('memory_id')})")
+                else:
+                    logger.warning(f"QueryBuilder storage failed: {result.get('error', 'Unknown error')}")
+                    return False
+            except Exception as query_error:
+                logger.warning(f"QueryBuilder failed: {query_error}")
+                return False
 
             if result.get("success", False):
                 pattern_id = result.get("memory_id")
@@ -591,9 +599,30 @@ class SonnetWorkerPool:
             # else:
             #     query = "PokemonStrategy"
 
-            # TODO: Properly integrate with MCP memory system for pattern retrieval
-            # For now, simulate successful retrieval
-            result = {"success": True, "results": []}
+            # Retrieve patterns using QueryBuilder
+            try:
+                query_builder = QueryBuilder()
+                
+                # Build search query from filter criteria
+                if context_filter:
+                    search_terms = []
+                    if "location" in context_filter:
+                        search_terms.append(f"location:{context_filter['location']}")
+                    if "objective" in context_filter:
+                        search_terms.append(f"objective:{context_filter['objective']}")
+                    search_query = " ".join(search_terms) if search_terms else "PokemonStrategy"
+                else:
+                    search_query = "PokemonStrategy"
+                
+                result = query_builder.search_patterns(search_query)
+                if result.get("success"):
+                    logger.debug(f"Retrieved {len(result['results'])} patterns via QueryBuilder")
+                else:
+                    logger.warning(f"QueryBuilder search failed: {result.get('error', 'Unknown error')}")
+                    result = {"success": True, "results": []}
+            except Exception as query_error:
+                logger.warning(f"QueryBuilder search failed: {query_error}")
+                result = {"success": True, "results": []}
 
             if result.get("success", False):
                 patterns = []

@@ -691,6 +691,49 @@ class QueryBuilder:
             "limit": self.default_limit,
         }
 
+    def store_pattern(self, pattern: MCPDataPattern) -> dict[str, Any]:
+        """
+        Store a pattern using MCP memory system.
+        
+        Args:
+            pattern: The pattern to store
+            
+        Returns:
+            Dictionary with success status and memory_id
+        """
+        try:
+            mcp_data = pattern.to_mcp_format()
+            memory_id = store_memory(
+                node_type=mcp_data["node_type"],
+                content=mcp_data["content"],
+                confidence=mcp_data["confidence"],
+                source="query_builder",
+                tags=mcp_data["tags"]
+            )
+            return {"success": True, "memory_id": memory_id}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def search_patterns(self, search_query: str, limit: int | None = None) -> dict[str, Any]:
+        """
+        Search for patterns using MCP memory system.
+        
+        Args:
+            search_query: The search query string
+            limit: Maximum number of results to return
+            
+        Returns:
+            Dictionary with success status and results list
+        """
+        try:
+            search_result = search_memories(
+                pattern=search_query,
+                limit=limit or self.default_limit
+            )
+            return {"success": True, "results": search_result.get("results", [])}
+        except Exception as e:
+            return {"success": False, "error": str(e), "results": []}
+
 
 class RelationshipManager:
     """
