@@ -1,16 +1,19 @@
 """
 Production FastAPI server for Message Routing Engine
-Provides HTTP endpoints for routing requests and health monitoring
+Provides HTTP endpoints for routing requests and health monitoring with graceful shutdown support
 """
 
+import asyncio
 import json
 import logging
 import os
+import signal
+import threading
 import time
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
@@ -35,8 +38,45 @@ ROUTING_REQUESTS = Counter('routing_requests_total', 'Total routing requests', [
 ROUTING_DURATION = Histogram('routing_duration_seconds', 'Routing request duration')
 HEALTH_CHECKS = Counter('health_check_requests_total', 'Health check requests')
 
+# Graceful shutdown infrastructure
+shutdown_event = threading.Event()
+active_requests = set()
+active_requests_lock = threading.Lock()
+
 # Global routing adapter
 routing_adapter: RoutingAdapter = None
+
+
+def register_request(request_id: str) -> None:
+    """Register an active request for graceful shutdown tracking."""
+    with active_requests_lock:
+        active_requests.add(request_id)
+        logger.debug(f"Registered active request: {request_id} (total: {len(active_requests)})")
+
+
+def unregister_request(request_id: str) -> None:
+    """Unregister a completed request."""
+    with active_requests_lock:
+        active_requests.discard(request_id)
+        logger.debug(f"Unregistered request: {request_id} (remaining: {len(active_requests)})")
+
+
+def get_active_request_count() -> int:
+    """Get the current number of active requests."""
+    with active_requests_lock:
+        return len(active_requests)
+
+
+def signal_handler(signum: int, frame) -> None:
+    """Handle SIGTERM and SIGINT for graceful shutdown."""
+    signal_name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT" if signum == signal.SIGINT else f"SIG{signum}"
+    logger.info(f"Received {signal_name}, initiating graceful shutdown...")
+    
+    active_count = get_active_request_count()
+    if active_count > 0:
+        logger.info(f"Waiting for {active_count} active requests to complete...")
+    
+    shutdown_event.set()
 
 
 class RoutingRequest(BaseModel):
@@ -59,10 +99,15 @@ class RoutingResponse(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan manager."""
+    """Application lifespan manager with graceful shutdown support."""
     global routing_adapter
     
     logger.info("Starting Message Routing Engine server...")
+    
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    logger.info("Registered signal handlers for SIGTERM and SIGINT")
     
     try:
         # Initialize Claude manager and worker pool
@@ -96,17 +141,48 @@ async def lifespan(app: FastAPI):
         routing_adapter = RoutingAdapter(claude_manager, worker_pool, config)
         
         logger.info(f"Routing engine started in {integration_mode.value} mode")
+        logger.info("Server startup complete - ready to handle requests")
         
     except Exception as e:
         logger.error(f"Failed to initialize routing engine: {e}")
         routing_adapter = None
+        raise  # Re-raise to prevent server start with broken routing
     
     yield
     
-    # Shutdown
+    # Graceful shutdown sequence
+    logger.info("Beginning graceful shutdown sequence...")
+    
+    # Wait for active requests to complete (with timeout)
+    shutdown_timeout = float(os.getenv("SHUTDOWN_TIMEOUT", "30.0"))
+    start_time = time.time()
+    
+    while get_active_request_count() > 0 and (time.time() - start_time) < shutdown_timeout:
+        active_count = get_active_request_count()
+        remaining_time = shutdown_timeout - (time.time() - start_time)
+        logger.info(f"Waiting for {active_count} active requests (timeout: {remaining_time:.1f}s)")
+        await asyncio.sleep(0.5)
+    
+    final_active_count = get_active_request_count()
+    if final_active_count > 0:
+        logger.warning(f"Shutdown timeout reached with {final_active_count} requests still active")
+    else:
+        logger.info("All requests completed successfully")
+    
+    # Clean up resources and connections
+    logger.info("Cleaning up routing engine resources...")
     if routing_adapter:
-        routing_adapter.shutdown()
-    logger.info("Message Routing Engine server stopped")
+        try:
+            routing_adapter.shutdown()
+            logger.info("Routing adapter shutdown completed")
+        except Exception as e:
+            logger.error(f"Error during routing adapter shutdown: {e}")
+    
+    # Reset signal handlers
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    
+    logger.info("Message Routing Engine server stopped gracefully")
 
 
 # Initialize FastAPI app
@@ -118,10 +194,40 @@ app = FastAPI(
 )
 
 
+@app.middleware("http")
+async def request_tracking_middleware(request: Request, call_next):
+    """Middleware to track active requests for graceful shutdown."""
+    # Only track routing requests, not health checks or metrics
+    if request.url.path.startswith("/route/"):
+        request_id = f"{request.method}:{request.url.path}:{id(request)}"
+        register_request(request_id)
+        
+        try:
+            response = await call_next(request)
+            return response
+        finally:
+            unregister_request(request_id)
+    else:
+        # Fast path for health checks and metrics
+        return await call_next(request)
+
+
 @app.get("/health")
 async def health_check():
     """Basic health check endpoint."""
     HEALTH_CHECKS.labels(endpoint="health").inc()
+    
+    # Return degraded status during shutdown to help load balancers drain traffic
+    if shutdown_event.is_set():
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "shutting_down",
+                "timestamp": time.time(),
+                "active_requests": get_active_request_count()
+            }
+        )
+    
     return {"status": "healthy", "timestamp": time.time()}
 
 
@@ -379,6 +485,17 @@ async def admin_status():
         return {"status": "error", "error": str(e)}
 
 
+@app.get("/admin/shutdown")
+async def shutdown_status():
+    """Shutdown status endpoint for monitoring graceful shutdown progress."""
+    return {
+        "shutdown_initiated": shutdown_event.is_set(),
+        "active_requests": get_active_request_count(),
+        "timestamp": time.time(),
+        "shutdown_timeout": float(os.getenv("SHUTDOWN_TIMEOUT", "30.0"))
+    }
+
+
 @app.post("/admin/config")
 async def update_config(config_data: dict[str, Any]):
     """Update routing configuration dynamically."""
@@ -415,4 +532,32 @@ async def update_config(config_data: dict[str, Any]):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    
+    # Production-grade uvicorn configuration with graceful shutdown support
+    config = uvicorn.Config(
+        app,
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8080")),
+        log_level=os.getenv("LOG_LEVEL", "info").lower(),
+        access_log=True,
+        # Enable graceful shutdown with timeout
+        timeout_graceful_shutdown=int(os.getenv("SHUTDOWN_TIMEOUT", "30")),
+        # Optimize for production
+        workers=1,  # Single worker for signal handling
+        backlog=2048,
+        max_requests=10000,
+        max_requests_jitter=1000,
+    )
+    
+    server = uvicorn.Server(config)
+    
+    try:
+        logger.info("Starting Message Routing Engine server with graceful shutdown support...")
+        server.run()
+    except KeyboardInterrupt:
+        logger.info("Server shutdown requested via KeyboardInterrupt")
+    except Exception as e:
+        logger.error(f"Server error: {e}")
+        raise
+    finally:
+        logger.info("Server shutdown complete")
