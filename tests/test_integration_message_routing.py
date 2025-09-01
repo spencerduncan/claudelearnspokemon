@@ -55,6 +55,7 @@ class MockClaudeProcess:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestMessageRouterIntegration:
     """Test complete MessageRouter integration."""
 
@@ -379,6 +380,7 @@ class TestMessageRouterIntegration:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestRoutingAdapterIntegration:
     """Test RoutingAdapter integration with existing systems."""
 
@@ -545,6 +547,7 @@ class TestRoutingAdapterIntegration:
 
 
 @pytest.mark.fast
+@pytest.mark.medium
 class TestProductionReadiness:
     """Test production readiness scenarios."""
 

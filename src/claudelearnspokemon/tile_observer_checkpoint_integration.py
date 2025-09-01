@@ -209,7 +209,7 @@ class TileObserverCheckpointIntegration:
         self.enable_similarity_caching = enable_similarity_caching
 
         # Performance tracking (scientific measurement focus)
-        self._performance_metrics = {
+        self._performance_metrics: dict[str, Any] = {
             "enrichment_operations": 0,
             "enrichment_total_time_ms": 0.0,
             "similarity_calculations": 0,
@@ -1041,7 +1041,7 @@ class TileObserverCheckpointIntegration:
 
             # Compare NPC distribution patterns
             distribution_similarity = self._compare_npc_distributions(
-                npc_positions_a, npc_positions_b, tiles_a.shape
+                npc_positions_a, npc_positions_b, (tiles_a.shape[0], tiles_a.shape[1])
             )
 
             # Weighted combination

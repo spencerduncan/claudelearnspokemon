@@ -29,6 +29,7 @@ from claudelearnspokemon.session_manager import (
 
 @pytest.mark.unit
 @pytest.mark.fast
+@pytest.mark.medium
 class TestSessionConfig(unittest.TestCase):
     """Test SessionConfig data class."""
 
@@ -59,6 +60,7 @@ class TestSessionConfig(unittest.TestCase):
 
 @pytest.mark.unit
 @pytest.mark.fast
+@pytest.mark.medium
 class TestSessionInfo(unittest.TestCase):
     """Test SessionInfo data class."""
 
@@ -75,6 +77,7 @@ class TestSessionInfo(unittest.TestCase):
 
 @pytest.mark.unit
 @pytest.mark.fast
+@pytest.mark.medium
 class TestSessionManager(unittest.TestCase):
     """Test SessionManager core functionality."""
 
@@ -298,6 +301,7 @@ class TestSessionManager(unittest.TestCase):
 
 @pytest.mark.unit
 @pytest.mark.fast
+@pytest.mark.medium
 class TestSessionManagerFactory(unittest.TestCase):
     """Test factory function."""
 

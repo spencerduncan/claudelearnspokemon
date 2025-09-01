@@ -79,7 +79,7 @@ class BackwardCompatibilityValidator:
         """
         logger.info("Starting comprehensive backward compatibility validation")
 
-        results = {
+        results: dict[str, Any] = {
             "validation_timestamp": time.time(),
             "api_compatibility": self._validate_api_compatibility(),
             "functional_compatibility": self._validate_functional_compatibility(),
@@ -112,7 +112,7 @@ class BackwardCompatibilityValidator:
         """
         logger.info("Validating API compatibility...")
 
-        api_results = {
+        api_results: dict[str, Any] = {
             "tile_observer_api": self._validate_tile_observer_api(),
             "checkpoint_manager_api": self._validate_checkpoint_manager_api(),
             "all_methods_preserved": True,
@@ -169,7 +169,7 @@ class BackwardCompatibilityValidator:
                     tiles, np.ndarray
                 ) and tiles.shape == (20, 18)
             except Exception as e:
-                method_tests["capture_tiles"]["error"] = str(e)
+                method_tests["capture_tiles"]["error"] = str(e)  # type: ignore[assignment]
 
             # Test analyze_tile_grid
             try:
@@ -177,7 +177,7 @@ class BackwardCompatibilityValidator:
                     analysis = observer.analyze_tile_grid(tiles)
                     method_tests["analyze_tile_grid"]["functional"] = isinstance(analysis, dict)
             except Exception as e:
-                method_tests["analyze_tile_grid"]["error"] = str(e)
+                method_tests["analyze_tile_grid"]["error"] = str(e)  # type: ignore[assignment]
 
             # Test detect_patterns
             try:
@@ -186,7 +186,7 @@ class BackwardCompatibilityValidator:
                     matches = observer.detect_patterns(tiles, pattern)
                     method_tests["detect_patterns"]["functional"] = isinstance(matches, list)
             except Exception as e:
-                method_tests["detect_patterns"]["error"] = str(e)
+                method_tests["detect_patterns"]["error"] = str(e)  # type: ignore[assignment]
 
             # Test learn_tile_properties
             try:
@@ -194,7 +194,7 @@ class BackwardCompatibilityValidator:
                 observer.learn_tile_properties(observations)
                 method_tests["learn_tile_properties"]["functional"] = True
             except Exception as e:
-                method_tests["learn_tile_properties"]["error"] = str(e)
+                method_tests["learn_tile_properties"]["error"] = str(e)  # type: ignore[assignment]
 
             # Test identify_npcs
             try:
@@ -202,7 +202,7 @@ class BackwardCompatibilityValidator:
                     npcs = observer.identify_npcs(tiles)
                     method_tests["identify_npcs"]["functional"] = isinstance(npcs, list)
             except Exception as e:
-                method_tests["identify_npcs"]["error"] = str(e)
+                method_tests["identify_npcs"]["error"] = str(e)  # type: ignore[assignment]
 
             # Test find_path
             try:
@@ -210,7 +210,7 @@ class BackwardCompatibilityValidator:
                     path = observer.find_path(tiles, (0, 0), (5, 5))
                     method_tests["find_path"]["functional"] = isinstance(path, list)
             except Exception as e:
-                method_tests["find_path"]["error"] = str(e)
+                method_tests["find_path"]["error"] = str(e)  # type: ignore[assignment]
 
             compatible = all(
                 test["exists"] and test["callable"] and test.get("functional", False)
@@ -257,6 +257,7 @@ class BackwardCompatibilityValidator:
                         "callable": hasattr(manager, method_name)
                         and callable(getattr(manager, method_name)),
                         "functional": False,  # Will test below
+                        "error": None,  # Initialize error field for string assignments
                     }
 
                 # Test functional compatibility
@@ -308,26 +309,26 @@ class BackwardCompatibilityValidator:
                         method_tests["get_checkpoint_size"]["functional"] = isinstance(size, int)
 
                 except Exception as e:
-                    method_tests["save_checkpoint"]["error"] = str(e)
+                    method_tests["save_checkpoint"]["error"] = str(e)  # type: ignore[assignment]
 
                 # Test other methods that don't require saved checkpoints
                 try:
                     metrics = manager.get_metrics()
                     method_tests["get_metrics"]["functional"] = isinstance(metrics, dict)
                 except Exception as e:
-                    method_tests["get_metrics"]["error"] = str(e)
+                    method_tests["get_metrics"]["error"] = str(e)  # type: ignore[assignment]
 
                 try:
                     checkpoints = manager.list_checkpoints({})
                     method_tests["list_checkpoints"]["functional"] = isinstance(checkpoints, list)
                 except Exception as e:
-                    method_tests["list_checkpoints"]["error"] = str(e)
+                    method_tests["list_checkpoints"]["error"] = str(e)  # type: ignore[assignment]
 
                 try:
                     nearest = manager.find_nearest_checkpoint("test_location")
                     method_tests["find_nearest_checkpoint"]["functional"] = isinstance(nearest, str)
                 except Exception as e:
-                    method_tests["find_nearest_checkpoint"]["error"] = str(e)
+                    method_tests["find_nearest_checkpoint"]["error"] = str(e)  # type: ignore[assignment]
 
                 try:
                     pruning_result = manager.prune_checkpoints(1, dry_run=True)
@@ -335,7 +336,7 @@ class BackwardCompatibilityValidator:
                         pruning_result, dict
                     )
                 except Exception as e:
-                    method_tests["prune_checkpoints"]["error"] = str(e)
+                    method_tests["prune_checkpoints"]["error"] = str(e)  # type: ignore[assignment]
 
                 compatible = all(
                     test["exists"] and test["callable"] and test.get("functional", False)
@@ -936,7 +937,9 @@ class BackwardCompatibilityValidator:
 
 
 def run_compatibility_validation(
-    enable_performance_analysis: bool = True, save_results: bool = True, output_path: Path = None
+    enable_performance_analysis: bool = True,
+    save_results: bool = True,
+    output_path: Path | None = None,
 ) -> dict[str, Any]:
     """
     Run comprehensive backward compatibility validation.

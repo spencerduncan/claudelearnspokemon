@@ -665,6 +665,45 @@ class QueryBuilder:
 
         return []
 
+    def store_pattern(self, pattern: MCPDataPattern) -> dict[str, Any]:
+        """
+        Store a pattern in the MCP memory system.
+
+        Args:
+            pattern: Pattern to store
+
+        Returns:
+            Dictionary with success status and memory ID
+        """
+        try:
+            mcp_data = pattern.to_mcp_format()
+            result = store_memory(**mcp_data)
+            return result
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def search_patterns(self, query: str, limit: int | None = None) -> dict[str, Any]:
+        """
+        Search for patterns using query string.
+
+        Args:
+            query: Search query string
+            limit: Maximum results to return
+
+        Returns:
+            Dictionary with search results
+        """
+        try:
+            query_params = {
+                "pattern": query,
+                "limit": limit or self.default_limit,
+                "min_confidence": self.min_confidence_threshold,
+            }
+            result = search_memories(**query_params)
+            return result
+        except Exception as e:
+            return {"success": False, "error": str(e), "results": []}
+
     def _build_pattern_query(self, filters: dict[str, Any]) -> dict[str, Any]:
         """
         Build optimized query parameters for pattern search.
