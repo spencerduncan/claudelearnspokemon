@@ -207,7 +207,7 @@ def demonstrate_real_time_monitoring(manager: ClaudeCodeManager):
     if active_alerts:
         print(f"\n🚨 Found {len(active_alerts)} active alerts:")
         for alert in active_alerts:
-            print(f"  - [{alert['severity'].upper()}] {alert['message']}")
+            print(f"  - [{alert['severity'].value.upper()}] {alert['message']}")
     else:
         print("No active alerts found")
 

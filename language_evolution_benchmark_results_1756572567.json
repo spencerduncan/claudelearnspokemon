@@ -1,0 +1,103 @@
+{
+  "timestamp": "2025-08-30 16:49:27 UTC",
+  "validation_status": "CONCERNS",
+  "overall_performance": {
+    "total_benchmarks": 7,
+    "benchmarks_passed": 0,
+    "average_improvement": 0,
+    "performance_claims_validated": []
+  },
+  "results": [
+    {
+      "component": "Pattern Analysis",
+      "operation": "analyze_patterns",
+      "target_ms": 200.0,
+      "actual_ms": -1,
+      "improvement_factor": 0,
+      "sample_count": 0,
+      "min_ms": 0,
+      "max_ms": 0,
+      "std_dev_ms": 0,
+      "confidence_95_lower": 0,
+      "confidence_95_upper": 0
+    },
+    {
+      "component": "Context Analysis",
+      "operation": "analyze_context",
+      "target_ms": 150.0,
+      "actual_ms": -1,
+      "improvement_factor": 0,
+      "sample_count": 0,
+      "min_ms": 0,
+      "max_ms": 0,
+      "std_dev_ms": 0,
+      "confidence_95_lower": 0,
+      "confidence_95_upper": 0
+    },
+    {
+      "component": "Proposal Generation",
+      "operation": "generate_proposals",
+      "target_ms": 100.0,
+      "actual_ms": -1,
+      "improvement_factor": 0,
+      "sample_count": 0,
+      "min_ms": 0,
+      "max_ms": 0,
+      "std_dev_ms": 0,
+      "confidence_95_lower": 0,
+      "confidence_95_upper": 0
+    },
+    {
+      "component": "Macro Proposals",
+      "operation": "generate_macros",
+      "target_ms": 80.0,
+      "actual_ms": -1,
+      "improvement_factor": 0,
+      "sample_count": 0,
+      "min_ms": 0,
+      "max_ms": 0,
+      "std_dev_ms": 0,
+      "confidence_95_lower": 0,
+      "confidence_95_upper": 0
+    },
+    {
+      "component": "Language Validation",
+      "operation": "validate_proposal",
+      "target_ms": 50.0,
+      "actual_ms": -1,
+      "improvement_factor": 0,
+      "sample_count": 0,
+      "min_ms": 0,
+      "max_ms": 0,
+      "std_dev_ms": 0,
+      "confidence_95_lower": 0,
+      "confidence_95_upper": 0
+    },
+    {
+      "component": "Syntax Validation",
+      "operation": "validate_syntax",
+      "target_ms": 40.0,
+      "actual_ms": -1,
+      "improvement_factor": 0,
+      "sample_count": 0,
+      "min_ms": 0,
+      "max_ms": 0,
+      "std_dev_ms": 0,
+      "confidence_95_lower": 0,
+      "confidence_95_upper": 0
+    },
+    {
+      "component": "End-to-End Pipeline",
+      "operation": "complete_pipeline",
+      "target_ms": 400.0,
+      "actual_ms": -1,
+      "improvement_factor": 0,
+      "sample_count": 0,
+      "min_ms": 0,
+      "max_ms": 0,
+      "std_dev_ms": 0,
+      "confidence_95_lower": 0,
+      "confidence_95_upper": 0
+    }
+  ]
+}
