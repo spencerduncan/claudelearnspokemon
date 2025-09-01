@@ -2014,6 +2014,22 @@ class OpusStrategist:
                     f"strength={data['strength']}"
                 )
 
+        # Add compression and preservation guidance for multiple results
+        compression_guidance = []
+        if len(parallel_results) > 2:  # When dealing with multiple results
+            compression_guidance.extend(
+                [
+                    "",
+                    "ANALYSIS GUIDANCE:",
+                    "When analyzing multiple parallel results, ensure to preserve critical patterns",
+                    "that demonstrate consistent success. Compress less important details while",
+                    "maintaining strategic value of high-frequency and high-success patterns.",
+                    "Provide a compressed summary that focuses on actionable insights.",
+                    "",
+                ]
+            )
+
+        prompt_parts.extend(compression_guidance)
         prompt_parts.extend(
             [
                 "",
