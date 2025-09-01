@@ -24,6 +24,7 @@ from claudelearnspokemon.script_compiler import (
     ScriptParser,
     TokenType,
 )
+from claudelearnspokemon.opus_strategist import InputSanitizer  # Guardian security integration
 
 
 @pytest.mark.fast

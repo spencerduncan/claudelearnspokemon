@@ -783,6 +783,231 @@ class TestPerformanceTargets(unittest.TestCase):
         )
 
 
+@pytest.mark.fast
+class TestInputSanitizerSecurity(unittest.TestCase):
+    """Guardian Security: Comprehensive attack prevention validation."""
+
+    def test_json_injection_attack_prevention(self):
+        """Test prevention of JSON injection attacks."""
+        from claudelearnspokemon.opus_strategist import InputSanitizer
+        
+        # Attack scenario 1: Script injection in JSON
+        malicious_json = '{"script": "<script>alert(\\"xss\\")</script>", "data": "normal"}'
+        with self.assertRaises(ValueError) as context:
+            InputSanitizer.safe_json_loads(malicious_json)
+        self.assertIn("Dangerous pattern", str(context.exception))
+        
+        # Attack scenario 2: JavaScript protocol
+        js_injection = '{"url": "javascript:eval(\\"malicious()\\")", "safe": true}'
+        with self.assertRaises(ValueError):
+            InputSanitizer.safe_json_loads(js_injection)
+    
+    def test_memory_exhaustion_attack_prevention(self):
+        """Test prevention of memory exhaustion attacks."""
+        from claudelearnspokemon.opus_strategist import InputSanitizer
+        
+        # Attack scenario 3: Oversized JSON
+        large_json = '{"data": "' + 'A' * (InputSanitizer.MAX_JSON_SIZE + 1) + '"}'
+        with self.assertRaises(ValueError) as context:
+            InputSanitizer.safe_json_loads(large_json)
+        self.assertIn("exceeds limit", str(context.exception))
+        
+        # Attack scenario 4: Excessive nesting
+        nested_attack = '{"a":' * 2000 + '{}' + '}' * 2000
+        with self.assertRaises(ValueError):
+            InputSanitizer.safe_json_loads(nested_attack)
+    
+    def test_sql_injection_attack_prevention(self):
+        """Test prevention of SQL injection patterns."""
+        from claudelearnspokemon.opus_strategist import InputSanitizer
+        
+        # Attack scenario 5: SQL injection
+        sql_injection = '{"query": "SELECT * FROM users; DROP TABLE users;--", "id": 1}'
+        with self.assertRaises(ValueError):
+            InputSanitizer.safe_json_loads(sql_injection)
+        
+        # Attack scenario 6: Union select attack
+        union_attack = '{"filter": "1 UNION SELECT password FROM admin", "limit": 10}'
+        with self.assertRaises(ValueError):
+            InputSanitizer.safe_json_loads(union_attack)
+    
+    def test_path_traversal_attack_prevention(self):
+        """Test prevention of path traversal attacks."""
+        from claudelearnspokemon.opus_strategist import InputSanitizer
+        
+        # Attack scenario 7: Path traversal
+        path_attack = '{"file": "../../../etc/passwd", "type": "config"}'
+        with self.assertRaises(ValueError):
+            InputSanitizer.safe_json_loads(path_attack)
+        
+        # Attack scenario 8: Windows path traversal
+        win_attack = '{"path": "..\\\\..\\\\windows\\\\system32", "action": "read"}'
+        with self.assertRaises(ValueError):
+            InputSanitizer.safe_json_loads(win_attack)
+    
+    def test_command_injection_attack_prevention(self):
+        """Test prevention of command injection attacks."""
+        from claudelearnspokemon.opus_strategist import InputSanitizer
+        
+        # Attack scenario 9: Command injection
+        cmd_injection = '{"command": "ls -la; rm -rf /", "args": []}'
+        with self.assertRaises(ValueError):
+            InputSanitizer.safe_json_loads(cmd_injection)
+        
+        # Attack scenario 10: Environment variable injection
+        env_injection = '{"config": "${PATH}/malicious", "enabled": true}'
+        with self.assertRaises(ValueError):
+            InputSanitizer.safe_json_loads(env_injection)
+    
+    def test_recursive_sanitization_depth_limiting(self):
+        """Test recursive sanitization with depth limiting."""
+        from claudelearnspokemon.opus_strategist import InputSanitizer
+        
+        # Attack scenario 11: Deep recursion attack
+        deep_structure = {}
+        current = deep_structure
+        for i in range(InputSanitizer.MAX_RECURSION_DEPTH + 10):
+            current['nested'] = {}
+            current = current['nested']
+        
+        with self.assertRaises(ValueError) as context:
+            InputSanitizer.sanitize_json_data(deep_structure)
+        self.assertIn("Recursion depth", str(context.exception))
+    
+    def test_collection_size_limiting(self):
+        """Test collection size limiting for bounded security."""
+        from claudelearnspokemon.opus_strategist import InputSanitizer
+        
+        # Attack scenario 12: Oversized list
+        large_list = list(range(InputSanitizer.MAX_COLLECTION_SIZE + 10))
+        with self.assertRaises(ValueError) as context:
+            InputSanitizer.sanitize_json_data(large_list)
+        self.assertIn("List size", str(context.exception))
+        
+        # Attack scenario 13: Oversized dictionary
+        large_dict = {f"key_{i}": f"value_{i}" for i in range(InputSanitizer.MAX_COLLECTION_SIZE + 10)}
+        with self.assertRaises(ValueError) as context:
+            InputSanitizer.sanitize_json_data(large_dict)
+        self.assertIn("Dictionary size", str(context.exception))
+    
+    def test_string_length_limiting(self):
+        """Test string length limiting for bounded security."""
+        from claudelearnspokemon.opus_strategist import InputSanitizer
+        
+        # Attack scenario 14: Oversized string
+        huge_string = 'A' * (InputSanitizer.MAX_STRING_LENGTH + 100)
+        with self.assertRaises(ValueError) as context:
+            InputSanitizer.sanitize_json_data(huge_string)
+        self.assertIn("String length", str(context.exception))
+    
+    def test_protocol_handler_attack_prevention(self):
+        """Test prevention of malicious protocol handlers."""
+        from claudelearnspokemon.opus_strategist import InputSanitizer
+        
+        # Attack scenario 15: File protocol
+        file_attack = '{"resource": "file://etc/passwd", "type": "external"}'
+        with self.assertRaises(ValueError):
+            InputSanitizer.safe_json_loads(file_attack)
+        
+        # Attack scenario 16: FTP protocol
+        ftp_attack = '{"backup": "ftp://malicious.com/data", "secure": false}'
+        with self.assertRaises(ValueError):
+            InputSanitizer.safe_json_loads(ftp_attack)
+
+
+@pytest.mark.fast  
+class TestStrategicContextSecurity(unittest.TestCase):
+    """Guardian Security: StrategicContext security and performance validation."""
+    
+    def test_secure_deserialization(self):
+        """Test secure deserialization using InputSanitizer."""
+        from claudelearnspokemon.opus_strategist import StrategicContext
+        import time
+        
+        # Valid data should pass
+        valid_data = {
+            'strategy_id': 'test_strategy',
+            'game_state': {'level': 1, 'health': 100},
+            'execution_patterns': ['pattern1', 'pattern2'],
+            'success_metrics': {'accuracy': 0.85},
+            'pattern_correlations': {'pattern1': 0.7},
+            'timestamp': time.time(),
+            'worker_insights': [{'worker': 'w1', 'insight': 'test'}]
+        }
+        
+        context = StrategicContext.from_dict(valid_data)
+        self.assertEqual(context.strategy_id, 'test_strategy')
+        
+        # Attack scenario 17: Malicious data should fail
+        malicious_data = valid_data.copy()
+        malicious_data['strategy_id'] = '<script>alert("xss")</script>'
+        
+        with self.assertRaises(ValueError):
+            StrategicContext.from_dict(malicious_data)
+
+
+@pytest.mark.fast
+class TestStrategicContinuityComponents(unittest.TestCase):
+    """Guardian Security: Strategic continuity component validation."""
+    
+    def test_strategic_plan_version_security(self):
+        """Test StrategicPlanVersion security and performance."""
+        from claudelearnspokemon.opus_strategist import StrategicPlanVersion
+        import time
+        
+        # Valid version creation
+        version1 = StrategicPlanVersion(1, 0, 0)
+        version2 = StrategicPlanVersion(1, 0, 1)
+        
+        # Test secure comparison performance <23ms
+        start_time = time.time()
+        result = version1 < version2
+        comparison_time = (time.time() - start_time) * 1000
+        
+        self.assertTrue(result)
+        self.assertLess(comparison_time, 23, f"Version comparison took {comparison_time:.1f}ms, target <23ms")
+        
+        # Attack scenario 18: Invalid version components
+        with self.assertRaises(ValueError):
+            StrategicPlanVersion(-1, 0, 0)  # Negative version
+
+
+@pytest.mark.fast
+class TestEndToEndSecurityPipeline(unittest.TestCase):
+    """Guardian Security: End-to-end security pipeline validation."""
+    
+    def test_full_security_pipeline(self):
+        """Test complete security pipeline with all components."""
+        from claudelearnspokemon.opus_strategist import (
+            InputSanitizer, StrategicContext, StrategicPlanVersion,
+            DirectiveConflict, StrategicDecision, StrategicOutcome
+        )
+        import time
+        
+        # Step 1: Secure data input
+        raw_data = {
+            'strategy_id': 'pipeline_test',
+            'game_state': {'level': 5, 'health': 80},
+            'execution_patterns': ['secure_pattern'],
+            'success_metrics': {'score': 0.8},
+            'pattern_correlations': {'pattern1': 0.6},
+            'timestamp': time.time(),
+            'worker_insights': [{'insight': 'pipeline_working'}]
+        }
+        
+        # Sanitize through InputSanitizer
+        sanitized_data = InputSanitizer.sanitize_json_data(raw_data)
+        self.assertIsInstance(sanitized_data, dict)
+        
+        # Step 2: Create StrategicContext  
+        context = StrategicContext.from_dict(sanitized_data)
+        self.assertEqual(context.strategy_id, 'pipeline_test')
+        
+        # Step 3: Version management
+        version = StrategicPlanVersion(1, 0, 0)
+        self.assertEqual(str(version), '1.0.0')
+
+
 if __name__ == "__main__":
     # Run with performance timing
     print("=== OpusStrategist Test Suite - Performance Focus ===")
