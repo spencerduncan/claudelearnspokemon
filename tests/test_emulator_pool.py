@@ -1924,6 +1924,8 @@ class TestPokemonGymClientSimplification:
             "total_requests": 0,
             "average_request_time_ms": 0,
             "consecutive_failures": 0,
+            "circuit_breaker_failures": 0,
+            "circuit_breaker_open": False,
             "temporarily_disabled": False,
         }
         assert metrics == expected
