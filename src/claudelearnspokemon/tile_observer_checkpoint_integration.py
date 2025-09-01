@@ -333,6 +333,23 @@ class TileObserverCheckpointIntegration:
             tiles_a = self._extract_tile_grid_safe(state_a)
             tiles_b = self._extract_tile_grid_safe(state_b)
 
+            # Handle case where tile extraction fails
+            if tiles_a is None or tiles_b is None:
+                logger.warning("Failed to extract tile grids for game state similarity calculation")
+                return GameStateSimilarityResult(
+                    tile_pattern_similarity=0.0,
+                    position_similarity=0.0,
+                    semantic_similarity=0.0,
+                    strategic_similarity=0.0,
+                    overall_similarity=0.0,
+                    confidence_score=0.0,
+                    calculation_time_ms=(time.perf_counter() - start_time) * 1000,
+                    cache_hit=False,
+                    comparison_complexity=0,
+                    statistical_significance=1.0,
+                    false_positive_likelihood=1.0,
+                )
+
             # Calculate similarity components with statistical validation
             tile_similarity = self._calculate_tile_pattern_similarity(tiles_a, tiles_b)
             position_similarity = self._calculate_position_similarity(state_a, state_b)
@@ -436,6 +453,27 @@ class TileObserverCheckpointIntegration:
         try:
             # Extract tile grid for analysis
             tiles = self._extract_tile_grid_safe(game_state)
+
+            # Handle case where tiles extraction fails
+            if tiles is None:
+                logger.warning(f"Failed to extract tile grid for checkpoint {checkpoint_id}")
+                return TileSemanticMetadata(
+                    walkable_tile_count=0,
+                    solid_tile_count=0,
+                    unknown_tile_count=0,
+                    semantic_richness_score=0.0,
+                    unique_patterns_detected=0,
+                    pattern_complexity_score=0.0,
+                    repeating_pattern_ratio=0.0,
+                    npc_interaction_potential=0.0,
+                    exploration_efficiency=0.0,
+                    strategic_importance_score=0.0,
+                    analysis_duration_ms=(time.perf_counter() - start_time) * 1000,
+                    confidence_score=0.0,
+                    last_analyzed_timestamp=time.time(),
+                    tile_pattern_hash="",
+                    compressed_tile_signature=b"",
+                )
 
             # Generate comprehensive semantic analysis
             walkable_count, solid_count, unknown_count = self._count_tile_types(tiles)
@@ -863,8 +901,8 @@ class TileObserverCheckpointIntegration:
         """Calculate statistical confidence in similarity calculation."""
         # Higher confidence when all components agree
         similarities = [tile_sim, pos_sim, sem_sim, strat_sim]
-        variance = np.var(similarities)
-        mean_similarity = np.mean(similarities)
+        variance = float(np.var(similarities))
+        mean_similarity = float(np.mean(similarities))
 
         # Lower variance = higher confidence
         confidence = max(0.0, 1.0 - variance * 2.0)
@@ -1085,7 +1123,7 @@ class TileObserverCheckpointIntegration:
                         similarity = 1.0  # Both zero = similar
                     metric_similarities.append(similarity)
 
-            return np.mean(metric_similarities) if metric_similarities else 0.0
+            return float(np.mean(metric_similarities)) if metric_similarities else 0.0
 
         except Exception:
             return 0.0

@@ -148,7 +148,6 @@ class TestIntegrationInitialization:
         ), f"Similarity weights sum to {weight_sum}, should be 1.0"
 
 
-@pytest.mark.fast
 class TestMetadataEnrichment:
     """Test metadata enrichment functionality with performance validation."""
 
@@ -183,7 +182,8 @@ class TestMetadataEnrichment:
         # Enhanced strategic value should be calculated
         assert enriched_metadata.strategic_value != base_checkpoint_metadata.strategic_value
 
-    @pytest.mark.fast
+    @pytest.mark.performance
+    @pytest.mark.slow
     def test_enrich_checkpoint_metadata_performance_consistency(
         self, integration, sample_game_state, base_checkpoint_metadata
     ):
