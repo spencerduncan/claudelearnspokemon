@@ -1,13 +1,12 @@
 """
 Test suite for compatibility validation module.
 
-Tests the clean code validation functions following Uncle Bob's principles:
+Tests the validation functions:
 - Each validation function tested independently
 - Clear test names that reveal intent
 - Comprehensive edge case coverage
 - Error message validation for user experience
 
-Author: Uncle Bot - Clean Code Testing Craftsmanship
 """
 
 import pytest
@@ -26,7 +25,7 @@ from src.claudelearnspokemon.compatibility.validation import (
 @pytest.mark.fast
 @pytest.mark.medium
 class TestServerUrlPortValidation:
-    """Test server port validation with Uncle Bob's thorough approach."""
+    """Test server port validation with comprehensive edge cases."""
 
     def test_valid_integer_ports(self):
         """Test validation passes for valid integer ports."""
@@ -236,7 +235,7 @@ class TestInputDelayParameterValidation:
 @pytest.mark.fast
 @pytest.mark.medium
 class TestClientCreationParametersValidation:
-    """Test the main coordinator validation function - Uncle Bob's orchestration pattern."""
+    """Test the main coordinator validation function."""
 
     def test_valid_parameter_set(self):
         """Test validation passes for complete valid parameter set."""
@@ -353,7 +352,7 @@ class TestClientCreationParametersValidation:
 @pytest.mark.fast
 @pytest.mark.medium
 class TestValidationErrorMessages:
-    """Test that error messages are clear and actionable - Uncle Bob's user empathy."""
+    """Test that error messages are clear and actionable."""
 
     def test_error_messages_are_descriptive(self):
         """Test all error messages provide clear guidance for users."""
@@ -395,14 +394,3 @@ class TestValidationErrorMessages:
             validate_server_url_port(-1)
         except Exception as e:
             assert isinstance(e, ValidationError)
-
-
-# Uncle Bob's testing wisdom: "Tests are not just about verifying behavior -
-# they document the system's intended behavior and serve as living examples."
-#
-# These tests demonstrate:
-# 1. Clear intent through descriptive names
-# 2. Comprehensive edge case coverage
-# 3. Fast feedback for TDD cycles
-# 4. Documentation of expected behavior
-# 5. Validation of user experience (error messages)

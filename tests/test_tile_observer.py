@@ -1,11 +1,6 @@
 """
 Tests for TileObserver component.
 
-Following Uncle Bob's TDD principles:
-- Red: Write failing tests first
-- Green: Implement minimal code to pass
-- Refactor: Clean up while keeping tests green
-
 Test coverage based on design specification requirements:
 - Capture 20x18 tile grids in <50ms
 - Identify player and NPC positions
