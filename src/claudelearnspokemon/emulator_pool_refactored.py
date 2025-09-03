@@ -13,7 +13,7 @@ import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 
 import requests
 
@@ -245,7 +245,7 @@ class PokemonGymClient(
             },
         )
 
-        def http_operation():
+        def http_operation() -> Any:
             url = f"{self.base_url}{endpoint}"
 
             # Prepare request arguments
@@ -327,7 +327,7 @@ class EmulatorPool(
 
         context = self.create_context("initialize", {"pool_size": self.pool_size})
 
-        def init_operation():
+        def init_operation() -> None:
             with self._pool_lock:
                 self._connect_to_docker()
                 self._create_containers()
@@ -347,7 +347,7 @@ class EmulatorPool(
         """Acquire an available emulator client."""
         context = self.create_context("acquire", {"timeout": timeout})
 
-        def acquire_operation():
+        def acquire_operation() -> Optional[PokemonGymClient]:
             with self._pool_lock:
                 for i, (client, available) in enumerate(
                     zip(self._clients, self._available_clients, strict=False)
@@ -373,7 +373,7 @@ class EmulatorPool(
         """Release an emulator client back to the pool."""
         context = self.create_context("release", {"client_port": client.port})
 
-        def release_operation():
+        def release_operation() -> None:
             with self._pool_lock:
                 for i, pool_client in enumerate(self._clients):
                     if pool_client.port == client.port:
@@ -392,7 +392,7 @@ class EmulatorPool(
         """Shutdown all emulator containers."""
         context = self.create_context("shutdown", {"container_count": len(self._containers)})
 
-        def shutdown_operation():
+        def shutdown_operation() -> None:
             with self._pool_lock:
                 for container in self._containers:
                     try:

@@ -263,7 +263,7 @@ class OpusStrategist(
             },
         )
 
-        def process_request():
+        def process_request() -> Any:
             self.record_request()
 
             # Check cache if enabled
@@ -365,7 +365,7 @@ class OpusStrategist(
         """Extract actionable strategic directives from response."""
         context = self.create_context("extract_directives")
 
-        def extract():
+        def extract() -> list[str]:
             if not strategy_response or not strategy_response.directives:
                 return []
 
@@ -523,7 +523,7 @@ class OpusStrategist(
 
         context = self.create_context("language_evolution", {"script_count": len(recent_scripts)})
 
-        def analyze():
+        def analyze() -> list[EvolutionProposal]:
             return self.language_analyzer.analyze_evolution_opportunities(
                 recent_scripts, execution_results
             )

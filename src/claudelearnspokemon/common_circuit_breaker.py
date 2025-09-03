@@ -40,7 +40,7 @@ class CircuitBreakerConfig:
     expected_exceptions: tuple[type[Exception], ...] = ()
     fallback_strategy: FallbackStrategy = FallbackStrategy.RAISE_EXCEPTION
     fallback_value: Any = None
-    fallback_function: Callable | None = None
+    fallback_function: Callable[..., Any] | None = None
 
     def to_circuit_config(self) -> CircuitConfig:
         """Convert to standard CircuitConfig."""
@@ -215,8 +215,8 @@ def with_circuit_breaker(
     operation_name: str | None = None,
     fallback_strategy: FallbackStrategy = FallbackStrategy.RAISE_EXCEPTION,
     fallback_value: Any = None,
-    fallback_function: Callable | None = None,
-):
+    fallback_function: Callable[..., Any] | None = None,
+) -> Callable[[Callable[..., T]], Callable[..., T | None]]:
     """
     Decorator to add circuit breaker protection to methods.
 
@@ -270,7 +270,7 @@ def protected_operation(
     operation_name: str | None = None,
     fallback_strategy: FallbackStrategy = FallbackStrategy.RAISE_EXCEPTION,
     fallback_value: Any = None,
-):
+) -> Callable[[type], type]:
     """
     Class decorator to add circuit breaker protection to all public methods.
 
@@ -281,11 +281,11 @@ def protected_operation(
         fallback_value: Default fallback value for all operations
     """
 
-    def class_decorator(cls):
+    def class_decorator(cls: type) -> type:
         # Store original init
         original_init = cls.__init__
 
-        def new_init(self, *args, **kwargs):
+        def new_init(self, *args, **kwargs) -> None:
             # Initialize with circuit breaker
             if circuit_config:
                 config = circuit_config
@@ -341,7 +341,7 @@ class CircuitBreakerRegistry:
                 cls._instance._initialized = False
             return cls._instance
 
-    def __init__(self):
+    def __init__(self) -> None:
         if getattr(self, "_initialized", False):
             return
 
