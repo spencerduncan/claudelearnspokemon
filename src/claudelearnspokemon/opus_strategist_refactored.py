@@ -160,10 +160,30 @@ class OpusStrategist(
         self.enable_predictive_planning = enabled and PREDICTIVE_PLANNING_AVAILABLE
 
         if self.enable_predictive_planning:
-            self.pattern_analyzer = _predictive_planning_classes["ExecutionPatternAnalyzer"]()
-            self.bayesian_predictor = _predictive_planning_classes["BayesianPredictor"]()
-            self.contingency_generator = _predictive_planning_classes["ContingencyGenerator"]()
-            self.prediction_cache = _predictive_planning_classes["PredictionCache"]()
+            ExecutionPatternAnalyzer = _predictive_planning_classes["ExecutionPatternAnalyzer"]
+            BayesianPredictor = _predictive_planning_classes["BayesianPredictor"]
+            ContingencyGenerator = _predictive_planning_classes["ContingencyGenerator"]
+            PredictionCache = _predictive_planning_classes["PredictionCache"]
+            
+            if ExecutionPatternAnalyzer is not None:
+                self.pattern_analyzer = ExecutionPatternAnalyzer()
+            else:
+                self.pattern_analyzer = None
+                
+            if BayesianPredictor is not None:
+                self.bayesian_predictor = BayesianPredictor()
+            else:
+                self.bayesian_predictor = None
+                
+            if ContingencyGenerator is not None:
+                self.contingency_generator = ContingencyGenerator()
+            else:
+                self.contingency_generator = None
+                
+            if PredictionCache is not None:
+                self.prediction_cache = PredictionCache()
+            else:
+                self.prediction_cache = None
         else:
             self.pattern_analyzer = None
             self.bayesian_predictor = None
@@ -317,12 +337,13 @@ class OpusStrategist(
         return StrategyResponse(
             strategy_id=f"fallback_{int(time.time())}",
             experiments=[],
-            directives=["Wait and observe current state"],
-            confidence=0.1,
-            fallback_reason=reason,
+            strategic_insights=["Wait and observe current state"],
+            next_checkpoints=[],
             metadata={
                 "priority": request.priority.name,
                 "fallback_timestamp": time.time(),
+                "confidence": 0.1,
+                "fallback_reason": reason,
             },
         )
 
@@ -359,12 +380,14 @@ class OpusStrategist(
 
             return unique_directives
 
-        return self.safe_execute(
+        result: list[str] | None = self.safe_execute(
             operation=extract,
             context=context,
+            fallback_value=[],
             reraise_as=DirectiveExtractionError,
             severity=ErrorSeverity.MEDIUM,
         )
+        return result if result is not None else []
 
     def _request_opus_strategy(
         self,
@@ -379,11 +402,15 @@ class OpusStrategist(
         # Get timeout based on priority
         timeout = self._get_timeout_for_priority(priority)
 
-        # Request from Claude
-        response = self.claude_manager.send_message(prompt, timeout=timeout)
+        # Request from Claude - assuming send_message method exists
+        if hasattr(self.claude_manager, 'send_message'):
+            response = self.claude_manager.send_message(prompt, timeout=timeout)
+        else:
+            # Fallback method if send_message doesn't exist
+            response = getattr(self.claude_manager, 'get_response', lambda x, **kwargs: None)(prompt, timeout=timeout)
 
         if not response:
-            raise ResponseTimeoutError("No response from Opus")
+            raise ResponseTimeoutError("No response from Opus", timeout_seconds=timeout)
 
         return response
 
@@ -400,7 +427,11 @@ class OpusStrategist(
         prompt = self._build_strategic_planning_request(game_state, recent_results, priority)
 
         # Get response
-        raw_response = self.claude_manager.send_message(prompt)
+        if hasattr(self.claude_manager, 'send_message'):
+            raw_response = self.claude_manager.send_message(prompt)
+        else:
+            # Fallback method if send_message doesn't exist
+            raw_response = getattr(self.claude_manager, 'get_response', lambda x: None)(prompt)
 
         # Parse JSON response
         return self._parse_strategic_response(raw_response)
@@ -497,19 +528,20 @@ class OpusStrategist(
                 recent_scripts, execution_results
             )
 
-        return self.safe_execute(
+        result: list[EvolutionProposal] | None = self.safe_execute(
             operation=analyze,
             context=context,
             fallback_value=[],
             severity=ErrorSeverity.LOW,
         )
+        return result if result is not None else []
 
     def get_metrics(self) -> dict[str, Any]:
         """Get comprehensive metrics including circuit breaker state."""
-        base_metrics = super().get_metrics()
+        base_metrics = super().get_metrics()  # type: ignore[misc]
 
-        # Add circuit breaker metrics
-        base_metrics["circuit_breaker"] = self.get_circuit_health_status()
+        # Add circuit breaker metrics  
+        base_metrics["circuit_breaker"] = self.get_circuit_health_status()  # type: ignore[attr-defined]
 
         # Add component-specific metrics
         base_metrics.update(

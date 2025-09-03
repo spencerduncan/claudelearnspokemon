@@ -20,8 +20,15 @@ from typing import TYPE_CHECKING, Any, cast
 
 import requests
 
-import docker
-from docker.errors import APIError, DockerException, ImageNotFound
+try:
+    import docker
+    from docker.errors import APIError, DockerException, ImageNotFound  # type: ignore[import-not-found]
+except ImportError:
+    # Docker not available - will raise error at runtime if needed
+    docker = None  # type: ignore
+    APIError = Exception
+    DockerException = Exception
+    ImageNotFound = Exception
 
 # Import compatibility layer factory for transparent adapter selection
 try:
@@ -650,8 +657,8 @@ class EmulatorPool:
         self.detection_timeout = detection_timeout
 
         # Container management state
-        self.containers: list[docker.models.containers.Container] = []
-        self.client: docker.DockerClient | None = None
+        self.containers: list[Any] = []  # Docker container objects
+        self.client: Any | None = None  # Docker client
 
         # Simplified resource pool state - workstation-appropriate
         self.available_clients: queue.Queue = queue.Queue()
@@ -696,7 +703,9 @@ class EmulatorPool:
 
         try:
             # Connect to Docker daemon with proper error handling
-            self.client = docker.from_env()
+            if docker is None:
+                raise EmulatorPoolError("Docker library not available")
+            self.client = docker.from_env()  # type: ignore[attr-defined]
             logger.info("Connected to Docker daemon")
         except DockerException as e:
             raise EmulatorPoolError(
@@ -1770,7 +1779,7 @@ class EmulatorPool:
         # Remove extra whitespace and return
         return " ".join(script.split())
 
-    def _start_single_container(self, port: int) -> docker.models.containers.Container:
+    def _start_single_container(self, port: int) -> Any:  # Docker container type
         """
         Start a single container with production configuration.
 
@@ -1817,7 +1826,7 @@ class EmulatorPool:
 
         return container
 
-    def _wait_for_container_ready(self, container: docker.models.containers.Container) -> None:
+    def _wait_for_container_ready(self, container: Any) -> None:  # Docker container type
         """
         Wait for container to reach running state with production timeout.
 
@@ -1849,7 +1858,7 @@ class EmulatorPool:
             f"Increase timeout or check system performance."
         )
 
-    def _verify_container_health(self, container: docker.models.containers.Container) -> None:
+    def _verify_container_health(self, container: Any) -> None:  # Docker container type
         """
         Verify container is healthy and responding.
 
@@ -1917,7 +1926,7 @@ class EmulatorPool:
 
         return None
 
-    def _cleanup_containers(self, containers: list[docker.models.containers.Container]) -> None:
+    def _cleanup_containers(self, containers: list[Any]) -> None:  # Docker container types
         """
         Clean up containers on failure - prevent resource leaks.
 

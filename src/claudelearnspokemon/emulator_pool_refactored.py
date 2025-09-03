@@ -17,7 +17,12 @@ from typing import Any
 
 import requests
 
-import docker
+try:
+    import docker
+    import docker.errors  # type: ignore[import-not-found]
+except ImportError:
+    # Docker not available - will raise error at runtime if needed
+    docker = None  # type: ignore
 
 from .common_circuit_breaker import EmulatorCircuitBreakerMixin
 from .common_error_handling import ErrorSeverity, RetryableExceptionHandler, ComponentErrorHandler
@@ -121,6 +126,7 @@ class ContainerHealthInfo:
 
 
 class PokemonGymClient(
+    RetryableExceptionHandler,
     ComponentErrorHandler,
     ComponentLogger,
     StandardMetricsMixin,
@@ -135,8 +141,11 @@ class PokemonGymClient(
     """
 
     def __init__(self, port: int, container_id: str):
-        # Initialize mixins
-        super().__init__(component_name="PokemonGymClient")
+        # Initialize mixins explicitly to handle multiple inheritance properly
+        RetryableExceptionHandler.__init__(self)
+        ComponentErrorHandler.__init__(self, component_name="PokemonGymClient")
+        ComponentLogger.__init__(self)
+        StandardMetricsMixin.__init__(self)
 
         self.port = port
         self.container_id = container_id
@@ -156,7 +165,7 @@ class PokemonGymClient(
         return {"status": "error", "message": f"{operation_name} failed: {str(error)}"}
 
     @logged_operation("send_input")
-    def send_input(self, input_sequence: str) -> dict[str, Any]:
+    def send_input(self, input_sequence: str) -> dict[str, Any] | None:
         """Send input sequence to the emulator."""
         return self._execute_http_operation(
             method="POST",
@@ -166,14 +175,14 @@ class PokemonGymClient(
         )
 
     @logged_operation("get_state")
-    def get_state(self) -> dict[str, Any]:
+    def get_state(self) -> dict[str, Any] | None:
         """Get current game state from emulator."""
         return self._execute_http_operation(
             method="GET", endpoint="/state", operation_name="get_state", timeout=5.0
         )
 
     @logged_operation("reset_game")
-    def reset_game(self) -> dict[str, Any]:
+    def reset_game(self) -> dict[str, Any] | None:
         """Reset the game to initial state."""
         return self._execute_http_operation(
             method="POST", endpoint="/reset", operation_name="reset_game"
@@ -189,7 +198,7 @@ class PokemonGymClient(
                 files={"checkpoint": checkpoint_data},
                 operation_name="load_checkpoint",
             )
-            return response.get("status") == "success"
+            return response is not None and response.get("status") == "success"
         except Exception as e:
             context = self.create_context("load_checkpoint", {"data_size": len(checkpoint_data)})
             self.handle_exception(e, context, ErrorSeverity.HIGH, reraise_as=EmulatorPoolError)
@@ -202,7 +211,7 @@ class PokemonGymClient(
             response = self._execute_http_operation(
                 method="GET", endpoint="/health", timeout=2.0, operation_name="health_check"
             )
-            return response.get("status") == "healthy"
+            return response is not None and response.get("status") == "healthy"
         except Exception:
             return False
 
@@ -214,7 +223,7 @@ class PokemonGymClient(
         files: dict[str, Any] | None = None,
         timeout: float = 10.0,
         operation_name: str = "http_operation",
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
         """
         Consolidated HTTP operation execution with retry logic.
 
@@ -283,8 +292,11 @@ class EmulatorPool(
     """
 
     def __init__(self, pool_size: int = 4, startup_timeout: float = 30.0):
-        # Initialize mixins
-        super().__init__(component_name="EmulatorPool")
+        # Initialize mixins explicitly to handle multiple inheritance properly
+        EmulatorCircuitBreakerMixin.__init__(self)
+        ComponentErrorHandler.__init__(self, component_name="EmulatorPool")
+        ComponentLogger.__init__(self)
+        StandardMetricsMixin.__init__(self)
 
         self.pool_size = pool_size
         self.startup_timeout = startup_timeout
@@ -423,13 +435,16 @@ class EmulatorPool(
             "available_count": sum(self._available_clients),
             "containers": health_info,
             "circuit_breaker": self.get_circuit_health_status(),
-            "metrics": self.get_metrics(),
+            "metrics": self.get_metrics(),  # type: ignore[attr-defined]
         }
 
     def _connect_to_docker(self) -> None:
         """Connect to Docker daemon."""
+        if docker is None:
+            raise EmulatorPoolError("Docker library not available")
+            
         try:
-            self._docker_client = docker.from_env()
+            self._docker_client = docker.from_env()  # type: ignore[attr-defined]
             self.logger.log_operation_success(
                 self.log_start("docker_connect"), "Connected to Docker daemon"
             )
@@ -438,6 +453,9 @@ class EmulatorPool(
 
     def _create_containers(self) -> None:
         """Create and start Docker containers."""
+        if self._docker_client is None:
+            raise EmulatorPoolError("Docker client not initialized. Call _connect_to_docker() first.")
+            
         for i in range(self.pool_size):
             port = self.base_port + i
             try:
@@ -449,7 +467,8 @@ class EmulatorPool(
                     name=f"pokemon-emulator-{port}",
                 )
                 self._containers.append(container)
-                self.record_metric("containers_created", 1)
+                if hasattr(self, 'record_metric'):
+                    self.record_metric("containers_created", 1)
 
             except Exception as e:
                 # Clean up already created containers

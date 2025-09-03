@@ -284,9 +284,12 @@ class FixtureHelpers:
         """Create standard emulator pool fixture."""
 
         def fixture_func():
-            from claudelearnspokemon.emulator_pool import EmulatorPool
-
-            return EmulatorPool(startup_timeout=5)
+            try:
+                from claudelearnspokemon.emulator_pool import EmulatorPool  # type: ignore[import-not-found]
+                return EmulatorPool(startup_timeout=5)
+            except ImportError:
+                # Fallback if emulator_pool is not available
+                return None
 
         return fixture_func
 
