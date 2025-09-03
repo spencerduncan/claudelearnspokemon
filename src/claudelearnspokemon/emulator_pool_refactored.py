@@ -248,8 +248,8 @@ class PokemonGymClient(
         def http_operation() -> Any:
             url = f"{self.base_url}{endpoint}"
 
-            # Prepare request arguments
-            kwargs = {"timeout": timeout}
+            # Prepare request arguments - use dict[str, Any] to handle mixed types
+            kwargs: dict[str, Any] = {"timeout": timeout}
             if json_data:
                 kwargs["json"] = json_data
             if files:

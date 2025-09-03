@@ -366,28 +366,32 @@ class OpusStrategist(
         context = self.create_context("extract_directives")
 
         def extract() -> list[str]:
-            if not strategy_response or not strategy_response.directives:
+            if not strategy_response:
+                return []
+
+            # Use the StrategyResponse's own method to extract directives
+            all_directives = strategy_response.extract_directives()
+            
+            if not all_directives:
                 return []
 
             # Filter for unique, actionable directives
             seen_directives = set()
             unique_directives = []
 
-            for directive in strategy_response.directives:
+            for directive in all_directives:
                 if directive and directive not in seen_directives:
                     unique_directives.append(directive)
                     seen_directives.add(directive)
 
             return unique_directives
 
-        result: list[str] | None = self.safe_execute(
+        return self.safe_execute(
             operation=extract,
             context=context,
             fallback_value=[],
-            reraise_as=DirectiveExtractionError,
             severity=ErrorSeverity.MEDIUM,
-        )
-        return result if result is not None else []
+        ) or []
 
     def _request_opus_strategy(
         self,
@@ -518,23 +522,65 @@ class OpusStrategist(
         execution_results: list[dict[str, Any]],
     ) -> list[EvolutionProposal]:
         """Analyze language evolution opportunities."""
-        if not self.language_analyzer:
+        if not self.language_analyzer or not self.evolution_generator:
             return []
 
         context = self.create_context("language_evolution", {"script_count": len(recent_scripts)})
 
         def analyze() -> list[EvolutionProposal]:
-            return self.language_analyzer.analyze_evolution_opportunities(
-                recent_scripts, execution_results
-            )
+            # Ensure components are not None (MyPy type narrowing)
+            assert self.language_analyzer is not None, "Language analyzer should be available"
+            assert self.evolution_generator is not None, "Evolution generator should be available"
+            
+            # Convert recent_scripts and execution_results to pattern format
+            patterns = self._convert_to_patterns(recent_scripts, execution_results)
+            
+            # Step 1: Identify opportunities
+            opportunities = self.language_analyzer.identify_evolution_opportunities(patterns)
+            
+            # Step 2: Generate proposals from opportunities
+            proposals = self.evolution_generator.generate_proposals(opportunities)
+            
+            return proposals
 
-        result: list[EvolutionProposal] | None = self.safe_execute(
+        return self.safe_execute(
             operation=analyze,
             context=context,
             fallback_value=[],
             severity=ErrorSeverity.LOW,
-        )
-        return result if result is not None else []
+        ) or []
+    
+    def _convert_to_patterns(
+        self, 
+        scripts: list[str], 
+        results: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Convert scripts and results to pattern format expected by LanguageAnalyzer."""
+        patterns = []
+        
+        for i, script in enumerate(scripts):
+            # Get corresponding result if available
+            result = results[i] if i < len(results) else {}
+            
+            # Extract input sequence from script (simplified - would be more complex in real implementation)
+            input_sequence = script.split(';') if script else ['UNKNOWN']
+            
+            # Create pattern dictionary
+            pattern = {
+                "name": f"script_pattern_{i}",
+                "success_rate": result.get("success_rate", 0.5),
+                "usage_frequency": 1,  # All scripts used once in this analysis
+                "input_sequence": input_sequence,
+                "context": {
+                    "location": result.get("location", "unknown"),
+                    "menu_type": result.get("menu_type", "unknown"),
+                    "battle_state": result.get("battle_state", "none"),
+                },
+                "average_execution_time": result.get("execution_time", 1.0),
+            }
+            patterns.append(pattern)
+        
+        return patterns
 
     def get_metrics(self) -> dict[str, Any]:
         """Get comprehensive metrics including circuit breaker state."""

@@ -454,3 +454,7 @@ class StandardMetricsMixin:
             return 0.0
 
         return hits / total
+
+    def record_metric(self, metric_name: str, value: int) -> None:
+        """Record a simple counter metric (backward compatibility)."""
+        self._component_metrics.increment_counter(metric_name, value)

@@ -282,8 +282,9 @@ def protected_operation(
     """
 
     def class_decorator(cls: type) -> type:
-        # Store original init
-        original_init = cls.__init__
+        # Store original init - use getattr to handle mypy warning safely
+        from typing import cast
+        original_init = cast(Callable[..., None], getattr(cls, '__init__'))
 
         def new_init(self, *args, **kwargs) -> None:
             # Initialize with circuit breaker
@@ -295,6 +296,8 @@ def protected_operation(
                 config = CircuitBreakerConfig(name=cls.__name__)
 
             self._circuit_breaker_config = config
+            # Ensure config.name is not None before passing to CircuitBreaker
+            assert config.name is not None, "Circuit breaker name must be set"
             self.circuit_breaker = CircuitBreaker(
                 name=config.name, config=config.to_circuit_config()
             )
@@ -302,21 +305,47 @@ def protected_operation(
             # Call original init
             original_init(self, *args, **kwargs)
 
-        # Replace init
-        cls.__init__ = new_init
+        # Replace init - use setattr to handle mypy warning
+        setattr(cls, '__init__', new_init)
 
-        # Wrap public methods
+        # Wrap public methods - create a method wrapper instead of using with_circuit_breaker
         for attr_name in dir(cls):
             if not attr_name.startswith("_") and callable(getattr(cls, attr_name)):
                 original_method = getattr(cls, attr_name)
                 if hasattr(original_method, "__func__"):  # Skip static methods
-                    wrapped_method = with_circuit_breaker(
-                        # Circuit breaker will be available after init
-                        lambda self: self.circuit_breaker,
-                        operation_name or attr_name,
-                        fallback_strategy,
-                        fallback_value,
-                    )(original_method)
+                    
+                    def create_wrapper(method, name):
+                        @functools.wraps(method)
+                        def wrapper(self, *args, **kwargs):
+                            # Use the circuit breaker directly from the instance
+                            circuit_breaker = getattr(self, 'circuit_breaker', None)
+                            if circuit_breaker is None:
+                                # Fallback to direct method call if no circuit breaker
+                                return method(self, *args, **kwargs)
+                            
+                            op_name = operation_name or name
+                            
+                            def operation():
+                                return method(self, *args, **kwargs)
+                            
+                            try:
+                                return circuit_breaker.call(operation, op_name)
+                            except CircuitBreakerError as e:
+                                logger.warning(f"Circuit breaker open for {op_name}: {e}")
+                                
+                                if fallback_strategy == FallbackStrategy.RAISE_EXCEPTION:
+                                    raise
+                                elif fallback_strategy == FallbackStrategy.RETURN_FALLBACK:
+                                    logger.info(f"Using fallback value for {op_name}")
+                                    return fallback_value
+                                elif fallback_strategy == FallbackStrategy.RETURN_NONE:
+                                    logger.info(f"Returning None for {op_name}")
+                                    return None
+                                else:
+                                    raise
+                        return wrapper
+                    
+                    wrapped_method = create_wrapper(original_method, attr_name)
                     setattr(cls, attr_name, wrapped_method)
 
         return cls
