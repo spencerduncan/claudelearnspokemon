@@ -11,7 +11,7 @@ import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 
 class MetricType(Enum):
@@ -276,7 +276,7 @@ class MetricsRegistry:
 
     def get_aggregated_counters(self) -> dict[str, int]:
         """Get aggregated counter values across all components."""
-        aggregated = defaultdict(int)
+        aggregated: Dict[str, int] = defaultdict(int)
 
         with self._registry_lock:
             for metrics in self._metrics.values():

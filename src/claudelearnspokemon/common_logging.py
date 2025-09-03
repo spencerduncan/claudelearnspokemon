@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, TypeVar
+from typing import Any, Dict, Optional, Union, TypeVar
 
 T = TypeVar("T")
 
@@ -34,7 +34,7 @@ class LogContext:
     component: str
     operation: str
     execution_id: str | None = None
-    timing_info: dict[str, float] | None = field(default_factory=dict)
+    timing_info: dict[str, float] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def add_timing(self, name: str, value: float) -> None:
@@ -65,7 +65,7 @@ class StructuredLogger:
         self.default_context = default_context or LogContext(name, "unknown")
 
         # Metrics for logging patterns
-        self._log_metrics = {
+        self._log_metrics: Dict[str, Any] = {
             "total_logs": 0,
             "logs_by_level": {level.name.lower(): 0 for level in LogLevel},
             "operations_logged": set(),
@@ -128,10 +128,11 @@ class StructuredLogger:
             **metadata: Additional metadata
         """
         # Calculate duration
-        start_time = context.timing_info.get("start_time")
-        if start_time:
-            duration_ms = (time.time() - start_time) * 1000
-            context.add_timing("duration_ms", duration_ms)
+        if context.timing_info is not None:
+            start_time = context.timing_info.get("start_time")
+            if start_time:
+                duration_ms = (time.time() - start_time) * 1000
+                context.add_timing("duration_ms", duration_ms)
 
         # Add metadata
         for key, value in metadata.items():
@@ -139,7 +140,7 @@ class StructuredLogger:
 
         # Build message
         msg = f"Completed {context.operation}"
-        if context.timing_info.get("duration_ms"):
+        if context.timing_info is not None and context.timing_info.get("duration_ms"):
             msg += f" in {context.timing_info['duration_ms']:.2f}ms"
 
         if result_summary:
@@ -160,10 +161,11 @@ class StructuredLogger:
             **metadata: Additional metadata
         """
         # Calculate duration if available
-        start_time = context.timing_info.get("start_time")
-        if start_time:
-            duration_ms = (time.time() - start_time) * 1000
-            context.add_timing("duration_ms", duration_ms)
+        if context.timing_info is not None:
+            start_time = context.timing_info.get("start_time")
+            if start_time:
+                duration_ms = (time.time() - start_time) * 1000
+                context.add_timing("duration_ms", duration_ms)
 
         # Add error details to metadata
         context.add_metadata("error_type", type(error).__name__)
@@ -174,7 +176,7 @@ class StructuredLogger:
 
         # Build message
         msg = f"Failed {context.operation}: {error}"
-        if context.timing_info.get("duration_ms"):
+        if context.timing_info is not None and context.timing_info.get("duration_ms"):
             msg += f" (after {context.timing_info['duration_ms']:.2f}ms)"
 
         self._log_with_context(level, msg, context)
@@ -480,3 +482,7 @@ class ComponentLogger:
     ) -> None:
         """Log retry attempt."""
         self.logger.log_retry_attempt(operation, attempt, max_attempts, error, **metadata)
+
+    def log_initialization(self, config: dict[str, Any], level: LogLevel = LogLevel.INFO) -> None:
+        """Log component initialization with configuration."""
+        self.logger.log_initialization(config, level)

@@ -20,7 +20,7 @@ import requests
 import docker
 
 from .common_circuit_breaker import EmulatorCircuitBreakerMixin
-from .common_error_handling import ErrorSeverity, RetryableExceptionHandler
+from .common_error_handling import ErrorSeverity, RetryableExceptionHandler, ComponentErrorHandler
 from .common_logging import ComponentLogger, logged_operation
 from .common_metrics import StandardMetricsMixin
 
@@ -121,7 +121,7 @@ class ContainerHealthInfo:
 
 
 class PokemonGymClient(
-    RetryableExceptionHandler,
+    ComponentErrorHandler,
     ComponentLogger,
     StandardMetricsMixin,
 ):
@@ -129,14 +129,14 @@ class PokemonGymClient(
     Refactored HTTP client for Pokemon-gym emulator communication.
 
     Uses common utilities to reduce duplication:
-    - RetryableExceptionHandler for retry patterns
+    - ComponentErrorHandler for error handling and context creation
     - ComponentLogger for consistent logging
     - StandardMetricsMixin for metrics recording
     """
 
     def __init__(self, port: int, container_id: str):
         # Initialize mixins
-        super().__init__(max_retries=2, retry_delay=0.5)
+        super().__init__(component_name="PokemonGymClient")
 
         self.port = port
         self.container_id = container_id
@@ -150,6 +150,10 @@ class PokemonGymClient(
                 "base_url": self.base_url,
             }
         )
+
+    def create_fallback_response(self, operation_name: str, error: Exception) -> Any:
+        """Create component-specific fallback response for emulator operations."""
+        return {"status": "error", "message": f"{operation_name} failed: {str(error)}"}
 
     @logged_operation("send_input")
     def send_input(self, input_sequence: str) -> dict[str, Any]:
@@ -189,6 +193,7 @@ class PokemonGymClient(
         except Exception as e:
             context = self.create_context("load_checkpoint", {"data_size": len(checkpoint_data)})
             self.handle_exception(e, context, ErrorSeverity.HIGH, reraise_as=EmulatorPoolError)
+            return False
 
     @logged_operation("health_check")
     def health_check(self) -> bool:
@@ -263,6 +268,7 @@ class PokemonGymClient(
 
 class EmulatorPool(
     EmulatorCircuitBreakerMixin,
+    ComponentErrorHandler,
     ComponentLogger,
     StandardMetricsMixin,
 ):
@@ -271,13 +277,14 @@ class EmulatorPool(
 
     Uses common utilities to eliminate repeated patterns:
     - EmulatorCircuitBreakerMixin for fault tolerance
+    - ComponentErrorHandler for error handling and context creation
     - ComponentLogger for consistent logging
     - StandardMetricsMixin for metrics
     """
 
     def __init__(self, pool_size: int = 4, startup_timeout: float = 30.0):
         # Initialize mixins
-        super().__init__()
+        super().__init__(component_name="EmulatorPool")
 
         self.pool_size = pool_size
         self.startup_timeout = startup_timeout

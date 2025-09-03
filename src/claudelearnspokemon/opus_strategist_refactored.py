@@ -11,14 +11,14 @@ This refactored version uses common utilities to reduce code duplication:
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional, Callable
 
 if TYPE_CHECKING:
     from .predictive_planning import PredictivePlanningResult
 
 from .claude_code_manager import ClaudeCodeManager
 from .common_circuit_breaker import StrategistCircuitBreakerMixin
-from .common_error_handling import BaseExceptionHandler, ErrorContext, ErrorSeverity
+from .common_error_handling import BaseExceptionHandler, ComponentErrorHandler, ErrorContext, ErrorSeverity
 from .common_logging import ComponentLogger, logged_operation
 from .common_metrics import StandardMetricsMixin
 from .language_evolution import (
@@ -92,7 +92,7 @@ class StrategyRequest:
 
 
 class OpusStrategist(
-    StrategistCircuitBreakerMixin, BaseExceptionHandler, ComponentLogger, StandardMetricsMixin
+    StrategistCircuitBreakerMixin, ComponentErrorHandler, ComponentLogger, StandardMetricsMixin
 ):
     """
     Refactored strategic planning component using Claude Opus.
@@ -104,6 +104,15 @@ class OpusStrategist(
     - StandardMetricsMixin for metrics patterns
     """
 
+    # Type annotations for conditionally initialized attributes
+    language_analyzer: Optional[LanguageAnalyzer]
+    language_validator: Optional[LanguageValidator]
+    evolution_generator: Optional[EvolutionProposalGenerator]
+    pattern_analyzer: Optional[Any]
+    bayesian_predictor: Optional[Any]
+    contingency_generator: Optional[Any]
+    prediction_cache: Optional[Any]
+
     def __init__(
         self,
         claude_manager: ClaudeCodeManager,
@@ -112,7 +121,7 @@ class OpusStrategist(
         cache_ttl: float = 300.0,
     ):
         # Initialize mixins first
-        super().__init__()
+        super().__init__(component_name="OpusStrategist")
 
         self.claude_manager = claude_manager
         self.cache_ttl = cache_ttl
@@ -216,8 +225,8 @@ class OpusStrategist(
         self,
         request: StrategyRequest,
         use_cache: bool,
-        processor_func: callable,
-        fallback_func: callable,
+        processor_func: Callable[..., Any],
+        fallback_func: Callable[..., Any],
     ) -> Any:
         """
         Consolidated request processing pattern.
@@ -273,7 +282,7 @@ class OpusStrategist(
     def _execute_strategy_request(
         self,
         request: StrategyRequest,
-        processor_func: callable,
+        processor_func: Callable[..., Any],
         use_cache: bool,
         context: ErrorContext,
     ) -> Any:

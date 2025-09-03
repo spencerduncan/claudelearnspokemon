@@ -93,7 +93,7 @@ class CircuitBreakerMixin:
         fallback_strategy: FallbackStrategy | None = None,
         fallback_value: T | None = None,
         fallback_function: Callable[[], T] | None = None,
-    ) -> T:
+    ) -> T | None:
         """
         Execute operation with circuit breaker protection and fallback handling.
 
@@ -228,9 +228,9 @@ def with_circuit_breaker(
         fallback_function: Function to call if fallback strategy is CALL_FALLBACK_FUNC
     """
 
-    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+    def decorator(func: Callable[..., T]) -> Callable[..., T | None]:
         @functools.wraps(func)
-        def wrapper(*args, **kwargs) -> T:
+        def wrapper(*args, **kwargs) -> T | None:
             op_name = operation_name or func.__name__
 
             def operation() -> T:

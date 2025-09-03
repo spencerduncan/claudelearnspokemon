@@ -11,13 +11,13 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, TypeVar
+from enum import Enum, IntEnum
+from typing import Any, Optional, TypeVar
 
 T = TypeVar("T")
 
 
-class ErrorSeverity(Enum):
+class ErrorSeverity(IntEnum):
     """Error severity levels for consistent handling."""
 
     LOW = 1
@@ -125,7 +125,7 @@ class BaseExceptionHandler(ABC):
         allowed_exceptions: tuple[type[Exception], ...] = (Exception,),
         severity: ErrorSeverity = ErrorSeverity.MEDIUM,
         reraise_as: type[Exception] | None = None,
-    ) -> T:
+    ) -> T | None:
         """
         Safely execute an operation with standardized error handling.
 
@@ -226,7 +226,7 @@ class RetryableExceptionHandler(BaseExceptionHandler):
         non_retryable_exceptions: tuple[type[Exception], ...] = (),
         fallback_value: T | None = None,
         reraise_as: type[Exception] | None = None,
-    ) -> T:
+    ) -> T | None:
         """
         Execute operation with retry logic for transient failures.
 
