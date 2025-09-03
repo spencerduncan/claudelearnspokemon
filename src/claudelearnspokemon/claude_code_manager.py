@@ -22,9 +22,10 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
+from typing import Any, Optional
 
 from .claude_process import ClaudeProcess
+from .performance_monitor import MonitoringThresholds, PerformanceMonitor
 from .process_factory import ClaudeProcessFactory
 from .process_health_monitor import ProcessState
 from .process_metrics_collector import AggregatedMetricsCollector
@@ -44,12 +45,14 @@ class ClaudeCodeManager:
     Principle while maintaining all performance optimizations.
     """
 
-    def __init__(self, max_workers: int = 5):
+    def __init__(self, max_workers: int = 5, enable_performance_monitoring: bool = True, monitoring_thresholds: Optional[MonitoringThresholds] = None):
         """
-        Initialize manager with clean component architecture.
+        Initialize manager with clean component architecture and performance monitoring.
 
         Args:
             max_workers: Maximum number of parallel workers
+            enable_performance_monitoring: Whether to enable comprehensive performance monitoring
+            monitoring_thresholds: Custom thresholds for performance monitoring alerts
         """
         self.max_workers = max_workers
         self.processes: dict[int, ClaudeProcess] = {}
@@ -61,7 +64,14 @@ class ClaudeCodeManager:
         self.factory = ClaudeProcessFactory()
         self.metrics_aggregator = AggregatedMetricsCollector()
 
-        logger.info(f"ClaudeCodeManager initialized with {max_workers} workers")
+        # Initialize performance monitoring
+        self.performance_monitor = PerformanceMonitor(
+            aggregated_collector=self.metrics_aggregator,
+            thresholds=monitoring_thresholds,
+            enable_real_time_monitoring=enable_performance_monitoring
+        ) if enable_performance_monitoring else None
+
+        logger.info(f"ClaudeCodeManager initialized with {max_workers} workers and performance monitoring {'enabled' if enable_performance_monitoring else 'disabled'}")
 
     def start_all_processes(self) -> bool:
         """
@@ -106,6 +116,10 @@ class ClaudeCodeManager:
 
             total_time = time.time() - start_time
             self._running = True
+
+            # Start performance monitoring if enabled
+            if self.performance_monitor:
+                self.performance_monitor.start_monitoring()
 
             logger.info(
                 f"Parallel startup completed: {success_count}/{len(configs)} processes "
@@ -200,14 +214,141 @@ class ClaudeCodeManager:
 
         return restart_count
 
-    def get_performance_metrics(self) -> dict[str, Any]:
+    def get_performance_metrics(self, time_window_minutes: int = 60) -> dict[str, Any]:
         """
-        Get comprehensive performance metrics using aggregated collector.
+        Get comprehensive performance metrics including conversation and compression monitoring.
+
+        Args:
+            time_window_minutes: Time window for performance analysis (default: 60 minutes)
 
         Returns:
-            Dictionary with system-wide performance metrics
+            Dictionary with comprehensive performance metrics including:
+            - System-wide process metrics
+            - Conversation performance and efficiency
+            - Context compression effectiveness  
+            - Alerting status and trends
+            - Performance analytics
         """
-        return self.metrics_aggregator.get_system_metrics()
+        if self.performance_monitor:
+            # Get comprehensive performance report from performance monitor
+            return self.performance_monitor.get_comprehensive_performance_report(time_window_minutes)
+        else:
+            # Fallback to basic system metrics if performance monitoring disabled
+            return {
+                "system_metrics": self.metrics_aggregator.get_system_metrics(),
+                "performance_monitoring_enabled": False,
+                "message": "Enhanced performance monitoring is disabled. Enable it for comprehensive metrics."
+            }
+
+    def record_conversation_exchange(
+        self,
+        conversation_id: str,
+        response_time_ms: float,
+        turn_number: int,
+        tokens_used: int = 0,
+        context_size: int = 0,
+        process_type: str = "unknown",
+        success: bool = True,
+        error_details: Optional[str] = None
+    ) -> None:
+        """
+        Record a conversation message exchange for performance monitoring.
+        
+        This method allows external components to report conversation performance
+        metrics to the ClaudeCodeManager's performance monitoring system.
+
+        Args:
+            conversation_id: Unique identifier for the conversation
+            response_time_ms: Response time in milliseconds
+            turn_number: Current turn number in the conversation
+            tokens_used: Number of tokens consumed (optional)
+            context_size: Size of conversation context (optional)
+            process_type: Type of process handling the conversation
+            success: Whether the exchange was successful
+            error_details: Error details if exchange failed
+        """
+        if self.performance_monitor:
+            self.performance_monitor.record_conversation_exchange(
+                conversation_id=conversation_id,
+                response_time_ms=response_time_ms,
+                turn_number=turn_number,
+                tokens_used=tokens_used,
+                context_size=context_size,
+                process_type=process_type,
+                success=success,
+                error_details=error_details
+            )
+
+    def record_compression_event(
+        self,
+        compression_id: str,
+        original_size: int,
+        compressed_size: int,
+        compression_time_ms: float,
+        critical_info_preserved: bool = True
+    ) -> None:
+        """
+        Record a context compression event for performance monitoring.
+
+        Args:
+            compression_id: Unique identifier for the compression event
+            original_size: Original context size
+            compressed_size: Compressed context size  
+            compression_time_ms: Time taken for compression
+            critical_info_preserved: Whether critical information was preserved
+        """
+        if self.performance_monitor:
+            self.performance_monitor.record_compression_event(
+                compression_id=compression_id,
+                original_size=original_size,
+                compressed_size=compressed_size,
+                compression_time_ms=compression_time_ms,
+                critical_info_preserved=critical_info_preserved
+            )
+
+    def get_active_performance_alerts(self) -> list[dict[str, Any]]:
+        """
+        Get currently active performance alerts.
+
+        Returns:
+            List of active performance alerts with details
+        """
+        if self.performance_monitor:
+            alerts = self.performance_monitor.alerting_system.get_active_alerts()
+            return [alert.to_dict() for alert in alerts]
+        else:
+            return []
+
+    def configure_alert_callback(self, callback_function) -> None:
+        """
+        Configure a callback function to be called when performance alerts are triggered.
+
+        Args:
+            callback_function: Function to call with PerformanceAlert object when alerts trigger
+        """
+        if self.performance_monitor:
+            self.performance_monitor.alerting_system.add_alert_callback(callback_function)
+
+    def export_metrics_to_file(self, file_path: str) -> None:
+        """
+        Export current performance metrics to a JSON file.
+
+        Args:
+            file_path: Path to export metrics file
+        """
+        if self.performance_monitor:
+            metrics = self.get_performance_metrics()
+            self.performance_monitor.metrics_exporter.export_to_json_file(metrics, file_path)
+        else:
+            # Export basic metrics if performance monitoring disabled
+            basic_metrics = {
+                "system_metrics": self.metrics_aggregator.get_system_metrics(),
+                "performance_monitoring_enabled": False,
+                "export_timestamp": time.time()
+            }
+            import json
+            with open(file_path, 'w') as f:
+                json.dump(basic_metrics, f, indent=2, default=str)
 
     def shutdown(self, timeout: float = 10.0):
         """
@@ -217,6 +358,10 @@ class ClaudeCodeManager:
             timeout: Total time to wait for all processes to shutdown
         """
         logger.info("Shutting down ClaudeCodeManager...")
+
+        # Stop performance monitoring first
+        if self.performance_monitor:
+            self.performance_monitor.stop_monitoring()
 
         if not self.processes:
             return
