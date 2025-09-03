@@ -26,9 +26,9 @@ try:
 except ImportError:
     # Docker not available - will raise error at runtime if needed
     docker = None  # type: ignore
-    APIError = Exception
-    DockerException = Exception
-    ImageNotFound = Exception
+    APIError = type('APIError', (Exception,), {})  # Fallback for type checking
+    DockerException = type('DockerException', (Exception,), {})  # Fallback for type checking
+    ImageNotFound = type('ImageNotFound', (Exception,), {})  # Fallback for type checking
 
 # Import compatibility layer factory for transparent adapter selection
 try:

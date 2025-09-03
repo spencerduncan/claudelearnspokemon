@@ -22,7 +22,7 @@ try:
     DOCKER_AVAILABLE = True
 except ImportError:
     DOCKER_AVAILABLE = False
-    DockerException = Exception  # Fallback for type checking
+    DockerException = type('DockerException', (Exception,), {})  # Fallback for type checking
 
 
 logger = logging.getLogger(__name__)
