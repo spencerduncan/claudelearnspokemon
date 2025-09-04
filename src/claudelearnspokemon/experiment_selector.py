@@ -16,7 +16,7 @@ import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Set, Tuple, Any
+from typing import Dict, List, Optional, Set, Tuple, Any, Union
 import heapq
 import itertools
 from abc import ABC, abstractmethod
@@ -305,7 +305,7 @@ class ExperimentSelector:
     5. Comprehensive logging for debugging
     """
     
-    def __init__(self, config: VariationConfig = None):
+    def __init__(self, config: Optional[VariationConfig] = None):
         self.config = config or VariationConfig()
         self.logger = logging.getLogger(__name__)
         
@@ -317,7 +317,7 @@ class ExperimentSelector:
         self._completed_experiments: deque = deque(maxlen=1000)  # Rex: Bounded history
         
         # Performance tracking
-        self._generation_stats = defaultdict(int)
+        self._generation_stats: Dict[str, Union[int, float]] = defaultdict(int)
         
         # Validation system
         self.validator = VariationValidator()
@@ -523,7 +523,7 @@ class ExperimentSelector:
 
 
 # Factory function for easy instantiation
-def create_experiment_selector(config: VariationConfig = None) -> ExperimentSelector:
+def create_experiment_selector(config: Optional[VariationConfig] = None) -> ExperimentSelector:
     """Factory function to create ExperimentSelector with default configuration"""
     return ExperimentSelector(config or VariationConfig())
 
