@@ -1,0 +1,189 @@
+{
+  "timestamp": "2025-08-31 00:19:19 UTC",
+  "validation_status": "PASSED",
+  "overall_performance": {
+    "total_benchmarks": 7,
+    "benchmarks_passed": 7,
+    "performance_claims_validated": [
+      {
+        "component": "Pattern Analysis",
+        "target_ms": 200.0,
+        "actual_ms": 0.34841469969251193,
+        "improvement_factor": 574.028593444843,
+        "sample_count": 30,
+        "confidence_95_lower": 0.2766899997368455,
+        "confidence_95_upper": 0.4190969993942417
+      },
+      {
+        "component": "Context Analysis",
+        "target_ms": 150.0,
+        "actual_ms": 0.05346912521417835,
+        "improvement_factor": 2805.3572860815134,
+        "sample_count": 40,
+        "confidence_95_lower": 0.03504500273265876,
+        "confidence_95_upper": 0.07605299833812751
+      },
+      {
+        "component": "Proposal Generation",
+        "target_ms": 100.0,
+        "actual_ms": 0.024510582989023533,
+        "improvement_factor": 4079.8703174372704,
+        "sample_count": 60,
+        "confidence_95_lower": 0.016860998584888875,
+        "confidence_95_upper": 0.03229999856557697
+      },
+      {
+        "component": "Macro Proposals",
+        "target_ms": 80.0,
+        "actual_ms": 0.010366887545387726,
+        "improvement_factor": 7716.877379999395,
+        "sample_count": 80,
+        "confidence_95_lower": 0.008225000783568248,
+        "confidence_95_upper": 0.011632000678218901
+      },
+      {
+        "component": "Language Validation",
+        "target_ms": 50.0,
+        "actual_ms": 0.012108370101486798,
+        "improvement_factor": 4129.374934935335,
+        "sample_count": 100,
+        "confidence_95_lower": 0.007342998287640512,
+        "confidence_95_upper": 0.01675100065767765
+      },
+      {
+        "component": "Syntax Validation",
+        "target_ms": 40.0,
+        "actual_ms": 0.0005550415759595732,
+        "improvement_factor": 72066.67343945678,
+        "sample_count": 120,
+        "confidence_95_lower": 0.0005109977792017162,
+        "confidence_95_upper": 0.0009510004019830376
+      },
+      {
+        "component": "End-to-End Pipeline",
+        "target_ms": 400.0,
+        "actual_ms": 0.4004271201847587,
+        "improvement_factor": 998.9333385197247,
+        "sample_count": 25,
+        "confidence_95_lower": 0.2974089984491002,
+        "confidence_95_upper": 0.49522100016474724
+      }
+    ],
+    "performance_failures": [],
+    "average_improvement": 13195.873612839265
+  },
+  "detailed_results": [
+    {
+      "component": "Pattern Analysis",
+      "success": true,
+      "iterations": 30,
+      "successful_runs": 30,
+      "failed_runs": 0,
+      "avg_time_ms": 0.34841469969251193,
+      "median_time_ms": 0.34099599906767253,
+      "min_time_ms": 0.2766899997368455,
+      "max_time_ms": 0.4190969993942417,
+      "std_dev_ms": 0.040283282223007214,
+      "confidence_95_lower_ms": 0.2766899997368455,
+      "confidence_95_upper_ms": 0.4190969993942417,
+      "sample_count": 30,
+      "errors": []
+    },
+    {
+      "component": "Context Analysis",
+      "success": true,
+      "iterations": 40,
+      "successful_runs": 40,
+      "failed_runs": 0,
+      "avg_time_ms": 0.05346912521417835,
+      "median_time_ms": 0.057097000535577536,
+      "min_time_ms": 0.03464500332484022,
+      "max_time_ms": 0.07605299833812751,
+      "std_dev_ms": 0.012273948271623184,
+      "confidence_95_lower_ms": 0.03504500273265876,
+      "confidence_95_upper_ms": 0.07605299833812751,
+      "sample_count": 40,
+      "errors": []
+    },
+    {
+      "component": "Proposal Generation",
+      "success": true,
+      "iterations": 60,
+      "successful_runs": 60,
+      "failed_runs": 0,
+      "avg_time_ms": 0.024510582989023533,
+      "median_time_ms": 0.025152499802061357,
+      "min_time_ms": 0.016830999811645597,
+      "max_time_ms": 0.03284199920017272,
+      "std_dev_ms": 0.0033311651741641207,
+      "confidence_95_lower_ms": 0.016860998584888875,
+      "confidence_95_upper_ms": 0.03229999856557697,
+      "sample_count": 60,
+      "errors": []
+    },
+    {
+      "component": "Macro Proposals",
+      "success": true,
+      "iterations": 80,
+      "successful_runs": 80,
+      "failed_runs": 0,
+      "avg_time_ms": 0.010366887545387726,
+      "median_time_ms": 0.010769999789772555,
+      "min_time_ms": 0.008186001650756225,
+      "max_time_ms": 0.011811996955657378,
+      "std_dev_ms": 0.001010145476455387,
+      "confidence_95_lower_ms": 0.008225000783568248,
+      "confidence_95_upper_ms": 0.011632000678218901,
+      "sample_count": 80,
+      "errors": []
+    },
+    {
+      "component": "Language Validation",
+      "success": true,
+      "iterations": 100,
+      "successful_runs": 100,
+      "failed_runs": 0,
+      "avg_time_ms": 0.012108370101486798,
+      "median_time_ms": 0.011837501006084494,
+      "min_time_ms": 0.007283997547347099,
+      "max_time_ms": 0.017081998521462083,
+      "std_dev_ms": 0.003329555639892933,
+      "confidence_95_lower_ms": 0.007342998287640512,
+      "confidence_95_upper_ms": 0.01675100065767765,
+      "sample_count": 100,
+      "errors": []
+    },
+    {
+      "component": "Syntax Validation",
+      "success": true,
+      "iterations": 120,
+      "successful_runs": 120,
+      "failed_runs": 0,
+      "avg_time_ms": 0.0005550415759595732,
+      "median_time_ms": 0.0005210004019318148,
+      "min_time_ms": 0.0005010006134398282,
+      "max_time_ms": 0.0017929996829479933,
+      "std_dev_ms": 0.00016201902940905148,
+      "confidence_95_lower_ms": 0.0005109977792017162,
+      "confidence_95_upper_ms": 0.0009510004019830376,
+      "sample_count": 120,
+      "errors": []
+    },
+    {
+      "component": "End-to-End Pipeline",
+      "success": true,
+      "iterations": 25,
+      "successful_runs": 25,
+      "failed_runs": 0,
+      "avg_time_ms": 0.4004271201847587,
+      "median_time_ms": 0.4048510018037632,
+      "min_time_ms": 0.2974089984491002,
+      "max_time_ms": 0.49522100016474724,
+      "std_dev_ms": 0.050841684598356585,
+      "confidence_95_lower_ms": 0.2974089984491002,
+      "confidence_95_upper_ms": 0.49522100016474724,
+      "sample_count": 25,
+      "errors": []
+    }
+  ]
+}
