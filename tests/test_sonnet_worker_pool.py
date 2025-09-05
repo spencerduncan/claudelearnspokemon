@@ -1037,5 +1037,4 @@ class TestSonnetWorkerPoolIntegration:
             assert script_result is not None, "Should develop scripts successfully"
             assert "script" in script_result, "Should return script in result"
 
-            # Verify: All unit tests pass (this test itself validates the functionality)
-            assert True, "All functionality validated through comprehensive testing"
+            # Test passes if all previous assertions passed - functionality validated through comprehensive testing

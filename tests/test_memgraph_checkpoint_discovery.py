@@ -11,7 +11,6 @@ Production-grade testing following Clean Code and TDD principles:
 Tests demonstrate the component meets aggressive performance targets
 inspired by memoryalpha's 393x improvement.
 
-Author: Uncle Bot - Software Craftsmanship Applied
 """
 
 import threading
@@ -884,7 +883,6 @@ class TestEndToEndIntegration:
         assert status["discovery_target_met"] is True
 
 
-# Uncle Bot's Final Craftsmanship Validation
 @pytest.mark.fast
 @pytest.mark.medium
 class TestMultipleCheckpointDiscovery:
@@ -1077,12 +1075,7 @@ class TestMultipleCheckpointDiscovery:
 
 @pytest.mark.fast
 def test_code_quality_and_clean_code_principles():
-    """
-    Meta-test validating this test suite follows Clean Code principles.
-
-    As Uncle Bob teaches: Tests should be first-class citizens with the same
-    quality standards as production code.
-    """
+    """Meta-test validating this test suite follows Clean Code principles."""
     import inspect
     import sys
 
@@ -1117,9 +1110,3 @@ def test_code_quality_and_clean_code_principles():
 
     # This test suite demonstrates:
     # - Single Responsibility: Each test class tests one aspect
-    # - Open/Closed: New tests can be added without modifying existing ones
-    # - Liskov Substitution: Mock objects substitute real memgraph seamlessly
-    # - Interface Segregation: Each test focuses on specific behavior
-    # - Dependency Inversion: Tests depend on abstractions (mocks) not concretions
-
-    assert True, "Clean Code principles demonstrated in test structure"

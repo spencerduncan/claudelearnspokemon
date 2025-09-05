@@ -119,9 +119,8 @@ class TestPrometheusMetricsExporter:
         # Update metrics
         self.exporter._update_process_metrics()
 
-        # Verify metrics were updated (by checking that no exceptions occurred)
+        # Test passes if no exceptions occurred during metrics update
         # Full verification would require inspecting Prometheus metric objects
-        assert True  # Placeholder - metrics update completed successfully
 
     def test_system_metrics_update(self):
         """Test updating system-level metrics."""
@@ -140,8 +139,7 @@ class TestPrometheusMetricsExporter:
         # Update metrics
         self.exporter._update_system_metrics()
 
-        # Verify no exceptions occurred
-        assert True
+        # Test passes if no exceptions occurred during system metrics update
 
     def test_health_monitor_metrics_update(self):
         """Test updating health monitor metrics."""
@@ -184,8 +182,7 @@ class TestPrometheusMetricsExporter:
         # Update metrics
         self.exporter._update_circuit_breaker_metrics()
 
-        # Verify no exceptions occurred
-        assert True
+        # Test passes if no exceptions occurred during circuit breaker metrics update
 
     def test_sla_compliance_metrics_update(self):
         """Test SLA compliance metrics calculation."""
@@ -204,8 +201,7 @@ class TestPrometheusMetricsExporter:
         # Update SLA metrics
         self.exporter._update_sla_compliance_metrics()
 
-        # Verify no exceptions occurred
-        assert True
+        # Test passes if no exceptions occurred during SLA compliance metrics update
 
     def test_counter_metric_update(self):
         """Test counter metric update handling."""
@@ -398,7 +394,7 @@ class TestPrometheusMetricsExporter:
             # Note: Some prefixes might not appear if components have no data
             # This is acceptable behavior
 
-        assert True  # Integration test completed successfully
+        # Test passes if metrics generation completed without exceptions
 
 
 @pytest.mark.fast

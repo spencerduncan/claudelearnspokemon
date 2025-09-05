@@ -289,10 +289,9 @@ class TestMemoryGraphScriptMetrics:
         # Update script performance (should not raise exceptions)
         memory_graph.update_script_performance(script_id, sample_script_result)
 
-        # Verify the method completes successfully
+        # Verify the method completes successfully without raising exceptions
         # In test environment, this will use fallback behavior which logs warnings
         # but continues execution without errors
-        assert True  # If we reach here, the method handled MCP unavailability gracefully
 
     def test_script_metrics_handles_failures(self, memory_graph):
         """Test script metrics tracking for failed executions."""
@@ -302,8 +301,7 @@ class TestMemoryGraphScriptMetrics:
         # Should handle failures gracefully without raising exceptions
         memory_graph.update_script_performance(script_id, failure_result)
 
-        # Method should complete successfully even with MCP unavailable
-        assert True
+        # Test passes if no exception is raised - method should complete successfully even with MCP unavailable
 
     def test_script_metrics_error_handling(self, memory_graph):
         """Test error handling in script metrics updates."""
@@ -316,8 +314,7 @@ class TestMemoryGraphScriptMetrics:
         except MemoryGraphError:
             pytest.fail("Should not raise MemoryGraphError for MCP failures")
 
-        # Method should complete successfully
-        assert True
+        # Test passes if no MemoryGraphError is raised - method should complete successfully
 
 
 @pytest.mark.fast

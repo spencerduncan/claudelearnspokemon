@@ -4,12 +4,7 @@ Comprehensive unit tests for PokemonGymAdapter.
 Tests the adapter pattern implementation that bridges our EmulatorPool interface
 with the benchflow-ai/pokemon-gym server API.
 
-Following Uncle Bob's TDD principles:
-- Write failing tests first (RED)
-- Implement minimal code to pass (GREEN)
-- Refactor for clean code (REFACTOR)
-
-Author: Uncle Bot - Software Craftsmanship Applied
+Tests follow standard TDD principles.
 """
 
 import json
