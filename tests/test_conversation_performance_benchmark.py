@@ -19,6 +19,7 @@ from claudelearnspokemon.process_factory import ProcessConfig
 from claudelearnspokemon.prompts import ProcessType
 
 
+@pytest.mark.performance
 @pytest.mark.fast
 class TestConversationSetupPerformance(unittest.TestCase):
     """Performance benchmarks for conversation setup operations."""
@@ -102,11 +103,13 @@ class TestConversationSetupPerformance(unittest.TestCase):
         self.assertLess(avg_summary_time, 10.0, "Status summary should be <10ms average")
 
 
+@pytest.mark.performance
 @pytest.mark.fast
 class TestParallelConversationInitialization(unittest.TestCase):
     """Performance benchmarks for parallel conversation initialization."""
 
     @patch("subprocess.Popen")
+    @pytest.mark.slow
     def test_parallel_tactical_process_initialization(self, mock_popen):
         """Test parallel tactical process startup meets <100ms target."""
         # Mock successful process creation for performance testing
@@ -252,6 +255,7 @@ class TestParallelConversationInitialization(unittest.TestCase):
             )
 
 
+@pytest.mark.performance
 @pytest.mark.fast
 class TestConversationMemoryEfficiency(unittest.TestCase):
     """Test memory efficiency of conversation state management."""

@@ -225,6 +225,7 @@ class TestEmulatorPoolBackwardCompatibility:
         mock_container = Mock()
         mock_container.id = "test_container_123"
         mock_container.status = "running"
+        mock_container.attrs = {"NetworkSettings": {"Ports": {"8080/tcp": [{"HostPort": "8081"}]}}}
         mock_docker_client.containers.run.return_value = mock_container
 
         mock_exec_result = Mock()

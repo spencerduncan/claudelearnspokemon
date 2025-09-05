@@ -162,7 +162,7 @@ class GameStateInterface:
                 else:
                     # Reshape to proper dimensions
                     resized_data = np.resize(tile_data, (20 * 18,))
-                    tiles = resized_data.reshape((20, 18)).astype(np.uint8)
+                    tiles = resized_data.reshape((20, 18)).astype(np.uint8)  # type: ignore[assignment]
 
             # Extract position with defaults
             pos_data = raw_state.get("player_position", (0, 0))

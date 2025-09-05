@@ -10,16 +10,18 @@ import threading
 import time
 from unittest.mock import Mock, patch
 
-import docker
 import pytest
-from docker.errors import APIError, ImageNotFound
 
+import docker
 from claudelearnspokemon.emulator_pool import (
+    ContainerHealthInfo,
+    ContainerHealthStatus,
     EmulatorPool,
     EmulatorPoolError,
     ExecutionResult,
     PokemonGymClient,
 )
+from docker.errors import APIError, ImageNotFound
 
 
 @pytest.mark.medium
@@ -1592,6 +1594,393 @@ class TestContainerReplacement:
 
         # Queue should be empty after check
         assert self.pool.available_clients.qsize() == 0
+
+
+@pytest.mark.medium
+class TestContainerHealthStatus:
+    """Test ContainerHealthStatus enum and health tracking functionality."""
+
+    @pytest.mark.unit
+    def test_container_health_status_enum_values(self) -> None:
+        """Test ContainerHealthStatus enum has expected values."""
+        assert ContainerHealthStatus.HEALTHY.value == "healthy"
+        assert ContainerHealthStatus.UNHEALTHY.value == "unhealthy"
+        assert ContainerHealthStatus.STOPPED.value == "stopped"
+        assert ContainerHealthStatus.UNKNOWN.value == "unknown"
+
+    @pytest.mark.unit
+    def test_container_health_status_str_representation(self) -> None:
+        """Test ContainerHealthStatus string representation."""
+        assert str(ContainerHealthStatus.HEALTHY) == "healthy"
+        assert str(ContainerHealthStatus.UNHEALTHY) == "unhealthy"
+        assert str(ContainerHealthStatus.STOPPED) == "stopped"
+        assert str(ContainerHealthStatus.UNKNOWN) == "unknown"
+
+    @pytest.mark.unit
+    def test_container_health_status_is_available(self) -> None:
+        """Test is_available property correctly identifies healthy containers."""
+        assert ContainerHealthStatus.HEALTHY.is_available is True
+        assert ContainerHealthStatus.UNHEALTHY.is_available is False
+        assert ContainerHealthStatus.STOPPED.is_available is False
+        assert ContainerHealthStatus.UNKNOWN.is_available is False
+
+    @pytest.mark.unit
+    def test_container_health_status_needs_restart(self) -> None:
+        """Test needs_restart property correctly identifies containers needing restart."""
+        assert ContainerHealthStatus.HEALTHY.needs_restart is False
+        assert ContainerHealthStatus.UNHEALTHY.needs_restart is True
+        assert ContainerHealthStatus.STOPPED.needs_restart is True
+        assert ContainerHealthStatus.UNKNOWN.needs_restart is False
+
+    @pytest.mark.unit
+    def test_container_health_info_creation(self) -> None:
+        """Test ContainerHealthInfo dataclass creation and validation."""
+        health_info = ContainerHealthInfo(
+            container_id="abc123def456789",  # Long container ID
+            port=8081,
+            status=ContainerHealthStatus.HEALTHY,
+            last_check_time=1234567890.0,
+            docker_status="running",
+            response_time_ms=50.0,
+            consecutive_failures=0,
+        )
+
+        # Container ID should be truncated to 12 characters
+        assert health_info.container_id == "abc123def456"
+        assert health_info.port == 8081
+        assert health_info.status == ContainerHealthStatus.HEALTHY
+        assert health_info.docker_status == "running"
+        assert health_info.response_time_ms == 50.0
+        assert health_info.consecutive_failures == 0
+
+    @pytest.mark.unit
+    def test_container_health_info_short_container_id(self) -> None:
+        """Test ContainerHealthInfo with already short container ID."""
+        health_info = ContainerHealthInfo(
+            container_id="short123",
+            port=8081,
+            status=ContainerHealthStatus.HEALTHY,
+            last_check_time=1234567890.0,
+            docker_status="running",
+        )
+
+        # Short ID should remain unchanged
+        assert health_info.container_id == "short123"
+
+    @pytest.mark.unit
+    @patch("time.time")
+    def test_container_health_info_age_seconds(self, mock_time) -> None:
+        """Test age_seconds property calculation."""
+        mock_time.return_value = 1234567900.0  # Current time
+
+        health_info = ContainerHealthInfo(
+            container_id="abc123",
+            port=8081,
+            status=ContainerHealthStatus.HEALTHY,
+            last_check_time=1234567890.0,  # 10 seconds ago
+            docker_status="running",
+        )
+
+        assert health_info.age_seconds == 10.0
+
+    @pytest.mark.unit
+    @patch("time.time")
+    def test_container_health_info_is_stale(self, mock_time) -> None:
+        """Test is_stale property for detecting outdated health information."""
+        mock_time.return_value = 1234567950.0  # Current time
+
+        # Fresh health info (10 seconds old)
+        fresh_health = ContainerHealthInfo(
+            container_id="abc123",
+            port=8081,
+            status=ContainerHealthStatus.HEALTHY,
+            last_check_time=1234567940.0,
+            docker_status="running",
+        )
+
+        # Stale health info (70 seconds old)
+        stale_health = ContainerHealthInfo(
+            container_id="def456",
+            port=8082,
+            status=ContainerHealthStatus.HEALTHY,
+            last_check_time=1234567880.0,
+            docker_status="running",
+        )
+
+        assert fresh_health.is_stale is False
+        assert stale_health.is_stale is True
+
+    @pytest.mark.unit
+    def test_container_health_info_to_dict(self) -> None:
+        """Test ContainerHealthInfo serialization to dictionary."""
+        health_info = ContainerHealthInfo(
+            container_id="abc123def456789",
+            port=8081,
+            status=ContainerHealthStatus.HEALTHY,
+            last_check_time=1234567890.0,
+            docker_status="running",
+            error_message=None,
+            response_time_ms=45.5,
+            consecutive_failures=0,
+        )
+
+        result = health_info.to_dict()
+
+        # Verify all fields except age_seconds (which depends on current time)
+        assert result["container_id"] == "abc123def456"
+        assert result["port"] == 8081
+        assert result["status"] == "healthy"
+        assert result["last_check_time"] == 1234567890.0
+        assert result["docker_status"] == "running"
+        assert result["error_message"] is None
+        assert result["response_time_ms"] == 45.5
+        assert result["consecutive_failures"] == 0
+        assert "age_seconds" in result
+        assert isinstance(result["age_seconds"], float)
+
+
+@pytest.mark.medium
+class TestEmulatorPoolHealthTracking:
+    """Test EmulatorPool health status tracking functionality."""
+
+    def setup_method(self) -> None:
+        """Set up test environment for each test."""
+        self.pool = EmulatorPool()
+
+    def teardown_method(self) -> None:
+        """Clean up after each test."""
+        try:
+            self.pool.shutdown()
+        except Exception:
+            pass
+
+    @pytest.mark.unit
+    def test_initial_health_tracking_state(self) -> None:
+        """Test EmulatorPool initializes with empty health tracking."""
+        assert self.pool.container_health == {}
+        assert hasattr(self.pool, "_health_lock")
+
+    @pytest.mark.unit
+    def test_update_container_health_new_container(self) -> None:
+        """Test _update_container_health creates new health info for new container."""
+        self.pool._update_container_health(
+            port=8081,
+            container_id="abc123def456789",
+            status=ContainerHealthStatus.HEALTHY,
+            docker_status="running",
+            response_time_ms=50.0,
+        )
+
+        health_info = self.pool.container_health[8081]
+        assert health_info.container_id == "abc123def456"
+        assert health_info.port == 8081
+        assert health_info.status == ContainerHealthStatus.HEALTHY
+        assert health_info.docker_status == "running"
+        assert health_info.response_time_ms == 50.0
+        assert health_info.consecutive_failures == 0
+
+    @pytest.mark.unit
+    def test_update_container_health_status_change_logging(self) -> None:
+        """Test health status changes are properly logged."""
+        with patch("claudelearnspokemon.emulator_pool.logger") as mock_logger:
+            # Initial healthy status
+            self.pool._update_container_health(
+                port=8081,
+                container_id="abc123",
+                status=ContainerHealthStatus.HEALTHY,
+                docker_status="running",
+            )
+
+            # Change to unhealthy
+            self.pool._update_container_health(
+                port=8081,
+                container_id="abc123",
+                status=ContainerHealthStatus.UNHEALTHY,
+                docker_status="running",
+                error_message="Connection timeout",
+            )
+
+            # Verify logging calls
+            assert mock_logger.info.call_count == 2  # Initial + status change
+            assert mock_logger.warning.call_count == 1  # Unhealthy status
+
+    @pytest.mark.unit
+    def test_get_container_health_status(self) -> None:
+        """Test getting health status for specific container."""
+        # Add health info
+        self.pool._update_container_health(
+            port=8081,
+            container_id="abc123",
+            status=ContainerHealthStatus.HEALTHY,
+            docker_status="running",
+        )
+
+        # Get health status
+        health_info = self.pool.get_container_health_status(8081)
+        assert health_info is not None
+        assert health_info.port == 8081
+        assert health_info.status == ContainerHealthStatus.HEALTHY
+
+        # Non-existent container
+        health_info = self.pool.get_container_health_status(9999)
+        assert health_info is None
+
+    @pytest.mark.unit
+    def test_get_all_container_health(self) -> None:
+        """Test getting health status for all containers."""
+        # Add multiple health entries
+        self.pool._update_container_health(
+            port=8081,
+            container_id="abc123",
+            status=ContainerHealthStatus.HEALTHY,
+            docker_status="running",
+        )
+
+        self.pool._update_container_health(
+            port=8082,
+            container_id="def456",
+            status=ContainerHealthStatus.UNHEALTHY,
+            docker_status="running",
+            error_message="Connection failed",
+        )
+
+        all_health = self.pool.get_all_container_health()
+        assert len(all_health) == 2
+        assert 8081 in all_health
+        assert 8082 in all_health
+        assert all_health[8081].status == ContainerHealthStatus.HEALTHY
+        assert all_health[8082].status == ContainerHealthStatus.UNHEALTHY
+
+    @pytest.mark.unit
+    @patch("claudelearnspokemon.emulator_pool.docker.from_env")
+    @patch("claudelearnspokemon.emulator_pool.PokemonGymClient")
+    def test_enhanced_health_check_docker_status_integration(
+        self, mock_client_class, mock_docker
+    ) -> None:
+        """Test enhanced health_check method with Docker status checking."""
+        # Setup mock Docker client
+        mock_docker_client = Mock()
+        mock_docker.return_value = mock_docker_client
+
+        # Create mock container with network settings
+        container = Mock()
+        container.id = "container_123"
+        container.status = "running"
+        container.attrs = {"NetworkSettings": {"Ports": {"8080/tcp": [{"HostPort": "8081"}]}}}
+        container.exec_run.return_value = Mock(exit_code=0, output=b"health_check")
+
+        mock_docker_client.containers.run.return_value = container
+        self.pool.containers = [container]
+
+        # Setup mock client
+        client = Mock()
+        client.container_id = "container_123"
+        client.is_healthy.return_value = True
+        mock_client_class.return_value = client
+
+        self.pool.initialize(1)
+
+        # Test health check
+        health_report = self.pool.health_check()
+
+        assert health_report["status"] == "healthy"
+        assert health_report["healthy_count"] == 1
+        assert health_report["total_count"] == 1
+        assert len(health_report["containers"]) == 1
+
+        container_health = health_report["containers"][0]
+        assert container_health["status"] == "healthy"
+        assert container_health["docker_status"] == "running"
+        assert container_health["healthy"] is True
+        assert container_health["needs_restart"] is False
+
+
+@pytest.mark.medium
+class TestPokemonGymClientSimplification:
+    """Test simplified PokemonGymClient workstation patterns."""
+
+    @pytest.mark.unit
+    def test_simplified_failure_tracking_initialization(self) -> None:
+        """Test PokemonGymClient initializes with simplified failure tracking."""
+        client = PokemonGymClient(port=8081, container_id="abc123")
+
+        assert client.MAX_CONSECUTIVE_FAILURES == 3
+        assert client.FAILURE_RESET_TIMEOUT == 10
+        assert client.MAX_RETRIES == 2
+        assert client.RETRY_DELAY == 0.5
+
+        assert client._consecutive_failures == 0
+        assert client._last_failure_time == 0.0
+        assert hasattr(client, "_failure_lock")
+
+    @pytest.mark.unit
+    def test_simplified_performance_metrics(self) -> None:
+        """Test simplified performance metrics for workstation monitoring."""
+        client = PokemonGymClient(port=8081, container_id="abc123")
+
+        # Initial metrics
+        metrics = client.get_performance_metrics()
+        expected = {
+            "total_requests": 0,
+            "average_request_time_ms": 0,
+            "consecutive_failures": 0,
+            "circuit_breaker_failures": 0,
+            "circuit_breaker_open": False,
+            "temporarily_disabled": False,
+        }
+        assert metrics == expected
+
+    @pytest.mark.unit
+    def test_record_failure_consecutive_tracking(self) -> None:
+        """Test failure recording and consecutive failure tracking."""
+        client = PokemonGymClient(port=8081, container_id="abc123")
+
+        # Record multiple failures
+        with patch("claudelearnspokemon.emulator_pool.logger") as mock_logger:
+            client._record_failure()
+            client._record_failure()
+            client._record_failure()  # Should trigger warning
+
+            assert client._consecutive_failures == 3
+            assert mock_logger.warning.called
+
+    @pytest.mark.unit
+    @patch("time.time")
+    def test_is_temporarily_disabled(self, mock_time) -> None:
+        """Test temporary disable logic for workstation fail-fast behavior."""
+        mock_time.return_value = 1000.0
+        client = PokemonGymClient(port=8081, container_id="abc123")
+
+        # Not disabled initially
+        assert client._is_temporarily_disabled() is False
+
+        # Record max failures
+        client._consecutive_failures = client.MAX_CONSECUTIVE_FAILURES
+        client._last_failure_time = 1000.0
+
+        # Should be disabled
+        assert client._is_temporarily_disabled() is True
+
+        # After timeout, should be reset
+        mock_time.return_value = 1020.0  # 20 seconds later (> 10s timeout)
+        assert client._is_temporarily_disabled() is False
+        assert client._consecutive_failures == 0
+
+    @pytest.mark.unit
+    def test_reset_failures(self) -> None:
+        """Test failure reset after successful request."""
+        client = PokemonGymClient(port=8081, container_id="abc123")
+
+        # Set some failures
+        client._consecutive_failures = 2
+        client._last_failure_time = 1000.0
+
+        with patch("claudelearnspokemon.emulator_pool.logger") as mock_logger:
+            client._reset_failures()
+
+            assert client._consecutive_failures == 0
+            assert client._last_failure_time == 0.0
+            assert mock_logger.info.called
 
 
 @pytest.mark.medium

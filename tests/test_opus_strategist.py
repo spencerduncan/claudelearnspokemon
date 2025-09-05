@@ -18,6 +18,7 @@ Test Categories:
 import time
 import unittest
 from collections import namedtuple
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -379,9 +380,6 @@ class TestRequestStrategyInterface(unittest.TestCase):
         self.assertIn("strategic process", str(context.exception).lower())
 
 
-@pytest.mark.skip(
-    reason="API changed - analyze_parallel_results method removed from new OpusStrategist API"
-)
 @pytest.mark.medium
 class TestParallelResultsAnalysis(unittest.TestCase):
     """Test core parallel results analysis functionality."""
@@ -399,45 +397,45 @@ class TestParallelResultsAnalysis(unittest.TestCase):
         # Create test execution results with patterns
         self.parallel_results = self._create_test_parallel_results()
 
-    def _create_test_parallel_results(self) -> list[ExecutionResult]:
+    def _create_test_parallel_results(self) -> list[dict[str, Any]]:
         """Create realistic test data for parallel execution results."""
         return [
-            ExecutionResult(
-                worker_id="worker_1",
-                success=True,
-                execution_time=1.23,
-                actions_taken=["A", "B", "START", "A", "RIGHT"],
-                final_state={"x": 10, "y": 5, "level": 3},
-                performance_metrics={"frame_rate": 60, "input_lag": 16.7},
-                discovered_patterns=["menu_optimization", "movement_sequence"],
-            ),
-            ExecutionResult(
-                worker_id="worker_2",
-                success=True,
-                execution_time=1.45,
-                actions_taken=["A", "B", "START", "B", "RIGHT"],
-                final_state={"x": 12, "y": 5, "level": 3},
-                performance_metrics={"frame_rate": 59, "input_lag": 18.2},
-                discovered_patterns=["menu_optimization", "alternate_sequence"],
-            ),
-            ExecutionResult(
-                worker_id="worker_3",
-                success=False,
-                execution_time=2.1,
-                actions_taken=["A", "START", "LEFT", "A"],
-                final_state={"x": 8, "y": 4, "level": 2},
-                performance_metrics={"frame_rate": 45, "input_lag": 22.1},
-                discovered_patterns=["failed_sequence"],
-            ),
-            ExecutionResult(
-                worker_id="worker_4",
-                success=True,
-                execution_time=1.18,
-                actions_taken=["B", "A", "START", "A", "RIGHT"],
-                final_state={"x": 11, "y": 5, "level": 3},
-                performance_metrics={"frame_rate": 61, "input_lag": 15.9},
-                discovered_patterns=["menu_optimization", "speed_optimization"],
-            ),
+            {
+                "worker_id": "worker_1",
+                "success": True,
+                "execution_time": 1.23,
+                "actions_taken": ["A", "B", "START", "A", "RIGHT"],
+                "final_state": {"x": 10, "y": 5, "level": 3},
+                "performance_metrics": {"frame_rate": 60, "input_lag": 16.7},
+                "discovered_patterns": ["menu_optimization", "movement_sequence"],
+            },
+            {
+                "worker_id": "worker_2",
+                "success": True,
+                "execution_time": 1.45,
+                "actions_taken": ["A", "B", "START", "B", "RIGHT"],
+                "final_state": {"x": 12, "y": 5, "level": 3},
+                "performance_metrics": {"frame_rate": 59, "input_lag": 18.2},
+                "discovered_patterns": ["menu_optimization", "alternate_sequence"],
+            },
+            {
+                "worker_id": "worker_3",
+                "success": False,
+                "execution_time": 2.1,
+                "actions_taken": ["A", "START", "LEFT", "A"],
+                "final_state": {"x": 8, "y": 4, "level": 2},
+                "performance_metrics": {"frame_rate": 45, "input_lag": 22.1},
+                "discovered_patterns": ["failed_sequence"],
+            },
+            {
+                "worker_id": "worker_4",
+                "success": True,
+                "execution_time": 1.18,
+                "actions_taken": ["B", "A", "START", "A", "RIGHT"],
+                "final_state": {"x": 11, "y": 5, "level": 3},
+                "performance_metrics": {"frame_rate": 61, "input_lag": 15.9},
+                "discovered_patterns": ["menu_optimization", "speed_optimization"],
+            },
         ]
 
     def test_opus_strategist_identifies_patterns_across_parallel_results(self):
@@ -450,88 +448,130 @@ class TestParallelResultsAnalysis(unittest.TestCase):
         3. Extract strategic insights for learning acceleration
         4. Generate actionable pattern recommendations
         """
-        # Mock strategic process response with pattern analysis
-        self.mock_strategic_process.send_message.return_value = {
+        # Mock strategic process response with pattern analysis (JSON format)
+        self.mock_strategic_process.send_message.return_value = """{
             "identified_patterns": [
                 {
                     "pattern": "menu_optimization",
                     "frequency": 3,
                     "success_correlation": 1.0,
-                    "performance_impact": "reduces execution time by 15%",
+                    "performance_impact": "reduces execution time by 15%"
                 },
                 {
                     "pattern": "right_movement_sequence",
                     "frequency": 3,
                     "success_correlation": 1.0,
-                    "performance_impact": "consistent position advancement",
-                },
+                    "performance_impact": "consistent position advancement"
+                }
             ],
             "correlations": [
                 {
                     "variables": ["execution_time", "success_rate"],
                     "correlation": -0.73,
-                    "significance": "strong negative correlation",
+                    "significance": "strong negative correlation"
                 },
                 {
                     "variables": ["frame_rate", "input_lag"],
                     "correlation": -0.85,
-                    "significance": "strong performance relationship",
-                },
+                    "significance": "strong performance relationship"
+                }
             ],
             "strategic_insights": [
                 "Menu optimization pattern shows consistent 100% success rate",
                 "Performance correlation indicates frame_rate > 58 improves success",
-                "Failed sequences correlate with LEFT movements - avoid in speedruns",
+                "Failed sequences correlate with LEFT movements - avoid in speedruns"
             ],
-        }
+            "optimization_opportunities": [
+                "Prioritize menu optimization patterns for consistent performance",
+                "Use frame rate monitoring to predict success rates"
+            ],
+            "risk_factors": [
+                "LEFT movement patterns show high failure correlation"
+            ]
+        }"""
 
         # Execute parallel results analysis
         analysis_result = self.strategist.analyze_parallel_results(self.parallel_results)
 
-        # Verify pattern identification
+        # Verify analysis result structure
         self.assertIsInstance(analysis_result, list)
-        self.assertGreater(len(analysis_result), 0)
+        self.assertEqual(
+            len(analysis_result), 3
+        )  # pattern_identification, statistical_correlation, strategic_insights
+
+        # Verify analysis types are present
+        analysis_types = [result["analysis_type"] for result in analysis_result]
+        expected_types = ["pattern_identification", "statistical_correlation", "strategic_insights"]
+        for expected_type in expected_types:
+            self.assertIn(expected_type, analysis_types)
 
         # Verify strategic process was called with structured data
         self.mock_strategic_process.send_message.assert_called_once()
         call_args = self.mock_strategic_process.send_message.call_args[0][0]
 
         # Validate message structure contains parallel results data
-        self.assertIn("parallel_results", call_args.lower())
-        self.assertIn("pattern", call_args.lower())
-        self.assertIn("correlation", call_args.lower())
+        self.assertIn("PARALLEL RESULTS", call_args)
+        self.assertIn("PATTERN ANALYSIS", call_args)
+        self.assertIn("CORRELATION ANALYSIS", call_args)
 
-        # Verify analysis results contain expected pattern insights
-        patterns = analysis_result
-        self.assertIn("menu_optimization", str(patterns))
-        self.assertIn("correlation", str(patterns))
+        # Verify strategic insights contain expected pattern information
+        strategic_insights_result = next(
+            r for r in analysis_result if r["analysis_type"] == "strategic_insights"
+        )
+        insights_data = strategic_insights_result["results"]
+
+        self.assertIn("identified_patterns", insights_data)
+        self.assertIn("strategic_insights", insights_data)
+        self.assertIn("menu_optimization", str(insights_data))
 
     def test_statistical_correlation_analysis(self):
         """Test statistical correlation analysis across parallel execution results."""
-        # Configure mock to return correlation data
-        self.mock_strategic_process.send_message.return_value = {
-            "correlation_matrix": {
-                ("execution_time", "success_rate"): -0.73,
-                ("frame_rate", "input_lag"): -0.85,
-                ("actions_count", "execution_time"): 0.67,
-            },
-            "significant_correlations": [
-                {"variables": ["frame_rate", "input_lag"], "r": -0.85, "p_value": 0.001}
+        # Configure mock to return correlation data (JSON format)
+        self.mock_strategic_process.send_message.return_value = """{
+            "identified_patterns": [],
+            "correlations": [
+                {"variables": ["frame_rate", "input_lag"], "correlation": -0.85, "significance": "strong"}
             ],
-        }
+            "strategic_insights": [
+                "Strong correlation found between frame_rate and input_lag"
+            ],
+            "optimization_opportunities": [
+                "Monitor frame_rate to predict input_lag performance"
+            ],
+            "risk_factors": []
+        }"""
 
         # Execute correlation analysis
         analysis_result = self.strategist.analyze_parallel_results(self.parallel_results)
 
         # Verify correlation analysis was performed
         self.assertIsNotNone(analysis_result)
+        self.assertIsInstance(analysis_result, list)
+
+        # Find statistical correlation result
+        correlation_result = next(
+            r for r in analysis_result if r["analysis_type"] == "statistical_correlation"
+        )
+        self.assertIsNotNone(correlation_result)
+
         # Strategic process should receive structured correlation request
         call_message = self.mock_strategic_process.send_message.call_args[0][0]
-        self.assertIn("correlation", call_message.lower())
-        self.assertIn("statistical", call_message.lower())
+        self.assertIn("CORRELATION ANALYSIS", call_message)
+        self.assertIn("STATISTICAL", call_message)
 
     def test_pattern_frequency_analysis(self):
         """Test frequency analysis of discovered patterns across results."""
+        # Mock response for frequency analysis
+        self.mock_strategic_process.send_message.return_value = """{
+            "identified_patterns": [
+                {"pattern": "menu_optimization", "frequency": 3, "strategic_value": "high"}
+            ],
+            "correlations": [],
+            "strategic_insights": ["High-frequency patterns identified"],
+            "optimization_opportunities": [],
+            "risk_factors": []
+        }"""
+
         _ = self.strategist.analyze_parallel_results(self.parallel_results)
 
         # Verify strategic process analyzes pattern frequencies
@@ -541,6 +581,17 @@ class TestParallelResultsAnalysis(unittest.TestCase):
 
     def test_handles_mixed_success_failure_results(self):
         """Test analysis handles mixed successful and failed execution results."""
+        # Mock response for mixed results
+        self.mock_strategic_process.send_message.return_value = """{
+            "identified_patterns": [
+                {"pattern": "menu_optimization", "success_rate": 0.75}
+            ],
+            "correlations": [],
+            "strategic_insights": ["Mixed success/failure results analyzed"],
+            "optimization_opportunities": ["Focus on successful patterns"],
+            "risk_factors": [{"pattern": "failed_sequence", "failure_rate": 0.25}]
+        }"""
+
         # Results contain both successes and failures
         mixed_results = self.parallel_results  # Already contains success/failure mix
 
@@ -555,9 +606,6 @@ class TestParallelResultsAnalysis(unittest.TestCase):
         self.assertIn("failed", call_message.lower())
 
 
-@pytest.mark.skip(
-    reason="API changed - analyze_parallel_results method removed from new OpusStrategist API"
-)
 @pytest.mark.medium
 class TestResultCompression(unittest.TestCase):
     """Test result compression for efficient strategic processing."""
@@ -703,9 +751,6 @@ class TestResultCompression(unittest.TestCase):
         self.assertIsNotNone(analysis_result)
 
 
-@pytest.mark.skip(
-    reason="API changed - analyze_parallel_results method removed from new OpusStrategist API"
-)
 @pytest.mark.fast
 class TestPerformanceTargets(unittest.TestCase):
     """Test algorithmic performance targets for strategic processing."""

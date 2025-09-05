@@ -18,8 +18,9 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, cast
 
-import docker
 import requests
+
+import docker
 from docker.errors import APIError, DockerException, ImageNotFound
 
 # Import compatibility layer factory for transparent adapter selection
@@ -76,6 +77,34 @@ class ExecutionStatus(Enum):
     FAILED = auto()
     TIMEOUT = auto()
     CANCELLED = auto()
+
+
+class ContainerHealthStatus(Enum):
+    """
+    Health status enumeration for EmulatorPool container instances.
+
+    Provides clear state tracking for workstation development with
+    explicit status transitions and structured monitoring.
+    """
+
+    HEALTHY = "healthy"  # Container running and responsive
+    UNHEALTHY = "unhealthy"  # Container running but not responsive
+    STOPPED = "stopped"  # Container exists but not running
+    UNKNOWN = "unknown"  # Container state cannot be determined
+
+    def __str__(self) -> str:
+        """Return enum value for display."""
+        return self.value
+
+    @property
+    def is_available(self) -> bool:
+        """Check if container is available for work allocation."""
+        return self == ContainerHealthStatus.HEALTHY
+
+    @property
+    def needs_restart(self) -> bool:
+        """Check if container needs restart or replacement."""
+        return self in (ContainerHealthStatus.STOPPED, ContainerHealthStatus.UNHEALTHY)
 
 
 class EmulatorPoolError(Exception):
@@ -157,35 +186,82 @@ class ExecutionResult:
         }
 
 
+@dataclass
+class ContainerHealthInfo:
+    """
+    Structured health information for individual container instances.
+
+    Provides comprehensive tracking of container state with timestamps
+    for workstation development monitoring and debugging.
+    """
+
+    container_id: str  # Docker container ID (short form)
+    port: int  # HTTP port for communication
+    status: ContainerHealthStatus  # Current health status
+    last_check_time: float  # Unix timestamp of last health check
+    docker_status: str  # Docker container status (running, stopped, etc.)
+
+    # Optional diagnostic information
+    error_message: str | None = None  # Last error encountered
+    response_time_ms: float | None = None  # Latest health check response time
+    consecutive_failures: int = 0  # Count of consecutive health check failures
+
+    def __post_init__(self) -> None:
+        """Ensure container_id is in short form."""
+        if len(self.container_id) > 12:
+            self.container_id = self.container_id[:12]
+
+    @property
+    def age_seconds(self) -> float:
+        """Get age of this health status in seconds."""
+        return time.time() - self.last_check_time
+
+    @property
+    def is_stale(self, max_age_seconds: float = 60.0) -> bool:
+        """Check if health status is stale (older than max_age_seconds)."""
+        return self.age_seconds > max_age_seconds
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for logging and API responses."""
+        return {
+            "container_id": self.container_id,
+            "port": self.port,
+            "status": self.status.value,
+            "last_check_time": self.last_check_time,
+            "docker_status": self.docker_status,
+            "error_message": self.error_message,
+            "response_time_ms": self.response_time_ms,
+            "consecutive_failures": self.consecutive_failures,
+            "age_seconds": self.age_seconds,
+        }
+
+
 class PokemonGymClient:
     """
-    Production-grade HTTP client for Pokemon-gym emulator communication.
+    Workstation-optimized HTTP client for Pokemon-gym emulator communication.
 
-    Features:
-    - Circuit breaker pattern for resilience
-    - Exponential backoff retry logic
-    - Comprehensive error handling with actionable messages
+    Simplified for development use with essential resilience features:
+    - Basic error handling with clear messages
+    - Simplified retry logic for workstation reliability
     - Checkpoint loading capability
-    - Request timing and performance monitoring
+    - Essential performance monitoring
 
-    Design follows SOLID principles:
-    - Single Responsibility: HTTP communication with Pokemon-gym
-    - Open/Closed: Extensible retry and circuit breaker strategies
-    - Dependency Inversion: Abstract HTTP operations
+    Optimized for workstation development (4 containers max) rather than
+    production high-concurrency scenarios.
     """
 
-    # Circuit breaker thresholds
-    CIRCUIT_BREAKER_FAILURE_THRESHOLD = 5
-    CIRCUIT_BREAKER_RECOVERY_TIMEOUT = 30  # seconds
+    # Workstation-appropriate thresholds (simpler than production)
+    MAX_CONSECUTIVE_FAILURES = 3  # Fail fast for development
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD = 3  # Circuit breaker threshold for tests
+    FAILURE_RESET_TIMEOUT = 10  # Quick recovery for development iteration
 
-    # Retry configuration
-    MAX_RETRIES = 3
-    INITIAL_RETRY_DELAY = 0.1  # 100ms
-    MAX_RETRY_DELAY = 2.0  # 2s
+    # Simple retry configuration
+    MAX_RETRIES = 2  # Fewer retries for faster feedback
+    RETRY_DELAY = 0.5  # Simple fixed delay, no exponential backoff
 
     def __init__(self, port: int, container_id: str):
         """
-        Initialize client for specific emulator instance.
+        Initialize workstation-optimized client for specific emulator instance.
 
         Args:
             port: HTTP port for emulator communication
@@ -196,15 +272,14 @@ class PokemonGymClient:
         self.base_url = f"http://localhost:{port}"
         self.session = requests.Session()
 
-        # Circuit breaker state
-        self._circuit_breaker_failures = 0
-        self._circuit_breaker_open_time = 0.0
-        self._circuit_breaker_lock = threading.Lock()
+        # Simplified failure tracking for workstation use
+        self._consecutive_failures = 0
+        self._last_failure_time = 0.0
+        self._failure_lock = threading.Lock()  # Simple lock for failure tracking
 
-        # Performance tracking
+        # Basic performance tracking
         self._request_count = 0
         self._total_request_time = 0.0
-        self._last_request_time = 0.0
 
         logger.info(f"PokemonGymClient initialized for port {port}, container {container_id[:12]}")
 
@@ -270,7 +345,6 @@ class PokemonGymClient:
             self._update_performance_metrics(time.perf_counter() - start_time)
             return response.status_code == 200
         except requests.RequestException:
-            self._record_circuit_breaker_failure()
             return False
 
     def close(self) -> None:
@@ -314,10 +388,10 @@ class PokemonGymClient:
 
     def get_performance_metrics(self) -> dict[str, Any]:
         """
-        Get client performance metrics for monitoring.
+        Get simplified client performance metrics for workstation monitoring.
 
         Returns:
-            Dictionary with performance statistics
+            Dictionary with essential performance statistics
         """
         avg_request_time = (
             self._total_request_time / self._request_count if self._request_count > 0 else 0.0
@@ -326,9 +400,10 @@ class PokemonGymClient:
         return {
             "total_requests": self._request_count,
             "average_request_time_ms": int(avg_request_time * 1000),
-            "last_request_time_ms": int(self._last_request_time * 1000),
-            "circuit_breaker_failures": self._circuit_breaker_failures,
-            "circuit_breaker_open": self._is_circuit_breaker_open(),
+            "consecutive_failures": self._consecutive_failures,
+            "circuit_breaker_failures": self._consecutive_failures,  # Alias for test compatibility
+            "circuit_breaker_open": self._is_circuit_breaker_open(),  # Alias for test compatibility
+            "temporarily_disabled": self._is_temporarily_disabled(),
         }
 
     # Private methods for resilience patterns
@@ -343,7 +418,7 @@ class PokemonGymClient:
         operation_name: str = "unknown",
     ) -> dict[str, Any]:
         """
-        Execute HTTP request with circuit breaker and retry logic.
+        Execute HTTP request with simplified workstation-appropriate retry logic.
 
         Args:
             method: HTTP method (GET, POST, etc.)
@@ -359,11 +434,11 @@ class PokemonGymClient:
         Raises:
             EmulatorPoolError: On communication failure after all retries
         """
-        # Check circuit breaker first
-        if self._is_circuit_breaker_open():
+        # Simple failure check for workstation use
+        if self._is_temporarily_disabled():
             raise EmulatorPoolError(
-                f"Circuit breaker OPEN for emulator on port {self.port}. "
-                f"Too many recent failures. Retry after {self.CIRCUIT_BREAKER_RECOVERY_TIMEOUT}s."
+                f"Circuit breaker OPEN - Emulator on port {self.port} temporarily disabled due to consecutive failures. "
+                f"Will retry after {self.FAILURE_RESET_TIMEOUT}s."
             )
 
         last_exception = None
@@ -387,12 +462,10 @@ class PokemonGymClient:
                 # Check response status
                 response.raise_for_status()
 
-                # Track performance
+                # Track performance and reset failure count on success
                 request_time = time.perf_counter() - start_time
                 self._update_performance_metrics(request_time)
-
-                # Reset circuit breaker on success
-                self._reset_circuit_breaker()
+                self._reset_failures()
 
                 # Return response data
                 if response.content:
@@ -402,22 +475,20 @@ class PokemonGymClient:
 
             except requests.RequestException as e:
                 last_exception = e
-                self._record_circuit_breaker_failure()
+                self._record_failure()
 
-                # Don't retry on certain error types
+                # Don't retry on client errors (same as before)
                 if isinstance(e, requests.HTTPError) and e.response is not None:
                     if e.response.status_code in (400, 401, 403, 404):
-                        # Client errors shouldn't be retried
                         break
 
-                # Calculate exponential backoff delay
+                # Simple fixed retry delay (no exponential backoff)
                 if attempt < self.MAX_RETRIES:
-                    delay = min(self.INITIAL_RETRY_DELAY * (2**attempt), self.MAX_RETRY_DELAY)
                     logger.warning(
                         f"Request failed on {self}, attempt {attempt + 1}/{self.MAX_RETRIES + 1}. "
-                        f"Retrying in {delay:.2f}s. Error: {e}"
+                        f"Retrying in {self.RETRY_DELAY}s. Error: {e}"
                     )
-                    time.sleep(delay)
+                    time.sleep(self.RETRY_DELAY)
                 else:
                     logger.error(
                         f"Request failed on {self} after {self.MAX_RETRIES + 1} attempts. "
@@ -430,59 +501,72 @@ class PokemonGymClient:
             f"{self.MAX_RETRIES + 1} attempts. Last error: {last_exception}"
         ) from last_exception
 
-    def _is_circuit_breaker_open(self) -> bool:
+    def _is_temporarily_disabled(self) -> bool:
         """
-        Check if circuit breaker is currently open.
+        Check if emulator is temporarily disabled due to consecutive failures.
+
+        Simplified workstation logic with fail-fast behavior.
 
         Returns:
-            True if circuit breaker is open (preventing requests)
+            True if emulator should be temporarily disabled
         """
-        with self._circuit_breaker_lock:
-            if self._circuit_breaker_failures < self.CIRCUIT_BREAKER_FAILURE_THRESHOLD:
+        with self._failure_lock:
+            # Check if we have too many consecutive failures
+            if self._consecutive_failures < self.MAX_CONSECUTIVE_FAILURES:
                 return False
 
-            # Check if recovery timeout has passed
-            if (
-                time.time() - self._circuit_breaker_open_time
-                > self.CIRCUIT_BREAKER_RECOVERY_TIMEOUT
-            ):
-                # Reset circuit breaker for half-open state
-                self._circuit_breaker_failures = 0
+            # Check if enough time has passed for reset
+            if time.time() - self._last_failure_time > self.FAILURE_RESET_TIMEOUT:
+                # Reset failures after timeout
+                self._consecutive_failures = 0
                 return False
 
             return True
 
-    def _record_circuit_breaker_failure(self) -> None:
+    def _is_circuit_breaker_open(self) -> bool:
         """
-        Record a failure for circuit breaker tracking.
+        Alias for _is_temporarily_disabled() to match test expectations.
+
+        Returns:
+            True if circuit breaker is open (emulator temporarily disabled)
         """
-        with self._circuit_breaker_lock:
-            self._circuit_breaker_failures += 1
-            if self._circuit_breaker_failures >= self.CIRCUIT_BREAKER_FAILURE_THRESHOLD:
-                self._circuit_breaker_open_time = time.time()
+        return self._is_temporarily_disabled()
+
+    def _record_failure(self) -> None:
+        """
+        Record a failure for simple workstation failure tracking.
+        """
+        with self._failure_lock:
+            self._consecutive_failures += 1
+            self._last_failure_time = time.time()
+
+            if self._consecutive_failures >= self.MAX_CONSECUTIVE_FAILURES:
                 logger.warning(
-                    f"Circuit breaker OPENED for {self} after {self._circuit_breaker_failures} failures"
+                    f"Emulator {self} temporarily disabled after {self._consecutive_failures} "
+                    f"consecutive failures. Will retry after {self.FAILURE_RESET_TIMEOUT}s."
                 )
 
-    def _reset_circuit_breaker(self) -> None:
+    def _reset_failures(self) -> None:
         """
-        Reset circuit breaker after successful request.
+        Reset failure tracking after successful request.
         """
-        with self._circuit_breaker_lock:
-            if self._circuit_breaker_failures > 0:
-                logger.info(f"Circuit breaker RESET for {self} after successful request")
-                self._circuit_breaker_failures = 0
+        with self._failure_lock:
+            if self._consecutive_failures > 0:
+                logger.info(
+                    f"Emulator {self} recovered after {self._consecutive_failures} failures"
+                )
+                self._consecutive_failures = 0
+                self._last_failure_time = 0.0
 
     def _update_performance_metrics(self, request_time: float) -> None:
         """
-        Update performance tracking metrics.
+        Update basic performance tracking metrics for workstation monitoring.
 
         Args:
             request_time: Request duration in seconds
         """
         self._request_count += 1
         self._total_request_time += request_time
-        self._last_request_time = request_time
 
 
 class EmulatorContext:
@@ -574,6 +658,10 @@ class EmulatorPool:
         self.clients_by_port: dict[int, Any] = (
             {}
         )  # All clients by port (PokemonGymClient or PokemonGymAdapter)
+
+        # Health status tracking for workstation monitoring
+        self.container_health: dict[int, ContainerHealthInfo] = {}
+        self._health_lock = threading.Lock()  # Simple lock for health status updates
 
         # Core Pokemon functionality components (with graceful degradation)
         if POKEMON_COMPONENTS_AVAILABLE:
@@ -1252,45 +1340,222 @@ class EmulatorPool:
                 checkpoint_id=checkpoint_id,
             )
 
-    def health_check(self) -> dict[str, Any]:
+    def _update_container_health(
+        self,
+        port: int,
+        container_id: str,
+        status: ContainerHealthStatus,
+        docker_status: str,
+        error_message: str | None = None,
+        response_time_ms: float | None = None,
+    ) -> None:
         """
-        Verify all emulators are responsive and healthy.
+        Update health status for a specific container with structured logging.
+
+        Args:
+            port: Container HTTP port
+            container_id: Docker container ID
+            status: New health status
+            docker_status: Current Docker container status
+            error_message: Optional error message if health check failed
+            response_time_ms: Optional response time for successful health checks
+        """
+        with self._health_lock:
+            current_time = time.time()
+
+            # Get current health info to track status changes
+            current_health = self.container_health.get(port)
+            status_changed = current_health is None or current_health.status != status
+
+            # Track consecutive failures
+            consecutive_failures = 0
+            if current_health and status != ContainerHealthStatus.HEALTHY:
+                consecutive_failures = current_health.consecutive_failures + 1
+            elif status == ContainerHealthStatus.HEALTHY:
+                consecutive_failures = 0
+
+            # Update health status
+            self.container_health[port] = ContainerHealthInfo(
+                container_id=container_id,
+                port=port,
+                status=status,
+                last_check_time=current_time,
+                docker_status=docker_status,
+                error_message=error_message,
+                response_time_ms=response_time_ms,
+                consecutive_failures=consecutive_failures,
+            )
+
+            # Structured logging for health status changes
+            if status_changed:
+                old_status = current_health.status.value if current_health else "unknown"
+                logger.info(
+                    f"Container health status changed: port={port} container={container_id[:12]} "
+                    f"{old_status} -> {status.value} docker_status={docker_status}"
+                )
+
+                # Log additional context for unhealthy states
+                if status != ContainerHealthStatus.HEALTHY:
+                    logger.warning(
+                        f"Container unhealthy: port={port} container={container_id[:12]} "
+                        f"status={status.value} consecutive_failures={consecutive_failures} "
+                        f"error='{error_message or 'none'}'"
+                    )
+
+    def get_container_health_status(self, port: int) -> ContainerHealthInfo | None:
+        """
+        Get current health status for a specific container.
+
+        Args:
+            port: Container HTTP port
 
         Returns:
-            Health status report for all emulators
+            ContainerHealthInfo if container exists, None otherwise
+        """
+        with self._health_lock:
+            return self.container_health.get(port)
+
+    def get_all_container_health(self) -> dict[int, ContainerHealthInfo]:
+        """
+        Get health status for all containers.
+
+        Returns:
+            Dictionary mapping ports to ContainerHealthInfo
+        """
+        with self._health_lock:
+            return self.container_health.copy()
+
+    def health_check(self) -> dict[str, Any]:
+        """
+        Comprehensive health check with Docker status and enum-based status tracking.
+
+        Performs both HTTP connectivity checks and Docker container status validation
+        for complete workstation health monitoring.
+
+        Returns:
+            Enhanced health status report with structured container information
         """
         if not self.containers:
-            return {"status": "not_initialized", "healthy_count": 0, "total_count": 0}
+            return {
+                "status": "not_initialized",
+                "healthy_count": 0,
+                "total_count": 0,
+                "containers": [],
+            }
 
         health_results = {}
         healthy_count = 0
 
-        for port, client in self.clients_by_port.items():
+        # Create a mapping of ports to containers for Docker status checking
+        container_by_port = {}
+        for container in self.containers:
             try:
-                is_healthy = client.is_healthy()
-                health_results[port] = {
-                    "healthy": is_healthy,
-                    "container_id": client.container_id[:12],
-                    "error": None,
-                }
-                if is_healthy:
-                    healthy_count += 1
+                if (
+                    hasattr(container, "attrs")
+                    and hasattr(container.attrs, "get")
+                    and "NetworkSettings" in container.attrs
+                ):
+                    ports = container.attrs["NetworkSettings"].get("Ports", {})
+                    for port_spec, bindings in ports.items():
+                        if bindings and port_spec.endswith("/tcp"):
+                            host_port = int(bindings[0]["HostPort"])
+                            container_by_port[host_port] = container
+            except (TypeError, AttributeError):
+                # Handle case where attrs might be a Mock object or not properly structured
+                continue
 
-            except Exception as e:
-                health_results[port] = {
-                    "healthy": False,
-                    "container_id": client.container_id[:12],
-                    "error": str(e),
-                }
-                logger.error(f"Health check failed for emulator on port {port}: {e}")
+        for port, client in self.clients_by_port.items():
+            container_id = client.container_id
+            docker_status = "unknown"
+            status = ContainerHealthStatus.UNKNOWN
+            error_message = None
+            response_time_ms = None
 
-        overall_status = "healthy" if healthy_count == len(self.clients_by_port) else "degraded"
+            # Check Docker container status first
+            current_container: Any | None = container_by_port.get(port)
+
+            # Fallback: if port mapping failed, try to find container by ID
+            if not current_container:
+                for container in self.containers:
+                    if hasattr(container, "id") and container.id == container_id:
+                        current_container = container
+                        break
+
+            if current_container:
+                try:
+                    current_container.reload()
+                    docker_status = current_container.status
+
+                    if docker_status != "running":
+                        status = ContainerHealthStatus.STOPPED
+                        error_message = f"Docker container not running: {docker_status}"
+                    else:
+                        # Container is running, now check HTTP responsiveness
+                        start_time = time.time()
+                        try:
+                            is_responsive = client.is_healthy()
+                            response_time_ms = (time.time() - start_time) * 1000
+
+                            if is_responsive:
+                                status = ContainerHealthStatus.HEALTHY
+                            else:
+                                status = ContainerHealthStatus.UNHEALTHY
+                                error_message = "Container running but not responsive"
+
+                        except Exception as e:
+                            response_time_ms = (time.time() - start_time) * 1000
+                            status = ContainerHealthStatus.UNHEALTHY
+                            error_message = f"HTTP health check failed: {str(e)}"
+
+                except Exception as e:
+                    status = ContainerHealthStatus.UNKNOWN
+                    error_message = f"Docker status check failed: {str(e)}"
+            else:
+                # No container found for this port
+                status = ContainerHealthStatus.UNKNOWN
+                error_message = "No Docker container found for port"
+
+            # Update health status tracking
+            self._update_container_health(
+                port=port,
+                container_id=container_id,
+                status=status,
+                docker_status=docker_status,
+                error_message=error_message,
+                response_time_ms=response_time_ms,
+            )
+
+            # Build health result
+            health_results[port] = {
+                "status": status.value,
+                "healthy": status.is_available,
+                "docker_status": docker_status,
+                "container_id": container_id[:12],
+                "error": error_message,
+                "response_time_ms": response_time_ms,
+                "needs_restart": status.needs_restart,
+            }
+
+            if status.is_available:
+                healthy_count += 1
+
+        # Determine overall pool status
+        total_count = len(self.clients_by_port)
+        if total_count == 0:
+            overall_status = "not_initialized"
+        elif healthy_count == total_count:
+            overall_status = "healthy"
+        elif healthy_count == 0:
+            overall_status = "critical"
+        else:
+            overall_status = "degraded"
 
         return {
             "status": overall_status,
             "healthy_count": healthy_count,
-            "total_count": len(self.clients_by_port),
-            "emulators": health_results,
+            "total_count": total_count,
+            "containers": list(health_results.values()),
+            "emulators": health_results,  # Backward compatibility
         }
 
     def get_status(self) -> dict[str, Any]:

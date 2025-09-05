@@ -4789,8 +4789,14 @@ class SonnetWorkerPool:
                 optimization_history=pattern_data.get("optimization_history", []),
             )
 
+<<<<<<< HEAD
             # Store pattern using MCP memory integration via QueryBuilder
             result = self.query_builder.store_pattern(strategy)
+=======
+            # Store pattern using MCP memory integration
+            query_builder = QueryBuilder()
+            result = query_builder.store_pattern(strategy)
+>>>>>>> origin/main
 
             if result.get("success", False):
                 pattern_id = result.get("memory_id")
@@ -4825,6 +4831,10 @@ class SonnetWorkerPool:
         """
         try:
             # Build query based on filter
+<<<<<<< HEAD
+=======
+            query_builder = QueryBuilder()
+>>>>>>> origin/main
             if context_filter:
                 # Use context information to build targeted query
                 search_terms = []
@@ -4836,8 +4846,12 @@ class SonnetWorkerPool:
             else:
                 query = "PokemonStrategy"
 
+<<<<<<< HEAD
             # Use QueryBuilder for pattern retrieval
             result = self.query_builder.search_patterns(query)
+=======
+            result = query_builder.search_patterns(query)
+>>>>>>> origin/main
 
             if result.get("success", False):
                 patterns = []

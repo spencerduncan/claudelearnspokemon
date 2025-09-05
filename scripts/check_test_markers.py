@@ -64,6 +64,8 @@ def check_test_markers() -> bool:
             print("\nTo fix this, run:")
             print("  python scripts/profile_tests.py")
             print("  python scripts/apply_markers.py")
+            print("\nOr for a quick fix (marks remaining as fast):")
+            print("  python scripts/mark_remaining_tests.py")
             print(
                 "\nOr manually add @pytest.mark.fast/@pytest.mark.medium/@pytest.mark.slow to test classes"
             )

@@ -18,13 +18,12 @@ from claudelearnspokemon.emulator_pool import EmulatorPool
 from tests.test_emulator_pool_concurrent import ConcurrentResourceTracker
 
 
-@pytest.mark.fast
-@pytest.mark.medium
+@pytest.mark.performance
 class TestConcurrentPerformanceBenchmark(unittest.TestCase):
     """Benchmark concurrent performance with honest measurement of actual bottlenecks"""
 
-    @pytest.mark.fast
     @pytest.mark.skip(reason="Performance benchmark - system dependent, unrelated to Issue #99")
+    @pytest.mark.slow
     def test_queue_efficiency_benchmark(self):
         """Benchmark Python queue.Queue efficiency - labeled honestly as queue operations"""
         with patch("claudelearnspokemon.emulator_pool.docker.from_env") as mock_docker:

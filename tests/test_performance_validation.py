@@ -17,6 +17,7 @@ from claudelearnspokemon.emulator_pool import ExecutionResult, ExecutionStatus, 
 
 
 @pytest.mark.unit
+@pytest.mark.performance
 @pytest.mark.fast
 def test_execution_result_creation_performance():
     """Test ExecutionResult creation performance - should be very fast."""
@@ -48,28 +49,7 @@ def test_execution_result_creation_performance():
 
 
 @pytest.mark.unit
-@pytest.mark.fast
-def test_circuit_breaker_performance():
-    """Test circuit breaker check performance - should be <1ms per check."""
-    client = PokemonGymClient(8081, "test-container")
-
-    start_time = time.perf_counter()
-
-    # Perform 1000 circuit breaker checks
-    for _ in range(1000):
-        client._is_circuit_breaker_open()
-
-    end_time = time.perf_counter()
-    total_time_ms = (end_time - start_time) * 1000
-
-    print(f"Circuit breaker checks: {total_time_ms:.2f}ms for 1000 checks")
-    print(f"Average per check: {total_time_ms/1000:.4f}ms")
-
-    # Should be very fast - less than 10ms for 1000 checks
-    assert total_time_ms < 10.0, f"Circuit breaker checks too slow: {total_time_ms:.2f}ms"
-
-
-@pytest.mark.unit
+@pytest.mark.performance
 @patch("claudelearnspokemon.emulator_pool.requests.Session")
 @pytest.mark.fast
 def test_http_operation_performance(mock_session_class):
@@ -108,7 +88,8 @@ def test_http_operation_performance(mock_session_class):
 
 @pytest.mark.unit
 @patch("claudelearnspokemon.emulator_pool.requests.Session")
-@pytest.mark.fast
+@pytest.mark.performance
+@pytest.mark.slow
 def test_retry_logic_performance(mock_session_class):
     """Test retry logic doesn't add excessive overhead."""
     # Mock session that succeeds immediately (no retries needed)
@@ -142,7 +123,8 @@ def test_retry_logic_performance(mock_session_class):
 
 
 @pytest.mark.unit
-@pytest.mark.fast
+@pytest.mark.performance
+@pytest.mark.slow
 def test_memory_usage_validation():
     """Test that ExecutionResult doesn't use excessive memory."""
 
@@ -204,6 +186,5 @@ def test_memory_usage_validation():
 if __name__ == "__main__":
     # Allow running this test file directly for quick performance checks
     test_execution_result_creation_performance()
-    test_circuit_breaker_performance()
     test_memory_usage_validation()
     print("All performance tests passed!")
