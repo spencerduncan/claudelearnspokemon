@@ -253,8 +253,9 @@ class ResponseCache:
 
                 # Remove expired entries
                 for key in expired_keys:
-                    del self._cache[key]
-                    self._metrics["ttl_evictions"] += 1
+                    if key in self._cache:  # TOCTOU protection (Issue #239)
+                        del self._cache[key]
+                        self._metrics["ttl_evictions"] += 1
 
                 if expired_keys:
                     logger.debug(f"Cleanup removed {len(expired_keys)} expired entries")

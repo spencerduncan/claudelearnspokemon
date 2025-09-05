@@ -78,3 +78,50 @@ class TestResponseCacheRaceConditionFix:
         
         assert results["errors"] == 0, f"Race conditions detected: {results['errors']}"
         assert results["operations"] > 1000, "Insufficient stress test operations"
+    
+    def test_toctou_vulnerability_protection(self):
+        """Test TOCTOU protection in cleanup deletion loop."""
+        import threading
+        cache = ResponseCache(max_size=50, default_ttl=0.1, cleanup_interval=0.05)
+        time.sleep(0.1)  # Let background thread start
+        
+        results = {"toctou_errors": 0, "operations": 0}
+        
+        def aggressive_operations():
+            """Aggressively add/remove entries to create TOCTOU scenarios."""
+            try:
+                for i in range(200):
+                    key = f"toctou_{i % 10}"
+                    response = StrategyResponse(
+                        strategy_id="toctou_test",
+                        experiments=[],
+                        strategic_insights=["toctou_insight"], 
+                        next_checkpoints=["toctou_checkpoint"]
+                    )
+                    cache.put(key, response, ttl=0.05)  # Very short TTL
+                    
+                    # Immediately try operations that could conflict with cleanup
+                    cache.get(key)
+                    cache.invalidate(key)  # This removes keys that cleanup might try to remove
+                    results["operations"] += 3
+                    
+                    if i % 20 == 0:
+                        time.sleep(0.001)  # Brief pause to let cleanup run
+                        
+            except KeyError as e:
+                # This is what we're testing against - should not happen with TOCTOU fix
+                results["toctou_errors"] += 1
+                print(f"TOCTOU KeyError detected: {e}")
+            except Exception as e:
+                print(f"Other error: {e}")
+        
+        # Run multiple threads to create contention
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(aggressive_operations) for _ in range(10)]
+            time.sleep(1.5)  # Let them run and create contention scenarios
+            concurrent.futures.wait(futures)
+        
+        # With TOCTOU protection, we should have 0 KeyErrors
+        assert results["toctou_errors"] == 0, f"TOCTOU vulnerabilities detected: {results['toctou_errors']}"
+        assert results["operations"] > 1000, "Insufficient TOCTOU test operations"
+        assert cache.get_stats()["cleanup_runs"] > 5, "Cleanup should run multiple times during test"
