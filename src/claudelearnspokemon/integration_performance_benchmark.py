@@ -688,7 +688,7 @@ class IntegrationPerformanceBenchmark:
             tiles[10, 9] = 255  # Player position
         elif complexity == "complex":
             # Complex terrain with various tile types
-            tiles = np.random.randint(0, 50, (20, 18), dtype=np.uint8)
+            tiles = np.random.randint(0, 50, (20, 18), dtype=np.uint8)  # type: ignore
             tiles[0:2, :] = 100  # Top border (solid)
             tiles[18:20, :] = 100  # Bottom border (solid)
             tiles[:, 0:2] = 100  # Left border (solid)
@@ -697,7 +697,7 @@ class IntegrationPerformanceBenchmark:
             tiles[5, 5] = 200  # NPC
             tiles[15, 12] = 201  # Another NPC
         else:  # medium complexity
-            tiles = np.random.randint(0, 30, (20, 18), dtype=np.uint8)
+            tiles = np.random.randint(0, 30, (20, 18), dtype=np.uint8)  # type: ignore
             tiles[10, 9] = 255  # Player position
             tiles[8, 7] = 200  # NPC
 

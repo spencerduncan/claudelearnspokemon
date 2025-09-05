@@ -954,7 +954,7 @@ class PerformanceMonitor:
             "strategic": strategic_rate
         }
 
-    def _calculate_overall_performance(self, efficiency_metrics: list[ConversationEfficiencyMetrics]) -> dict[str, float]:
+    def _calculate_overall_performance(self, efficiency_metrics: list[ConversationEfficiencyMetrics]) -> dict[str, float | str]:
         """Calculate overall performance score from efficiency metrics."""
         if not efficiency_metrics:
             return {"overall_score": 1.0, "performance_grade": "A"}

@@ -22,7 +22,7 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
+from typing import Any, Optional
 
 from .claude_process import ClaudeProcess
 from .performance_monitor import MonitoringThresholds, PerformanceMonitor
@@ -45,7 +45,7 @@ class ClaudeCodeManager:
     Principle while maintaining all performance optimizations.
     """
 
-    def __init__(self, max_workers: int = 5, enable_performance_monitoring: bool = True, monitoring_thresholds: MonitoringThresholds = None):
+    def __init__(self, max_workers: int = 5, enable_performance_monitoring: bool = True, monitoring_thresholds: Optional[MonitoringThresholds] = None):
         """
         Initialize manager with clean component architecture and performance monitoring.
 
@@ -249,7 +249,7 @@ class ClaudeCodeManager:
         context_size: int = 0,
         process_type: str = "unknown",
         success: bool = True,
-        error_details: str = None
+        error_details: Optional[str] = None
     ) -> None:
         """
         Record a conversation message exchange for performance monitoring.

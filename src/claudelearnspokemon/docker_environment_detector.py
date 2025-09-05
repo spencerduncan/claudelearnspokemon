@@ -18,10 +18,11 @@ import threading
 
 try:
     import docker
-    from docker.errors import DockerException
+    from docker.errors import DockerException  # type: ignore[import-not-found]
     DOCKER_AVAILABLE = True
 except ImportError:
     DOCKER_AVAILABLE = False
+    DockerException = type('DockerException', (Exception,), {})  # Fallback for type checking
 
 
 logger = logging.getLogger(__name__)
@@ -72,7 +73,7 @@ class DockerEnvironmentDetector:
         """
         with self._lock:
             # Check cache first (unless forced refresh)
-            if not force_refresh and self._is_cache_valid():
+            if not force_refresh and self._is_cache_valid() and self._cache is not None:
                 logger.debug("Using cached Docker detection result")
                 return self._cache
             
@@ -142,7 +143,7 @@ class DockerEnvironmentDetector:
         
         try:
             # Try to create Docker client and ping daemon
-            client = docker.from_env(timeout=5)  # 5 second timeout for responsiveness
+            client = docker.from_env(timeout=5)  # type: ignore[attr-defined]  # 5 second timeout for responsiveness
             
             # Attempt to ping the Docker daemon
             client.ping()

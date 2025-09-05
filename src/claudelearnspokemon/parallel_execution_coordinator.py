@@ -920,7 +920,7 @@ class ParallelExecutionCoordinator:
         start_time = time.time()
         
         try:
-            health_status = {
+            health_status: dict[str, Any] = {
                 "coordinator_id": self.coordination_id,
                 "overall_health": "unknown",
                 "state": self.state.name,
@@ -1001,7 +1001,7 @@ class ParallelExecutionCoordinator:
         try:
             # Shutdown thread pool
             if self._executor:
-                self._executor.shutdown(wait=True, timeout=timeout)
+                self._executor.shutdown(wait=True)
             
             # Release all emulator resources
             for stream in self.active_streams.values():
