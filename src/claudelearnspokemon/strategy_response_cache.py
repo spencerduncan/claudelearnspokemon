@@ -68,7 +68,7 @@ class ResponseCache:
         self.cleanup_interval = cleanup_interval
 
         self._cache: OrderedDict[str, CacheEntry] = OrderedDict()
-        self._lock = threading.RLock()  # Reentrant lock for nested operations
+        self._lock = threading.Lock()  # Simple lock for better performance (Issue #190)
         self._metrics = {
             "hits": 0,
             "misses": 0,
@@ -247,14 +247,16 @@ class ResponseCache:
                 expired_keys = []
                 current_time = time.time()
 
-                for key, entry in self._cache.items():
+                for key, entry in list(self._cache.items()):  # Safe iteration snapshot (Issue #239)
                     if (current_time - entry.created_at) > entry.ttl_seconds:
                         expired_keys.append(key)
 
                 # Remove expired entries
                 for key in expired_keys:
-                    del self._cache[key]
-                    self._metrics["ttl_evictions"] += 1
+                    if key in self._cache:  # TOCTOU protection (Issue #239)
+                        del self._cache[key]
+                        self._metrics["ttl_evictions"] += 1
+                        self._metrics["evictions"] += 1  # Fix: Update total evictions counter
 
                 if expired_keys:
                     logger.debug(f"Cleanup removed {len(expired_keys)} expired entries")
