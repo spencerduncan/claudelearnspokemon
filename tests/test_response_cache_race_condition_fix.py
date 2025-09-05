@@ -125,3 +125,73 @@ class TestResponseCacheRaceConditionFix:
         assert results["toctou_errors"] == 0, f"TOCTOU vulnerabilities detected: {results['toctou_errors']}"
         assert results["operations"] > 1000, "Insufficient TOCTOU test operations"
         assert cache.get_stats()["cleanup_runs"] > 5, "Cleanup should run multiple times during test"
+
+    def test_thread_lifecycle_management(self):
+        """Test that background threads are properly cleaned up to prevent resource leaks."""
+        import threading
+        import gc
+        
+        initial_thread_count = threading.active_count()
+        
+        # Create multiple caches
+        caches = []
+        for i in range(5):
+            cache = ResponseCache(max_size=10, default_ttl=0.1, cleanup_interval=0.05)
+            caches.append(cache)
+            time.sleep(0.02)  # Let threads start
+        
+        # Verify threads were created
+        peak_thread_count = threading.active_count()
+        assert peak_thread_count > initial_thread_count, "Background threads should be created"
+        
+        # Explicitly shutdown all caches
+        for cache in caches:
+            cache.shutdown()
+        
+        # Clean up references
+        del caches
+        gc.collect()
+        time.sleep(0.2)  # Let cleanup complete
+        
+        # Verify no thread leaks
+        final_thread_count = threading.active_count()
+        assert final_thread_count == initial_thread_count, f"Thread leak detected: {final_thread_count - initial_thread_count} threads"
+
+    def test_shutdown_idempotency(self):
+        """Test that calling shutdown() multiple times is safe."""
+        cache = ResponseCache(max_size=5, default_ttl=0.1, cleanup_interval=0.05)
+        time.sleep(0.1)  # Let thread start
+        
+        # Should be able to call shutdown multiple times without error
+        cache.shutdown()
+        cache.shutdown()
+        cache.shutdown()
+        
+        # Verify thread is stopped
+        assert not cache._cleanup_thread.is_alive(), "Thread should be stopped after shutdown"
+
+    def test_operations_after_shutdown(self):
+        """Test that cache operations work correctly after shutdown (without background cleanup)."""
+        cache = ResponseCache(max_size=5, default_ttl=1.0, cleanup_interval=0.1)
+        
+        # Add some data
+        response = StrategyResponse(
+            strategy_id="test_after_shutdown",
+            experiments=[],
+            strategic_insights=["test"],
+            next_checkpoints=["test"]
+        )
+        cache.put("test_key", response)
+        
+        # Shutdown
+        cache.shutdown()
+        
+        # Should still be able to get data (just no automatic TTL cleanup)
+        retrieved = cache.get("test_key")
+        assert retrieved is not None, "Should be able to get data after shutdown"
+        assert retrieved.strategy_id == "test_after_shutdown"
+        
+        # Should still be able to put new data
+        cache.put("new_key", response)
+        new_retrieved = cache.get("new_key") 
+        assert new_retrieved is not None, "Should be able to put/get new data after shutdown"

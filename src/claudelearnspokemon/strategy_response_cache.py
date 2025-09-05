@@ -47,6 +47,15 @@ class ResponseCache:
 
     Designed for production use with performance monitoring,
     bounded memory usage, and automatic cleanup.
+    
+    Important: Call shutdown() when the cache is no longer needed
+    to prevent thread leaks. The background cleanup thread will
+    continue running until explicitly stopped.
+    
+    Example:
+        cache = ResponseCache(max_size=100)
+        # ... use cache ...
+        cache.shutdown()  # Important: prevents thread leak
     """
 
     def __init__(
@@ -69,6 +78,7 @@ class ResponseCache:
 
         self._cache: OrderedDict[str, CacheEntry] = OrderedDict()
         self._lock = threading.Lock()  # Simple lock for better performance (Issue #190)
+        self._shutdown_event = threading.Event()  # Signal for clean shutdown
         self._metrics = {
             "hits": 0,
             "misses": 0,
@@ -228,17 +238,51 @@ class ResponseCache:
                 "cleanup_runs": self._metrics["cleanup_runs"],
             }
 
+    def shutdown(self) -> None:
+        """
+        Gracefully shutdown the cache and background thread.
+        
+        This method should be called when the cache is no longer needed
+        to ensure proper resource cleanup and prevent thread leaks.
+        """
+        logger.debug("Shutting down ResponseCache...")
+        self._shutdown_event.set()
+        
+        if self._cleanup_thread.is_alive():
+            # Give the thread a reasonable time to finish
+            self._cleanup_thread.join(timeout=1.0)
+            if self._cleanup_thread.is_alive():
+                logger.warning("Background cleanup thread did not shutdown gracefully")
+        
+        logger.debug("ResponseCache shutdown complete")
+
+    def __del__(self) -> None:
+        """Ensure cleanup thread is stopped when cache is destroyed."""
+        try:
+            self.shutdown()
+        except Exception:
+            # Avoid raising exceptions in __del__
+            pass
+
     def _background_cleanup(self) -> None:
         """Background thread for periodic TTL cleanup."""
-        while True:
+        while not self._shutdown_event.is_set():
             try:
-                time.sleep(self.cleanup_interval)
-                self._cleanup_expired_entries()
+                # Use event.wait() instead of time.sleep() for responsive shutdown
+                if self._shutdown_event.wait(timeout=self.cleanup_interval):
+                    # Shutdown was requested
+                    break
+                
+                # Only run cleanup if not shutting down
+                if not self._shutdown_event.is_set():
+                    self._cleanup_expired_entries()
 
             except Exception as e:
                 logger.error(f"Background cleanup error: {str(e)}")
-                # Continue running even if cleanup fails
+                # Continue running even if cleanup fails, but respect shutdown
                 continue
+        
+        logger.debug("Background cleanup thread shutting down")
 
     def _cleanup_expired_entries(self) -> None:
         """Remove expired entries from cache."""
