@@ -256,6 +256,7 @@ class ResponseCache:
                     if key in self._cache:  # TOCTOU protection (Issue #239)
                         del self._cache[key]
                         self._metrics["ttl_evictions"] += 1
+                        self._metrics["evictions"] += 1  # Fix: Update total evictions counter
 
                 if expired_keys:
                     logger.debug(f"Cleanup removed {len(expired_keys)} expired entries")
